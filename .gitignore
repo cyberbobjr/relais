@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+dump.rdb
+
+# RELAIS runtime data
+.relais/logs/
+.relais/storage/
+.relais/redis.sock
+.relais/supervisor.sock
+.relais/supervisord.pid
+
+# Local Claude Code settings
+.claude/settings.local.json

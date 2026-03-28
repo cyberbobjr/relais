@@ -1,0 +1,43 @@
+# Configuration système RELAIS
+# Ce fichier est copié dans ~/.relais/config/config.yaml au premier lancement.
+# Modifiez ~/.relais/config/config.yaml — jamais ce fichier.
+
+# ── Redis ───────────────────────────────────────────────────────────────────
+redis:
+  # Socket Unix local — plus rapide que TCP pour un usage mono-machine
+  unix_socket: ~/.relais/redis.sock
+  # Mot de passe maître Redis (à surcharger dans l'environnement)
+  password: "${REDIS_PASSWORD}"
+
+# ── LiteLLM ─────────────────────────────────────────────────────────────────
+litellm:
+  base_url: "http://127.0.0.1:4000"
+  # Clé maître LiteLLM (voir config/litellm.yaml)
+  api_key: "${LITELLM_MASTER_KEY}"
+
+# ── Journalisation ───────────────────────────────────────────────────────────
+logging:
+  level: INFO
+  # Format : "json" (production) ou "text" (développement)
+  format: text
+  # Rotation quotidienne, 30 jours de rétention
+  rotation: daily
+  retention_days: 30
+
+# ── Profil LLM par défaut ────────────────────────────────────────────────────
+llm:
+  default_profile: default
+
+# ── Sécurité ─────────────────────────────────────────────────────────────────
+security:
+  # Durée de vie des sessions actives (secondes)
+  session_ttl: 86400
+  # Taille maximale d'un message entrant (octets)
+  max_message_size: 8192
+
+# ── Répertoires ──────────────────────────────────────────────────────────────
+paths:
+  backup: ~/.relais/backup
+  media: ~/.relais/media
+  skills: ~/.relais/skills
+  logs: ~/.relais/logs

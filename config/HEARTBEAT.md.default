@@ -1,0 +1,49 @@
+# HEARTBEAT — Tâches planifiées RELAIS
+
+Ce fichier définit les tâches CRON exécutées par Le Veilleur.
+Copié dans `~/.relais/config/HEARTBEAT.md` au premier lancement.
+
+## Format des entrées
+
+```
+- cron: "<expression_cron>"
+  task: "<type_tache>"
+  params: { <clé>: <valeur> }
+  enabled: true|false
+```
+
+## Tâches actives
+
+```yaml
+tasks:
+
+  # Résumé quotidien envoyé chaque matin à 8h
+  - cron: "0 8 * * *"
+    task: daily_summary
+    params:
+      channel: discord
+      llm_profile: default
+      prompt: "Génère un résumé des activités de la journée passée."
+    enabled: true
+
+  # Sauvegarde hebdomadaire chaque lundi à 3h du matin
+  - cron: "0 3 * * 1"
+    task: backup
+    params:
+      destination: ~/.relais/backup/
+      retention_days: 30
+    enabled: true
+
+  # Nettoyage des logs anciens — tous les dimanches à 2h
+  - cron: "0 2 * * 0"
+    task: cleanup_logs
+    params:
+      max_age_days: 30
+    enabled: true
+```
+
+## Notes
+
+- Les expressions CRON suivent la syntaxe standard Unix (5 champs).
+- Le fuseau horaire utilisé est celui de la machine hôte.
+- Désactivez une tâche en passant `enabled: false` sans la supprimer.

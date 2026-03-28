@@ -1,0 +1,28 @@
+# Serveurs MCP (Model Context Protocol) RELAIS
+# Copié dans ~/.relais/config/mcp_servers.yaml au premier lancement.
+# L'Atelier charge ce fichier pour enrichir le contexte LLM avec des outils externes.
+
+mcp_servers:
+
+  # Serveurs globaux — disponibles pour tous les profils LLM
+  global: []
+    # Exemple de serveur MCP Google Calendar :
+    # - name: calendar
+    #   url: "http://127.0.0.1:8100"
+    #   transport: sse
+    #   enabled: false
+
+  # Serveurs contextuels — activés selon le profil ou la commande
+  contextual: []
+    # Exemple de serveur MCP Brave Search :
+    # - name: brave-search
+    #   url: "http://127.0.0.1:8101"
+    #   transport: sse
+    #   enabled: false
+    #   profiles: [precise, coder]
+
+# Timeout pour les appels MCP (secondes)
+timeout: 10
+
+# Nombre maximum d'outils MCP retournés par appel
+max_tools: 20
