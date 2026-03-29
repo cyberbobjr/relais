@@ -2,234 +2,372 @@
 
 RELAIS est une architecture micro-brique pour un assistant IA autonome et modulaire. Chaque brique gère une responsabilité spécifique et communique via Redis Streams, permettant un système flexible, résilient et facilement extensible.
 
-**État:** Phases 1, 2 et 3 implémentées. MVP core loop opérationnel.
-
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      RELAIS MICRO-BRICK PIPELINE                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-[External Channels]
+[Canaux externes]
       │
-      ├──► Discord/Telegram/Slack (Aiguilleur Inbound)
+      ├──► Discord / Telegram / Slack (Aiguilleur entrant)
       │
       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ PORTAIL (Gatekeeper - Consumer)                                              │
-│ ├─ Consomme: relais:messages:incoming:{channel}                             │
-│ ├─ Valide: schema, format                                                    │
-│ ├─ Filtre: reply_policy (DND, vacation, in_meeting)                         │
-│ └─ Publie: relais:tasks                                                      │
-└──────────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ SENTINELLE (Security Guardian - Consumer)                                    │
-│ ├─ Consomme: relais:tasks                                                    │
-│ ├─ Valide: ACL (users.yaml)                                                  │
-│ ├─ Filtre: contenu (guardrails pre/post LLM)                                │
-│ └─ Publie: relais:tasks (ou refuse)                                         │
-└──────────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ ATELIER (Workshop - Transformer)                                             │
-│ ├─ Consomme: relais:tasks                                                    │
-│ ├─ Charge: SOUL (personality), prompts, contexte long-term                  │
-│ ├─ Appelle: LiteLLM (avec retry + DLQ sur failure)                          │
-│ └─ Publie: relais:messages:outgoing:{channel}                               │
-└──────────────────────────────────────────────────────────────────────────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
+┌─────────────────────────────────────────────────────────────┐
+│ PORTAIL — Validation des messages entrants                  │
+│  Valide le format, applique reply_policy (DND, hors-heures) │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ SENTINELLE — Sécurité                                       │
+│  Vérifie les ACL (users.yaml), filtre le contenu            │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ATELIER — Cerveau LLM                                       │
+│  Assemble le contexte (SOUL + mémoire), appelle le LLM,     │
+│  gère les retries et le Dead Letter Queue                   │
+└─────────────────────────────────────────────────────────────┘
           │                   │                   │
           ▼                   ▼                   ▼
-┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-│ SOUVENIR         │ │ AIGUILLEUR       │ │ ARCHIVISTE       │
-│ (Memory Store)   │ │ (Outbound Relay) │ │ (Observer/Logger)│
-│                  │ │                  │ │                  │
-│ ├─ Short-term:   │ │ ├─ Discord       │ │ ├─ JSONL logs    │
-│ │  Redis List    │ │ ├─ Telegram      │ │ ├─ SQLite audit  │
-│ │  (20 msgs)     │ │ ├─ Slack         │ │ └─ Retention     │
-│ │                │ │ ├─ REST API      │ │    (90d/1y/∞)   │
-│ └─ Long-term:    │ │ └─ [extensible]  │ │                  │
-│    SQLite        │ │                  │ │ Logs all streams │
-│    (persistent)  │ │ → External APIs  │ │                  │
-└──────────────────┘ └──────────────────┘ └──────────────────┘
-          │                   │                   │
-          └───────────────────┼───────────────────┘
-                              │
-                              ▼
-                    [External Users]
+  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+  │   SOUVENIR   │   │  AIGUILLEUR  │   │  ARCHIVISTE  │
+  │  Mémoire     │   │  Relay       │   │  Logs        │
+  │  court/long  │   │  Discord     │   │  JSONL +     │
+  │  terme       │   │  Telegram    │   │  SQLite       │
+  └──────────────┘   └──────────────┘   └──────────────┘
+                            │
+                            ▼
+                    [Utilisateurs externes]
 ```
 
 ---
 
-## Inventaire des Briques
-
-### Phase 1-3 (MVP Core Loop) ✅
-
-| Brique | Type | Rôle | Taxonomie |
-|--------|------|------|-----------|
-| **Portail** | consumer | Valide messages entrants, applique reply_policy | Consumer |
-| **Sentinelle** | consumer | Vérifie ACL, filtre contenu | Consumer |
-| **Atelier** | transformer | Assemble SOUL, appelle LLM, gère retries + DLQ | Transformer |
-| **Souvenir** | consumer | Stocke contexte court-terme (Redis) et long-terme (SQLite) | Consumer |
-| **Aiguilleur** | producer | Relaye réponses vers Discord/Telegram/Slack/REST | Producer |
-| **Archiviste** | observer | Enregistre logs JSONL/SQLite, gère rétention | Observer |
-
-### Phase 4 (À venir)
-
-| Brique | Type | Rôle |
-|--------|------|------|
-| **Crieur** | transformer | Push notifications proactives multi-canal |
-| **Veilleur** | producer | Planification CRON (APScheduler) + backup |
-| **Guichet** | transformer | Webhooks entrants HMAC-signés |
-| **Forgeron** | batch | Génération skills automatiques (1×/jour) |
-
-### Phase 6 (Admin & Monitoring)
-
-| Brique | Type | Rôle |
-|--------|------|------|
-| **Vigile** | admin | Hot reload, commandes NLP, contrôle supervisord |
-| **Tisserand** | interceptor | Middleware chain pre/post LLM |
-| **Tableau** | admin + relay | Interface TUI (Textual) bidirectionnelle |
-| **Scrutateur** | observer | Métriques Prometheus/Loki |
-
----
-
-## Démarrage rapide
+## Installation
 
 ### Prérequis
 
 - Python ≥ 3.11
-- Redis (≥ 5.0)
-- uv ou pip
-- supervisord (optionnel, pour orchestration multi-process)
+- Redis ≥ 5.0
+- [`uv`](https://docs.astral.sh/uv/) (recommandé) ou `pip`
+- Node.js (pour le CLI `claude`) : `npm install -g @anthropic-ai/claude-code`
+- `supervisord` (optionnel, pour l'orchestration multi-processus)
 
-### Installation
+### Étapes
 
 ```bash
 # 1. Cloner le projet
 git clone <repo-url>
 cd relais
 
-# 2. Créer l'environnement
-python -m venv venv
-source venv/bin/activate  # ou `venv\Scripts\activate` sur Windows
+# 2. Installer les dépendances
+uv sync
+# ou : pip install -e .
 
-# 3. Installer les dépendances
-uv pip install -e .
-# ou avec pip
-pip install -e .
-
-# 4. Initialiser les répertoires locaux (~/.relais/)
-# Cette commande crée la structure complète et copie les fichiers par défaut
-# y compris les templates de prompts (whatsapp, telegram, out_of_hours, etc.)
+# 3. Initialiser le répertoire utilisateur (~/.relais/)
+#    Crée la structure et copie tous les fichiers de configuration par défaut
 python -c "from common.init import initialize_user_dir; from pathlib import Path; initialize_user_dir(Path('.'))"
 
-# 5. Appliquer les migrations Souvenir (SQLite)
+# 4. Appliquer les migrations SQLite (Souvenir)
 alembic upgrade head
 
-# 6. Configurer .env
+# 5. Configurer l'environnement
 cp .env.example .env
-# Éditez .env avec vos clés API (OPENROUTER_API_KEY, DISCORD_BOT_TOKEN, etc.)
-```
-
-### Lancer le système (développement)
-
-**Option A : Avec supervisord (recommandé)**
-
-```bash
-supervisord -c supervisord.conf
-supervisorctl status  # Vérifier l'état
-supervisorctl logs portail  # Voir les logs
-supervisorctl restart atelier  # Redémarrer une brique
-```
-
-**Option B : Manuellement (3 terminaux)**
-
-```bash
-# Terminal 1 - Redis
-redis-server config/redis.conf
-
-# Terminal 2 - LiteLLM proxy
-uv run --with "litellm[proxy]" --with backoff \
-  litellm --config config/litellm.yaml --port 4000
-
-# Terminal 3 - Briques (dans l'ordre)
-uv run python portail/main.py     # Terminal 3a
-uv run python sentinelle/main.py  # Terminal 3b
-uv run python atelier/main.py     # Terminal 3c
-uv run python souvenir/main.py    # Terminal 3d
-uv run python aiguilleur/discord/main.py  # Terminal 3e
-uv run python archiviste/main.py  # Terminal 3f
-```
-
-### Vérifier le pipeline
-
-```bash
-# Envoyer un message test via l'API REST (une fois Aiguilleur REST implémenté)
-curl -X POST http://localhost:8000/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_123",
-    "channel": "rest",
-    "text": "Hello RELAIS"
-  }'
-
-# Ou simplement envoyer un message Discord/Telegram mentionnant le bot
+# Éditez .env avec vos clés API
 ```
 
 ---
 
-## Structure de configuration
+## Configuration
 
-### ~/.relais/ (répertoire utilisateur)
+Tous les fichiers de configuration se trouvent dans `~/.relais/config/` après l'initialisation. Ne modifiez jamais les fichiers sous `./config/` directement — ils servent de modèles.
 
-Créé automatiquement au premier lancement via `initialize_user_dir()`, qui copie tous les fichiers par défaut.
+### Résolution de configuration (cascade)
+
+`~/.relais/config/` → `/opt/relais/config/` → `./config/`
+
+Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (utile pour Docker ou multi-instance).
+
+### Structure du répertoire utilisateur
 
 ```
 ~/.relais/
 ├── config/
-│   ├── config.yaml              (copié de config/config.yaml.default)
-│   ├── profiles.yaml            (profils LLM)
-│   ├── users.yaml               (ACL utilisateurs)
-│   ├── reply_policy.yaml        (politique réponse auto)
-│   ├── mcp_servers.yaml         (serveurs MCP globaux)
-│   └── HEARTBEAT.md             (tâches CRON planifiées)
+│   ├── config.yaml          Configuration système principale
+│   ├── litellm.yaml         Modèles LLM et proxy
+│   ├── profiles.yaml        Profils LLM (température, tokens, résilience)
+│   ├── users.yaml           Registre des utilisateurs et ACL
+│   ├── reply_policy.yaml    Politique de réponse automatique
+│   ├── mcp_servers.yaml     Serveurs MCP (outils externes)
+│   └── HEARTBEAT.md         Tâches CRON planifiées
 ├── soul/
-│   ├── SOUL.md                  (personnalité principale)
-│   └── variants/
-│       ├── SOUL_concise.md
-│       └── SOUL_professional.md
-├── prompts/                     (templates de prompts copiés au premier lancement)
-│   ├── whatsapp_default.md
-│   ├── telegram_default.md
-│   ├── out_of_hours.md
-│   ├── vacation.md
-│   └── in_meeting.md
+│   ├── SOUL.md              Personnalité principale de l'assistant
+│   └── variants/            Variantes de personnalité
+├── prompts/                 Templates de prompts par canal et contexte
 ├── storage/
-│   ├── memory.db                (SQLite long-term context, géré par Alembic)
-│   ├── audit.db                 (SQLite audit trail)
-│   └── archive/                 (JSONL logs)
+│   ├── memory.db            Mémoire long-terme (SQLite, géré par Alembic)
+│   └── audit.db             Journal d'audit
 ├── logs/
-├── redis.sock                   (Socket Unix Redis)
-├── supervisor.sock              (Socket supervisord)
-└── supervisord.pid
+└── redis.sock               Socket Unix Redis
 ```
 
-### Résolution de configuration (cascade)
+---
 
-`~/.relais/config/` (utilisateur) → `/opt/relais/config/` (système) → `./config/` (projet)
+### `config.yaml` — Configuration système
 
-Premier fichier trouvé gagne. La variable d'environnement `RELAIS_HOME` surcharge `~/.relais` pour Docker, CI ou multi-instance.
+```yaml
+redis:
+  unix_socket: ~/.relais/redis.sock   # Socket Unix Redis
+  password: "${REDIS_PASSWORD}"
 
-Toutes les briques utilisent `resolve_config_path("fichier.yaml")` depuis `common/config_loader.py`.
-Le stockage persistant (SQLite) utilise `resolve_storage_dir()` → `~/.relais/storage/`.
+litellm:
+  base_url: "http://127.0.0.1:4000"  # URL du proxy LiteLLM
+  api_key: "${LITELLM_MASTER_KEY}"
+
+logging:
+  level: INFO          # DEBUG | INFO | WARNING | ERROR
+  format: text         # "text" (dev) | "json" (production)
+  rotation: daily
+  retention_days: 30
+
+llm:
+  default_profile: default   # Profil utilisé si l'utilisateur n'en a pas de spécifique
+
+security:
+  session_ttl: 86400        # Durée de vie session (secondes)
+  max_message_size: 8192    # Taille max message entrant (octets)
+
+paths:
+  backup: ~/.relais/backup
+  media:  ~/.relais/media
+  skills: ~/.relais/skills
+  logs:   ~/.relais/logs
+```
+
+---
+
+### `litellm.yaml` — Proxy LLM
+
+LiteLLM est un proxy transparent entre les briques et les fournisseurs LLM. Atelier envoie toutes ses requêtes à `ANTHROPIC_BASE_URL` et LiteLLM les route vers le bon backend.
+
+**Lien critique :** le champ `model` dans `profiles.yaml` doit correspondre exactement à un `model_name` ici.
+
+```yaml
+model_list:
+
+  # Modèle local (LM Studio, Ollama, vLLM...)
+  - model_name: mon-modele-local        # ← doit matcher profiles.yaml:model
+    litellm_params:
+      model: mon-modele-local
+      api_base: http://192.168.1.x:1234/v1
+      api_key: lm-studio                # Clé factice requise mais ignorée en local
+
+  # Modèle cloud via OpenRouter
+  - model_name: mistral-small-2603
+    litellm_params:
+      model: openrouter/mistralai/mistral-small-3.1-24b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # Modèle Anthropic direct
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+general_settings:
+  master_key: sk-changeme        # = LITELLM_MASTER_KEY dans .env
+  store_model_usage: false
+  disable_on_error_types:
+    - "RateLimitError"
+
+router_settings:
+  routing_strategy: latency-based-routing   # latency-based-routing | simple-shuffle | least-busy
+  enable_pre_call_checks: true
+```
+
+Pour lancer le proxy manuellement :
+```bash
+uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --port 4000
+```
+
+---
+
+### `profiles.yaml` — Profils LLM
+
+Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est déterminé par `llm.default_profile` (config.yaml) ou par `llm_profile` dans l'entrée de l'utilisateur (users.yaml).
+
+```yaml
+profiles:
+  mon-profil:
+    model: mon-modele-local     # Doit correspondre à un model_name dans litellm.yaml
+    temperature: 0.7            # 0.0 (déterministe) → 1.0 (créatif)
+    max_tokens: 1024
+    stream: false               # true = streaming progressif vers Discord/Telegram
+
+    memory:
+      short_term_messages: 20   # Nb de messages injectés dans le contexte (0 = désactivé)
+
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]  # Délais en secondes entre tentatives
+      fallback_model: null      # Modèle de repli si tous les retries échouent
+
+    # Champs optionnels (subagents)
+    max_turns: 10
+    max_agent_depth: 2          # Profondeur max de récursion des subagents
+    allowed_tools: null         # null = tous les outils autorisés
+    allowed_mcp: null           # null = tous les serveurs MCP autorisés
+    guardrails: []
+    memory_scope: own           # "own" = mémoire par utilisateur | "global" = partagée
+```
+
+**Profils livrés par défaut :**
+
+| Profil | Usage |
+|--------|-------|
+| `default` | Équilibre vitesse/qualité |
+| `fast` | Réponses courtes, latence minimale |
+| `precise` | Raisonnement approfondi, réponses longues |
+| `coder` | Génération et révision de code |
+| `memory_extractor` | Usage interne (Souvenir) — ne pas modifier |
+
+---
+
+### `users.yaml` — Registre des utilisateurs (ACL)
+
+Chargé par la Sentinelle. Détermine si un utilisateur est autorisé et quel profil LLM lui est assigné.
+
+```yaml
+users:
+  usr_mon_utilisateur:
+    display_name: "Prénom Nom"
+    role: user                            # "admin" | "user"
+    channels: ["discord", "telegram"]     # Canaux autorisés ("*" = tous)
+    blocked: false
+    llm_profile: default
+    identifiers:
+      discord: "123456789012345678"       # ID Discord (entier, pas le username)
+      telegram: "987654321"               # chat_id Telegram
+    notes: "Commentaire libre"
+
+default_policy:
+  allow: false                  # false = refus des utilisateurs non enregistrés
+  llm_profile: fast
+  max_messages_per_hour: 10
+```
+
+**Rôles :**
+- `admin` : accès à tous les canaux, toutes les commandes, guardrails désactivés
+- `user` : accès limité aux canaux déclarés, guardrails actifs
+
+> `usr_system` est un compte interne utilisé par les briques — ne pas supprimer.
+
+---
+
+### `reply_policy.yaml` — Politique de réponse automatique
+
+Chargé par le Portail. Détermine si un message entrant doit être traité ou ignoré.
+
+```yaml
+reply_policy:
+  enabled: true
+
+  channels:
+    - discord
+    # - telegram
+    # - whatsapp
+
+  blocked_users: []             # user_id refusés sans réponse
+
+  debounce_seconds: 2           # Anti-flood : délai min entre deux réponses au même utilisateur
+
+  out_of_hours:
+    enabled: false
+    active_start: "08:00"       # Plage active (HH:MM)
+    active_end: "22:00"
+    timezone: "Europe/Paris"    # Fuseau tz database
+    prompt_file: "prompts/out_of_hours.md"
+
+  ignored_prefixes:
+    - "!"                       # Commandes bots tiers
+    - "/"                       # Slash commands
+
+  min_message_length: 2
+```
+
+---
+
+### `mcp_servers.yaml` — Serveurs MCP
+
+Serveurs [Model Context Protocol](https://modelcontextprotocol.io) chargés par l'Atelier pour enrichir le contexte LLM avec des outils externes.
+
+```yaml
+mcp_servers:
+
+  # Serveurs globaux — disponibles pour tous les profils
+  global:
+    - name: calendar
+      url: "http://127.0.0.1:8100"
+      transport: sse          # "sse" | "stdio" | "http"
+      enabled: true
+
+  # Serveurs contextuels — activés uniquement pour certains profils
+  contextual:
+    - name: brave-search
+      url: "http://127.0.0.1:8101"
+      transport: sse
+      enabled: false
+      profiles: [precise, coder]
+
+timeout: 10     # Timeout des appels MCP (secondes)
+max_tools: 20   # Nb maximum d'outils exposés au LLM par appel
+```
+
+**Transports :**
+- `sse` : Server-Sent Events — serveur HTTP persistant (recommandé pour services distants)
+- `stdio` : processus local via stdin/stdout (recommandé pour outils CLI)
+- `http` : HTTP classique request/response
+
+---
+
+### `HEARTBEAT.md` — Tâches planifiées (CRON)
+
+Chargé par le Veilleur. Définit les tâches automatiques récurrentes.
+
+```yaml
+tasks:
+  - cron: "0 8 * * *"          # Expression CRON standard Unix (5 champs)
+    task: daily_summary
+    params:
+      channel: discord
+      llm_profile: default
+      prompt: "Génère un résumé des activités de la journée passée."
+    enabled: true
+
+  - cron: "0 3 * * 1"
+    task: backup
+    params:
+      destination: ~/.relais/backup/
+      retention_days: 30
+    enabled: true
+
+  - cron: "0 2 * * 0"
+    task: cleanup_logs
+    params:
+      max_age_days: 30
+    enabled: true
+```
+
+**Types de tâches :**
+
+| `task` | Description | Params requis |
+|--------|-------------|---------------|
+| `daily_summary` | Génère et envoie un résumé LLM | `channel`, `llm_profile`, `prompt` |
+| `backup` | Sauvegarde `~/.relais/storage/` | `destination`, `retention_days` |
+| `cleanup_logs` | Supprime les logs anciens | `max_age_days` |
+
+Pour désactiver sans supprimer : `enabled: false`.
 
 ---
 
@@ -237,237 +375,94 @@ Le stockage persistant (SQLite) utilise `resolve_storage_dir()` → `~/.relais/s
 
 | Variable | Description | Exemple |
 |----------|-------------|---------|
-| `OPENROUTER_API_KEY` | Clé API OpenRouter | `sk-or-xxx` |
-| `REDIS_SOCKET_PATH` | Path socket Unix Redis | `./.relais/redis.sock` |
-| `REDIS_PASSWORD` | Mot de passe Redis admin | `xxx` |
-| `REDIS_PASS_PORTAIL` | MDP brique Portail | `xxx` |
-| `REDIS_PASS_SENTINELLE` | MDP brique Sentinelle | `xxx` |
-| `REDIS_PASS_ATELIER` | MDP brique Atelier | `xxx` |
-| `REDIS_PASS_SOUVENIR` | MDP brique Souvenir | `xxx` |
-| `DISCORD_BOT_TOKEN` | Token Discord bot | `xxx` |
-| `TELEGRAM_BOT_TOKEN` | Token Telegram bot | `xxx` |
-| `SLACK_BOT_TOKEN` | Token Slack app | `xoxb-xxx` |
-| `SLACK_SIGNING_SECRET` | Secret signature Slack | `xxx` |
-| `LITELLM_BASE_URL` | URL proxy LiteLLM | `http://localhost:4000/v1` |
-| `LITELLM_MASTER_KEY` | Master key LiteLLM | `sk-changeme` |
-| `LITELLM_MODEL` | Modèle LLM par défaut | `mistral-small-2603` |
-| `RELAIS_HOME` | Chemin alternatif ~/.relais | Optionnel |
+| `ANTHROPIC_BASE_URL` | URL proxy LiteLLM | `http://localhost:4000` |
+| `ANTHROPIC_API_KEY` | LiteLLM master key | `sk-changeme` |
+| `LITELLM_MASTER_KEY` | Même valeur que `general_settings.master_key` dans `litellm.yaml` | `sk-changeme` |
+| `REDIS_SOCKET_PATH` | Path socket Unix Redis | `~/.relais/redis.sock` |
+| `REDIS_PASSWORD` | Mot de passe Redis admin | |
+| `REDIS_PASS_PORTAIL` | Mot de passe brique Portail | |
+| `REDIS_PASS_SENTINELLE` | Mot de passe brique Sentinelle | |
+| `REDIS_PASS_ATELIER` | Mot de passe brique Atelier | |
+| `REDIS_PASS_SOUVENIR` | Mot de passe brique Souvenir | |
+| `DISCORD_BOT_TOKEN` | Token Discord bot | |
+| `TELEGRAM_BOT_TOKEN` | Token Telegram bot | |
+| `OPENROUTER_API_KEY` | Clé OpenRouter | |
+| `RELAIS_HOME` | Chemin alternatif à `~/.relais` | Optionnel |
 
 ---
 
-## Flux de données (Redis Streams)
+## Lancement
 
-### Noms de streams
+### Option A : supervisord (recommandé)
 
-```
-relais:messages:incoming:{channel}   ← Messages entrants (Discord, Telegram, REST)
-relais:tasks                         ← Tâches validées (Portail → Sentinelle → Atelier)
-relais:messages:outgoing:{channel}   ← Messages sortants (Atelier → Aiguilleur)
-relais:tasks:failed                  ← Dead Letter Queue (Atelier sur retry épuisés)
-relais:context:{user_id}             ← Historique utilisateur court-terme (Souvenir)
-relais:events:{brick_name}           ← Événements briques (Pub/Sub)
-relais:notifications:{role}          ← Notifications à diffuser (Crieur)
-relais:push:{urgency}                ← Pushes proactifs (Crieur)
-```
+```bash
+supervisord -c supervisord.conf
 
-### Garanties
+# Vérifier l'état
+supervisorctl status
 
-- **At-least-once delivery** : Chaque message dans un stream est livré ≥ 1 fois
-- **Consumer groups** : Plusieurs instances d'une brique = déduplication automatique
-- **PEL (Pending Entry List)** : Tâches non-ACK reviennent à la file si crash
+# Suivre les logs d'une brique
+supervisorctl tail atelier -f
 
----
-
-## Modules common/ (Phase 1) ✅
-
-| Module | Responsabilité |
-|--------|-----------------|
-| `config_loader.py` | Cascade config (~/.relais/ → /opt/ → ./) |
-| `envelope.py` | Structure message standardisée |
-| `redis_client.py` | Factory AsyncRedis avec ACL |
-| `init.py` | initialize_user_dir() |
-| `shutdown.py` | GracefulShutdown (SIGTERM/SIGINT) |
-| `stream_client.py` | StreamConsumer / StreamProducer |
-| `event_publisher.py` | EventPublisher (Pub/Sub) |
-| `health.py` | health() standard |
-| `markdown_converter.py` | MD → Telegram/Slack/plaintext |
-
----
-
-## Briques implémentées
-
-### Portail (`portail/`)
-
-Gatekeeper entrant. Valide le format, applique reply_policy (DND, vacation, in_meeting), filtre par canal.
-
-**Fichiers clés:**
-- `portail/main.py` — Consumer group "portail"
-- `portail/reply_policy.py` — Chargement reply_policy.yaml
-- `portail/prompt_loader.py` — Chargement prompts utilisateur
-
-**Streams:**
-- Consomme: `relais:messages:incoming:*`
-- Publie: `relais:tasks`
-
----
-
-### Sentinelle (`sentinelle/`)
-
-Gardienne de sécurité. Vérifie ACL (users.yaml), applique guardrails (filtres pre/post-LLM).
-
-**Fichiers clés:**
-- `sentinelle/main.py` — Consumer group "sentinelle"
-- `sentinelle/acl.py` — ACLManager (users.yaml)
-- `sentinelle/guardrails.py` — ContentFilter
-
-**Streams:**
-- Consomme: `relais:tasks`
-- Publie: `relais:tasks` (ou refuse si ACL ko)
-
----
-
-### Atelier (`atelier/`)
-
-Cerveau du système. Assemble SOUL (personnalité), charge contexte long-term, appelle LiteLLM avec retry + DLQ.
-
-**Fichiers clés:**
-- `atelier/main.py` — Consumer group "atelier"
-- `atelier/executor.py` — execute_with_resilience() (retry backoff + DLQ)
-
-**Résilience:**
-- ✅ Retry 3× sur ConnectError/TimeoutException (délais: 2s, 5s, 15s)
-- ✅ Fallback Ollama si LiteLLM down (optionnel)
-- ✅ Dead Letter Queue `relais:tasks:failed` si retries épuisés
-- ✅ XACK conditionnel (jamais sur erreur transiente)
-
-**Streams:**
-- Consomme: `relais:tasks`
-- Publie: `relais:messages:outgoing:{channel}` (succès)
-- Publie: `relais:tasks:failed` (échec après retries)
-
----
-
-### Souvenir (`souvenir/`)
-
-Mémoire hybride du système.
-
-**Fichiers clés:**
-- `souvenir/main.py` — Consumer group "souvenir"
-- `souvenir/context_store.py` — Redis List (court-terme, 20 msgs, TTL 24h)
-- `souvenir/long_term_store.py` — SQLite (persistent)
-
-**Stockage:**
-- Short-term: Redis List `relais:context:{user_id}` (20 dernier messages, TTL 24h)
-- Long-term: SQLite `~/.relais/storage/messages.db` (illimité, queryable)
-
-**Streams:**
-- Consomme: `relais:messages:outgoing:*` (aussi réponses)
-- Écrit: Redis List + SQLite
-
----
-
-### Aiguilleur (`aiguilleur/`)
-
-Relayeur vers canaux externes. Architecture base abstraite (AiguilleurBase) + implémentations par canal.
-
-**Fichiers clés:**
-- `aiguilleur/base.py` — AiguilleurBase ABC
-- `aiguilleur/discord/main.py` — Discord relay (discord.py)
-- `aiguilleur/telegram/main.py` — (Phase 5)
-- `aiguilleur/slack/main.py` — (Phase 5)
-- `aiguilleur/rest/main.py` — REST API relay (Phase 5)
-
-**Contrat AiguilleurBase:**
-```python
-async def receive() -> Envelope  # Reçoit message entrant
-async def send(envelope) -> str  # Envoie message sortant
-def format_for_channel(text) -> str  # Formate texte (MD→Telegram etc)
+# Redémarrer une brique
+supervisorctl restart atelier
 ```
 
-**Streams:**
-- Consomme: `relais:messages:outgoing:{channel}` (sortant)
-- Publie: `relais:messages:incoming:{channel}` (entrant si applicable)
+Wrapper local :
 
----
+```bash
+./supervisor.sh start all
+./supervisor.sh status
+./supervisor.sh restart all
+./supervisor.sh stop all
+```
 
-### Archiviste (`archiviste/`)
+### Option B : manuellement (développement)
 
-Observer pur. Enregistre tous les messages (JSONL + SQLite audit), gère rétention.
+```bash
+# Terminal 1 — Redis
+redis-server config/redis.conf
 
-**Fichiers clés:**
-- `archiviste/main.py` — Consumer group "archiviste"
-- `archiviste/cleanup_retention.py` — CleanupManager (retention policy)
+# Terminal 2 — Proxy LiteLLM
+uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --port 4000
 
-**Rétention:**
-- JSONL: 90 jours
-- SQLite: 1 an
-- Audit: illimité
+# Terminal 3+ — Briques (dans l'ordre)
+uv run python portail/main.py
+uv run python sentinelle/main.py
+uv run python atelier/main.py
+uv run python souvenir/main.py
+uv run python aiguilleur/discord/main.py
+uv run python archiviste/main.py
+```
 
-**Stockage:**
-- `~/.relais/storage/archive/*.jsonl` (JSONL logs par date)
-- `~/.relais/storage/audit.db` (SQLite audit complet)
+### Vérifier le pipeline
 
-**Streams:**
-- Consomme: tous les streams (observe tout)
-- Écrit: JSONL + SQLite
+```bash
+# Inspecter un stream Redis
+redis-cli -s ~/.relais/redis.sock XLEN relais:messages:incoming:discord
+redis-cli -s ~/.relais/redis.sock XRANGE relais:tasks - +
+redis-cli -s ~/.relais/redis.sock XPENDING relais:tasks sentinelle_group
+
+# Suivre les logs JSON
+tail -f ~/.relais/logs/events.jsonl
+```
 
 ---
 
 ## Tests
 
-### Couverture cible
-
-80% minimum (règle projet).
-
-### Lancer les tests
-
 ```bash
+# Lancer tous les tests
+pytest tests/ -v
+
+# Avec couverture
 pytest tests/ -v --cov=common,portail,sentinelle,atelier,souvenir,aiguilleur,archiviste --cov-report=term-missing
 ```
 
-### Types de tests
-
-- **Unit** : Chaque module isolé (+ Redis mock)
-- **Integration** : Pipeline complet (+ Redis réel)
-- **E2E** : Message Discord entrant → Réponse Discord (test client discord.py)
-
 ---
 
-## Contribuer
+## Documentation
 
-Voir [CONTRIBUTING.md](docs/CONTRIBUTING.md) pour:
-- Setup dev (uv, Redis, supervisord)
-- Architecture des tests
-- Checklist ajout nouvelle brique
-- Contrat aiguilleur
-
----
-
-## Documentation supplémentaire
-
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Taxonomie briques, flow diagrammes, dependency map
-- **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** — Dev setup, tests, checklist nouveaux bricks
-- **[plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md](plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md)** — Spécification complète
-- **[.claude/plan/relais-implementation.md](.claude/plan/relais-implementation.md)** — Plan d'implémentation phases (état de progression)
-
----
-
-## Licences
-
-RELAIS — Licence MIT
-
-Dépendances principales:
-- redis-py 5.0+
-- litellm 1.25+
-- httpx 0.27+
-- pydantic 2.9+
-- aiosqlite 0.20+
-
-Voir `pyproject.toml` pour la liste complète.
-
----
-
-**Dernière mise à jour:** 2026-03-28
-
-État: MVP Phase 1-3 ✅ opérationnel
-Prochaines phases: Phase 4 (Crieur, Veilleur, Guichet, Forgeron)
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Architecture technique, flux de données, dependency map
+- **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** — Setup dev, patterns de test, checklist nouvelle brique
+- **[plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md](plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md)** — Expression fonctionnelle complète du projet

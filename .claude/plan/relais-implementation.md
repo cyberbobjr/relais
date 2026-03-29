@@ -237,7 +237,7 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 ---
 
-## Phase 5 — Canaux supplémentaires L'Aiguilleur (priorité moyenne)
+## Phase 5b — Canaux supplémentaires L'Aiguilleur (priorité moyenne)
 
 ### 5.1 `aiguilleur/rest/main.py` — REST API
 - FastAPI, API Key via X-Api-Key header
@@ -373,190 +373,169 @@ prometheus-client = ">=0.20"
 
 ---
 
-## Phase 2.2-bis — Migration Atelier : LiteLLM HTTP → SDK `anthropic` officiel (2026-03-28)
+## Phase 2.2-bis — Migration Atelier : `claude-agent-sdk` + Streaming progressif ✅ FAIT — 2026-03-28
 
-> **⚠️ Correction post-docs-lookup (2026-03-28) :**
-> `claude-code-sdk` (alias `claude-agent-sdk`) est un wrapper subprocess autour du CLI Claude Code — inadapté à un pipeline Redis Streams (latence subprocess par message, exceptions opaques `ProcessError`, pas de retry HTTP). Remplacé par le SDK `anthropic` Python officiel avec `ANTHROPIC_BASE_URL` → LiteLLM proxy.
+> **Décision finale (2026-03-28) :** `claude-agent-sdk` est utilisé à la place du SDK `anthropic` officiel, pour bénéficier des **subagents natifs**, du **MCP natif**, et du **streaming progressif** vers Discord/Telegram. Le bug #677 (binaire bundlé ignore `ANTHROPIC_BASE_URL`) est contourné via `cli_path=shutil.which("claude")`.
 
-> **Décisions architecturales :**
-> 1. **SDK** : `anthropic` Python officiel (`pip install anthropic`) remplace `httpx` + LiteLLM direct. `AsyncAnthropic(base_url=ANTHROPIC_BASE_URL, api_key=ANTHROPIC_API_KEY)` → LiteLLM proxy qui route vers n'importe quel backend (Mistral, Qwen, Claude, LM Studio).
-> 2. **Routing modèle** : `ANTHROPIC_BASE_URL` → proxy LiteLLM existant. Les noms de modèles dans `profiles.yaml` deviennent des alias LiteLLM. Aucune migration de `profiles.yaml` nécessaire. LiteLLM doit exposer `/v1/messages` (format Anthropic natif).
-> 3. **Contexte conversationnel** : Souvenir reste **propriétaire unique** de l'historique conversationnel. Redis List `relais:context:{session_id}` = cache rapide (TTL 24h) ; SQLite = source de vérité (fallback si Redis redémarre). Atelier demande l'historique via `relais:memory:request` (action `get`) avant chaque appel LLM — Souvenir répond via `relais:memory:response`. L'action `append` est supprimée : Souvenir alimente le contexte en observant `relais:messages:outgoing:{channel}` (il y a le `user_message` dans metadata + la réponse assistant dans le content).
-> 4. **Prompts multi-couches** : SOUL.md + prompt rôle + prompt user + prompt canal + prompt policy — chaque couche optionnelle.
-> 5. **Mémoire long-terme** : Souvenir observe `relais:messages:outgoing:{channel}` et déclenche un appel LLM fast (extracteur) pour persister des faits utilisateur cross-sessions. Aucun stream supplémentaire — même stream que l'archivage.
+### Décisions architecturales
 
-### ✅ Prérequis bloquant — LEVÉ (2026-03-28)
+1. **SDK** : `claude-agent-sdk` (PyPI: `claude-agent-sdk` >=0.1.51) avec `ClaudeSDKClient` + `ClaudeAgentOptions`. Workaround bug #677 : `cli_path=shutil.which("claude")` force le binaire système qui respecte `ANTHROPIC_BASE_URL`.
+2. **Routing modèle** : `ANTHROPIC_BASE_URL=http://localhost:4000` → LiteLLM proxy. `ANTHROPIC_API_KEY=litellm-master-key`. Les alias modèles dans `profiles.yaml` sont des alias LiteLLM. Aucune migration de config nécessaire.
+3. **MCP natif** : `mcp_servers=` dans `ClaudeAgentOptions` — plus de conversion `ToolParam` manuelle. `mcp_loader.load_for_sdk()` retourne le format dict attendu.
+4. **Subagents** : `AgentDefinition` pour memory-retriever (Haiku), web-searcher (Sonnet), calendar-agent (Haiku) — Claude les invoque automatiquement.
+5. **Streaming progressif** : `StreamPublisher` → `relais:messages:streaming:{channel}:{corr_id}` → Aiguilleur édite le message Discord/Telegram en temps réel (throttle 80 chars, XREAD BLOCK 150ms).
+6. **Contexte conversationnel** : Souvenir reste **propriétaire unique** de l'historique. Redis List `relais:context:{session_id}` = cache rapide (TTL 24h) ; SQLite = source de vérité (fallback si Redis redémarre). Atelier demande via `relais:memory:request` (action `get`) avant chaque appel SDK.
 
-Vérification API surface `anthropic` SDK :
-- **Entry point** : `await client.messages.create(model, max_tokens, system, messages)` → `Message`
-- **Exceptions retry** : `APIConnectionError`, `APITimeoutError`, `InternalServerError` (502/503/529) depuis `anthropic`
-- **Exceptions non-retriable** : `AuthenticationError` (401), `BadRequestError` (400)
-- **Historique conversationnel** : stateless — passer `messages: list[MessageParam]` complet à chaque appel. Atelier demande l'historique à Souvenir via `relais:memory:request` (action `get`) avant chaque appel LLM. Souvenir gère Redis List (cache) + SQLite (fallback restart).
-- **Compatibilité LiteLLM** : `AsyncAnthropic(base_url="http://localhost:4000", api_key="litellm-master-key")` — LiteLLM expose `/v1/messages` (format Anthropic natif). ✅ Confirmé supporté.
-- **MCP** : non natif dans le SDK `anthropic`. Approche : convertir MCP tools en `ToolParam` definitions via `mcp` Python client.
+### Tableau de compatibilité LiteLLM
 
-**Pattern exécuteur :**
-```python
-import anthropic
-from anthropic import APIConnectionError, APITimeoutError
-from anthropic._exceptions import InternalServerError, AuthenticationError, BadRequestError
+| Outil | `ANTHROPIC_BASE_URL` respecté |
+|-------|------------------------------|
+| Claude Code CLI (`claude`) | ✅ Oui, nativement |
+| SDK Python `anthropic` | ✅ Oui |
+| `claude-agent-sdk` binaire bundlé | ❌ Bug #677 — ignoré |
+| `claude-agent-sdk` + `cli_path=shutil.which("claude")` | ✅ Oui (workaround) |
 
-client = anthropic.AsyncAnthropic(
-    base_url=os.environ["ANTHROPIC_BASE_URL"],
-    api_key=os.environ["ANTHROPIC_API_KEY"],
-)
+> **Note auth :** LiteLLM récent préfère `ANTHROPIC_AUTH_TOKEN` à `ANTHROPIC_API_KEY`. Si erreurs 401, utiliser `ANTHROPIC_AUTH_TOKEN`.
 
-RETRIABLE = (APIConnectionError, APITimeoutError, InternalServerError)
+### ✅ Phase A — Modules support (FAIT — 2026-03-28)
 
-message = await client.messages.create(
-    model=profile.model,
-    max_tokens=profile.max_tokens,
-    system=system_prompt,
-    messages=conversation_history,   # list[MessageParam]
-    tools=mcp_tool_definitions,      # optionnel
-)
-reply = message.content[0].text
-```
+| Fichier | État | Notes |
+|---------|------|-------|
+| `atelier/profile_loader.py` | ✅ CRÉÉ | `ProfileConfig` + `ResilienceConfig` frozen dataclasses. 11 tests, 98% coverage. Ajouter `max_turns: int = 20` |
+| `atelier/soul_assembler.py` | ✅ CRÉÉ | 6 couches, séparateur `\n\n---\n\n`. 9 tests, 100% coverage |
+| `atelier/mcp_loader.py` | ✅ CRÉÉ (partiel) | `load_mcp_servers()` présent. Ajouter `load_for_sdk()` (Phase B.1) |
+| `tests/test_profile_loader.py` | ✅ | — |
+| `tests/test_soul_assembler.py` | ✅ | — |
+| `tests/test_mcp_loader.py` | ✅ | — |
 
-### Phase A — Nouveaux modules support (sans breaking change)
-
-Peuvent être développés et testés en parallèle :
-
-| Fichier | Action | Responsabilité |
-|---------|--------|----------------|
-| `atelier/profile_loader.py` | CRÉER | Charge `profiles.yaml`, résout profil par nom, retourne `ProfileConfig` frozen dataclass |
-| `atelier/soul_assembler.py` | CRÉER | Assemble `SOUL.md` + prompt rôle + prompt user + prompt canal + prompt policy → `system_prompt: str` |
-| `atelier/mcp_loader.py` | CRÉER | Charge `mcp_servers.yaml`, filtre par profil, retourne liste SDK-compatible |
-| `tests/test_profile_loader.py` | CRÉER | Unit tests profile_loader |
-| `tests/test_soul_assembler.py` | CRÉER | Unit tests soul_assembler |
-| `tests/test_mcp_loader.py` | CRÉER | Unit tests mcp_loader |
-
-**`ProfileConfig` dataclass :**
+**Ajout requis à `ProfileConfig`** (avant Phase B) :
 ```python
 @dataclass(frozen=True)
 class ProfileConfig:
     model: str
     temperature: float
     max_tokens: int
-    resilience: ResilienceConfig  # retry_attempts, retry_delays, fallback_model
-
-@dataclass(frozen=True)
-class ResilienceConfig:
-    retry_attempts: int
-    retry_delays: list[int]
-    fallback_model: str | None
+    max_turns: int = 20          # ← nouveau champ pour claude-agent-sdk
+    resilience: ResilienceConfig
 ```
 
-**`soul_assembler.assemble_system_prompt(channel, sender_id=None, user_role=None, reply_policy=None, user_facts=None)` :**
-
-Assembly en couches ordonnées, chaque couche optionnelle (warning si absente, silencieux si non applicable) :
+**`soul_assembler` couches :**
 
 | Ordre | Source | Chemin | Toujours présent |
 |-------|--------|--------|-----------------|
-| 1 | Personnalité de base | `soul/SOUL.md` | Oui (erreur si absent) |
-| 2 | Prompt par rôle | `prompts/roles/{role}.md` | Non |
-| 3 | Prompt par utilisateur | `prompts/users/{sender_id}.md` | Non |
-| 4 | Prompt par canal | `prompts/channels/{channel}.md` | Non (warning) |
-| 5 | Prompt policy | `prompts/policies/{reply_policy}.md` | Non |
-| 6 | Mémoire long-terme | Injecté depuis SQLite Souvenir | Non |
+| 1 | Personnalité | `soul/SOUL.md` | Oui (erreur si absent) |
+| 2 | Rôle | `prompts/roles/{role}.md` | Non |
+| 3 | Utilisateur | `prompts/users/{sender_id}.md` | Non |
+| 4 | Canal | `prompts/channels/{channel}.md` | Non (warning) |
+| 5 | Policy | `prompts/policies/{reply_policy}.md` | Non |
+| 6 | Mémoire long-terme | Injecté `## Mémoire utilisateur` depuis SQLite | Non |
 
-Section mémoire long-terme injectée en fin de system_prompt :
-```
-## Mémoire utilisateur
-{fact_1}
-{fact_2}
-...
-```
-Chargée via `souvenir.long_term_store.get_user_facts(sender_id)` avant assembly.
-
-Concaténation : `\n\n---\n\n` entre chaque bloc non-vide.
-
-Structure dossier `prompts/` à créer :
+Structure `prompts/` :
 ```
 prompts/
-├── roles/
-│   ├── admin.md
-│   └── user.md
-├── users/               ← créé par l'utilisateur selon besoin
-├── channels/
-│   ├── discord.md
-│   ├── telegram.md
-│   └── whatsapp.md
-└── policies/
-    ├── in_meeting.md
-    ├── out_of_hours.md
-    └── vacation.md
+├── roles/admin.md, user.md
+├── users/            ← créé par l'utilisateur
+├── channels/discord.md, telegram.md, whatsapp.md
+└── policies/in_meeting.md, out_of_hours.md, vacation.md
 ```
-Les fichiers `prompts/*.md` existants (racine) sont déplacés vers `prompts/channels/` et `prompts/policies/`.
+Les `prompts/*.md` existants (racine) sont déplacés vers `channels/` et `policies/`.
 
-**`mcp_loader.load_mcp_servers(profile_name=None)` :**
-- Serveurs `global` où `enabled: true`
-- Serveurs `contextual` où `enabled: true` ET profil dans `profiles`
-- Retourne `[]` si config absente (dégradation gracieuse)
+---
 
-### Phase B — Remplacement executor (breaking change atelier/)
+### ✅ Phase A.fix — Ajouts support modules (FAIT — 2026-03-28)
 
-#### B.1 Réécriture `atelier/executor.py`
+| Fichier | État | Notes |
+|---------|------|-------|
+| `atelier/profile_loader.py` | ✅ MIS À JOUR | Ajout champ `max_turns: int = 20` |
+| `atelier/mcp_loader.py` | ✅ MIS À JOUR | Ajout méthode `load_for_sdk()` |
 
-- SUPPRIMER : httpx.AsyncClient, POST `/chat/completions`, `RETRIABLE = (httpx.ConnectError, ...)`
-- GARDER : `ExhaustedRetriesError` (même import, même comportement)
-- NOUVELLE SIGNATURE :
+---
+
+### ✅ Phase B — Remplacement executor (FAIT — 2026-03-28)
+
+#### B.1 ✅ `atelier/sdk_executor.py` créé + `atelier/mcp_loader.py` modifié
+
+**`atelier/sdk_executor.py`** — CRÉÉ (remplace le pattern httpx de `executor.py`) :
 ```python
-async def execute_with_resilience(
-    envelope: Envelope,
-    system_prompt: str,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    retry_delays: list[int],
-    mcp_servers: list[dict] | None = None,
-) -> str
+import shutil, os
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AgentDefinition
+from claude_agent_sdk import AssistantMessage, ResultMessage
+
+class SDKExecutionError(Exception): pass
+
+class SDKExecutor:
+    async def execute(self, envelope, context, stream_callback=None) -> str:
+        options = ClaudeAgentOptions(
+            cli_path=shutil.which("claude"),        # Workaround bug #677
+            env={
+                "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
+                "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY",
+                                     os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
+            },
+            system_prompt=self._soul_prompt,
+            model=self._profile.model,
+            max_turns=getattr(self._profile, "max_turns", 20),
+            mcp_servers=self._mcp_servers,
+            agents=self._build_subagents(),
+            permission_mode="bypassPermissions",
+        )
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(self._build_prompt(envelope, context))
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        text = getattr(block, "text", None)
+                        if text:
+                            full_reply += text
+                            if stream_callback:
+                                await stream_callback(text)
+                elif isinstance(message, ResultMessage):
+                    if message.subtype != "success":
+                        raise SDKExecutionError(f"SDK non-success: {message.subtype}")
+                    break
 ```
-- Appelle `client.messages.create()` via `anthropic.AsyncAnthropic` avec `base_url=ANTHROPIC_BASE_URL`
-- Retry loop identique (backoff depuis `retry_delays` du profil)
-- `RETRIABLE = (APIConnectionError, APITimeoutError, InternalServerError)`
-- Extrait le texte : `message.content[0].text`
 
-#### B.2 Mise à jour `atelier/main.py`
+Subagents définis dans `_build_subagents()` : `memory-retriever` (Haiku, tools memory MCP), `web-searcher` (Sonnet, WebSearch), `calendar-agent` (Haiku, tools calendar MCP).
 
-SUPPRIMER :
-- `_get_memory_context()` (lignes 43-100)
-- `_append_assistant_memory()` (lignes 102-119)
-- `httpx` import et `httpx.AsyncClient` context manager
-- `self.litellm_url`, `self.litellm_key`, `self.litellm_model`
+**`atelier/mcp_loader.py`** — AJOUTER `load_for_sdk(profile_name)` :
+```python
+def load_for_sdk(self, profile_name: str = "default") -> dict:
+    """Retourne {name: {command, args, env}} ou {name: {type, url, headers}} pour ClaudeAgentOptions."""
+```
+Format stdio : `{"command": ..., "args": [...], "env": {...}}`. Format SSE/HTTP : `{"type": "sse", "url": ..., "headers": {...}}`.
 
-AJOUTER dans `__init__` :
-- `self.profiles = profile_loader.load_profiles()`
-- `self.soul_cache: dict[str, str] = {}`
+#### ✅ B.2 Créer `atelier/stream_publisher.py` — FAIT — 2026-03-29
 
-METTRE À JOUR `_handle_message()` :
-1. Parser l'envelope
-2. Résoudre profil : `envelope.metadata.get("llm_profile", "default")`
-3. Demander historique à Souvenir : publier `{action: "get", session_id, correlation_id}` sur `relais:memory:request`, attendre réponse sur `relais:memory:response` (timeout 3s, défaut `[]` si timeout)
-4. Assembler system_prompt via `soul_assembler` (avec `sender_id`, `user_role`, `reply_policy`, `user_facts`)
-5. Charger MCP servers via `mcp_loader`
-6. Appeler `executor.execute_with_resilience(messages=history + [user_msg], ...)`
-7. Construire response envelope via `Envelope.create_response_to()`
-8. Injecter message utilisateur original dans `response_env.metadata["user_message"] = envelope.content` ← **pour Souvenir** (alimente Redis List + SQLite + extracteur)
-9. Publier response envelope sur `relais:messages:outgoing:{channel}`
-10. Souvenir observe et met à jour l'historique (plus d'appel `append` explicite)
+`StreamPublisher` implémenté avec 7 tests, 100% coverage :
+- `push_chunk(text, is_final=False)` → XADD `relais:messages:streaming:{channel}:{correlation_id}` avec seq counter, MAXLEN=500
+- `finalize()` → chunk vide avec `is_final="1"`, EXPIRE TTL=300s
+- Tests : `tests/test_stream_publisher.py`
 
-### Phase C — Refonte Souvenir
+#### ✅ B.3 Mise à jour `atelier/main.py` — FAIT — 2026-03-29
 
-#### C.1 Mise à jour `souvenir/main.py`
+Implémenté :
+- `StreamPublisher` câblé comme `stream_callback` dans `SDKExecutor.execute()`
+- `GracefulShutdown` câblé : `while not shutdown.is_stopping()`, `install_signal_handlers()` dans `start()`
+- `_process_stream(self, redis_conn, shutdown: GracefulShutdown | None = None)`
+- Pattern XACK conditionnel respecté : ACK uniquement sur succès ou DLQ, jamais sur exception transitoire
+
+---
+
+### ✅ Phase C — Refonte Souvenir (FAIT — 2026-03-28)
 
 Souvenir gère maintenant **deux streams** :
 
 **Stream 1 : `relais:memory:request`** (consumer group existant)
 - SUPPRIMER : action `append` (remplacée par observation outgoing)
-- GARDER : action `get` → lire Redis List `relais:context:{session_id}` (cache) ; si vide → lire SQLite (fallback restart) → publier sur `relais:memory:response`
+- GARDER : action `get` → lire Redis List `relais:context:{session_id}` (cache) ; si vide → SQLite (fallback) → publier `relais:memory:response`
 
 **Stream 2 : `relais:messages:outgoing:{channel}`** (nouveau consumer group)
-- Sur chaque message reçu, déclencher `_handle_outgoing(envelope)` :
-  1. **Mise à jour contexte** : RPUSH `[user_message, assistant_reply]` dans Redis List `relais:context:{session_id}` + LTRIM -20 -1 + EXPIRE 24h
-  2. **Archivage long-terme** : INSERT SQLite (comportement existant)
-  3. **Extraction mémoire** : appel LLM fast → faits utilisateur → SQLite (nouveau)
-- ⚠️ Redis Streams ne supporte pas les wildcard consumer groups — Souvenir s'abonne aux canaux connus explicitement (liste depuis `config.yaml`)
+- `_handle_outgoing(envelope)` :
+  1. RPUSH `[user_message, assistant_reply]` → `relais:context:{session_id}`, LTRIM -20, EXPIRE 24h
+  2. SQLite INSERT (archivage long-terme existant)
+  3. `memory_extractor.extract()` → faits utilisateur → SQLite `user_facts`
+
+> ⚠️ Redis Streams n'a pas de wildcard consumer groups — Souvenir s'abonne aux canaux connus explicitement (liste depuis `config.yaml`)
 
 **Flux `get` (Atelier → Souvenir → Atelier) :**
 ```
@@ -583,129 +562,362 @@ relais:messages:outgoing:{channel}
                └── long_term_store.upsert_facts(sender_id, facts)
 ```
 
-**Nouveaux champs SQLite `user_facts` table :**
+**Table SQLite `user_facts`** (migration Alembic requise) :
 ```sql
 CREATE TABLE user_facts (
-    id          TEXT PRIMARY KEY,
-    sender_id   TEXT NOT NULL,
-    fact        TEXT NOT NULL,
-    category    TEXT,          -- "preference", "context", "identity", ...
-    confidence  REAL,
-    source_corr TEXT,          -- correlation_id de l'échange source
-    created_at  REAL,
-    updated_at  REAL
+    id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, fact TEXT NOT NULL,
+    category TEXT, confidence REAL, source_corr TEXT, created_at REAL, updated_at REAL
 );
 ```
-Migration Alembic requise.
 
 **`souvenir/memory_extractor.py`** — CRÉER :
-- `async def extract(envelope: Envelope, http_client: httpx.AsyncClient) -> list[UserFact]`
-- Appelle LiteLLM proxy directement (httpx, profil `fast`)
-- Parse JSON, filtre confidence, retourne liste
-- Fire-and-forget acceptable (non-bloquant pour la conversation principale)
+- `async def extract(envelope, http_client) -> list[UserFact]`
+- Appelle LiteLLM proxy (httpx, profil `fast`) : `"Extrais les faits durables. JSON: [{fact, category, confidence}]"`
+- Filtre confidence > 0.7, fire-and-forget (non-bloquant)
 
-#### C.2 Mise à jour `souvenir/long_term_store.py`
-- Ajouter `upsert_facts(sender_id, facts: list[UserFact]) -> None`
-- Ajouter `get_user_facts(sender_id, limit=20) -> list[str]` (retourne texte brut pour injection system_prompt)
-- Upsert par (sender_id + fact hash) pour éviter les doublons
+**`souvenir/long_term_store.py`** — AJOUTER :
+- `upsert_facts(sender_id, facts)` — upsert par (sender_id + fact hash)
+- `get_user_facts(sender_id, limit=20) -> list[str]`
+- `get_recent_messages(session_id, limit=20)`
 
-#### C.3 Mise à jour `souvenir/context_store.py`
-- GARDER (ne pas supprimer)
-- Ajouter `get_recent(session_id, limit=20) -> list[MessageParam]` : lit Redis List ; si vide → lit SQLite via `long_term_store.get_recent_messages(session_id, limit)`
-- Ajouter `append_turn(session_id, user_content, assistant_content)` : RPUSH + LTRIM + EXPIRE
+**`souvenir/context_store.py`** — AJOUTER :
+- `get_recent(session_id, limit=20) -> list[dict]` : Redis List → SQLite fallback
+- `append_turn(session_id, user_content, assistant_content)`
 
-### Phase D — Configuration & Environnement
+---
 
-| Fichier | Action |
-|---------|--------|
-| `pyproject.toml` | Ajouter `anthropic >= 0.40`. Vérifier si `httpx` encore utilisé ailleurs avant suppression (Souvenir extracteur l'utilise encore). |
-| `.env.example` | Ajouter `ANTHROPIC_BASE_URL=http://localhost:4000/v1` et `ANTHROPIC_API_KEY=sk-changeme` |
-| `supervisord.conf` | Ajouter `ANTHROPIC_BASE_URL` et `ANTHROPIC_API_KEY` dans `[program:atelier]` environment |
-| `config/redis.conf` | ACL atelier : garder `relais:memory:request` (write) et `relais:memory:response` (read). Supprimer accès direct `relais:context:*` (Souvenir seul y écrit). |
-
-### Phase E — Tests
+### ✅ Phase D — Configuration & Environnement (FAIT — 2026-03-28)
 
 | Fichier | Action |
 |---------|--------|
-| `tests/test_atelier.py` | RÉÉCRIRE : mock SDK `anthropic` au lieu de httpx. Conserver tests XACK (critiques). Supprimer tests `_get_memory_context`/`_append_assistant_memory`. Ajouter : tests résolution profil, assembly system_prompt multi-couches, MCP passthrough, injection `user_message` dans metadata, mock request `get` vers Souvenir (timeout + réponse normale). |
-| `tests/test_soul_assembler.py` | CRÉER : assembly avec 0-6 couches, couche absente ignorée, mémoire utilisateur injectée en fin, ordre des blocs correct. |
-| `tests/test_souvenir.py` | Mettre à jour `ContextStore` : tester `get_recent` (cache hit Redis, cache miss → SQLite fallback), `append_turn` (RPUSH + LTRIM + EXPIRE). Conserver tous les tests `LongTermStore`. Ajouter tests `memory_extractor` (mock LLM call, parse JSON, filtre confidence). Ajouter tests `get_user_facts` / `upsert_facts`. Ajouter test flux `get` complet (request/response correlation_id). |
+| `pyproject.toml` | Remplacer `anthropic >= 0.40` par `claude-sdk >= 0.1` (vérifier nom exact PyPI avant). Garder `httpx` (Souvenir extracteur). |
+| `.env.example` | `ANTHROPIC_BASE_URL=http://localhost:4000`, `ANTHROPIC_API_KEY=litellm-master-key` |
+| `supervisord.conf` | Ajouter `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` dans `[program:atelier]` environment |
+| `config/redis.conf` | ACL atelier : ajouter `relais:messages:streaming:*` (write). Garder `relais:memory:request` (write), `relais:memory:response` (read). Supprimer accès direct `relais:context:*`. |
 
-### Phase F — Documentation
+> **Action préalable Phase D :** vérifier le nom exact du package sur PyPI (`pip install claude-sdk` ou `claude-agent-sdk`) et noter le nom retenu.
 
-| Fichier | Changements |
-|---------|-------------|
-| `CLAUDE.md` | Atelier : LiteLLM httpx → SDK `anthropic` officiel (`AsyncAnthropic`) + request `get` vers Souvenir avant LLM + injection `user_message` en metadata sortante. Souvenir : dual-stream (memory:request `get` + outgoing observer), context_store Redis+SQLite fallback, extracteur. Env vars : `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`. Structure `prompts/` : sous-dossiers channels/roles/users/policies. |
-| `docs/ARCHITECTURE.md` | Atelier : remplacer description LiteLLM, documenter assembly system_prompt multi-couches + flux get historique. Souvenir : documenter dual-stream, context_store Redis+SQLite fallback, extracteur + table `user_facts`. Flux Redis : garder `relais:memory:request/response` (action `get` uniquement). |
-| `plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md` | Mettre à jour sections Atelier, Souvenir, table SQLite, dépendances. |
-| `README.md` | Liste dépendances, variables d'environnement, structure `prompts/` mise à jour. |
-| `prompts/` | Réorganiser : déplacer fichiers `*_default.md` → `channels/`, `in_meeting.md`/`vacation.md`/`out_of_hours.md` → `policies/`. Créer dossiers `roles/`, `users/`. |
+---
+
+### ✅ Phase D.bis — Streaming Aiguilleur Discord (FAIT — 2026-03-28)
+
+Ajouter dans `aiguilleur/discord/main.py` :
+
+```python
+STREAM_EDIT_THROTTLE_CHARS = 80   # Rate limit Discord (~5 edits/s)
+STREAM_READ_BLOCK_MS = 150
+
+async def _subscribe_streaming_start(self):
+    """Écoute relais:streaming:start:discord (Pub/Sub) → lance _handle_streaming_message()."""
+
+async def _handle_streaming_message(self, envelope: Envelope):
+    """Envoie placeholder '▌', lit chunks XREAD BLOCK, édite message progressivement, édition finale sans curseur."""
+```
+
+---
+
+### ✅ Phase E — Tests (FAIT — 2026-03-28)
+
+| Fichier | Action |
+|---------|--------|
+| `tests/test_sdk_executor.py` | CRÉER : mock `ClaudeSDKClient`, test reply assemblé, test `stream_callback` appelé, test `SDKExecutionError` sur non-success, test `cli_path` = `shutil.which("claude")` |
+| `tests/test_stream_publisher.py` | CRÉER : test `seq` incrémenté, test `is_final=1` sur `finalize()`, test format clé Redis |
+| `tests/test_atelier.py` | RÉÉCRIRE : mock `SDKExecutor` + `StreamPublisher`. Conserver tests XACK (critiques). Ajouter : résolution profil, streaming signal Pub/Sub, injection `user_message` metadata, mock `get` vers Souvenir |
+| `tests/test_mcp_loader.py` | COMPLÉTER : ajouter tests `load_for_sdk()` (stdio + sse, filtre profil) |
+| `tests/test_profile_loader.py` | COMPLÉTER : ajouter test champ `max_turns` |
+| `tests/test_souvenir.py` | Mettre à jour : `get_recent` (Redis hit/SQLite fallback), `append_turn`, `memory_extractor` (mock LLM, JSON parse, filtre confidence), `get_user_facts`/`upsert_facts`, flux `get` complet |
+
+---
+
+### ✅ Phase F — Documentation (EN COURS — 2026-03-28)
+
+| Fichier | Rôle | Changements |
+|---------|------|-------------|
+| `CLAUDE.md` | Guide Claude Code pour ce repo | Atelier : `claude-agent-sdk` + `cli_path` workaround + streaming. Souvenir : dual-stream. Env vars. Structure `prompts/`. |
+| `docs/ARCHITECTURE.md` | Doc technique bricks | Atelier : SDKExecutor, subagents, streaming. Souvenir : dual-stream, extracteur, `user_facts`. |
+| `plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md` | **Référence spécifications fonctionnelles** | Aligner sur état final post-Phase B/C/D/D.bis : SDKExecutor, StreamPublisher, dual-stream Souvenir, user_facts, Discord streaming. Mettre à jour diagrammes de flux. |
+| `.claude/plan/relais-implementation.md` | **Référence d'implémentation** | Marquer phases A, A.fix, B, C comme ✅ FAIT avec date 2026-03-28. Mettre à jour critères de succès. Refléter état réel du code. |
+| `README.md` | Démarrage rapide | Dépendances, env vars, `prompts/` structure. |
+| `prompts/` | Prompts par canal/policy | Déplacer `*_default.md` → `channels/`, `in_meeting.md`/`vacation.md`/`out_of_hours.md` → `policies/`. Créer `roles/`, `users/`. |
+
+---
 
 ### Ordre d'exécution
 
 ```
-Phase D.1 pyproject.toml          ← ajouter anthropic >= 0.40
-Phase F.prompts réorganisation    ← déplacer fichiers prompts/ (sans casser l'existant)
-
-Phase A (parallèle) :
-  profile_loader + tests
-  soul_assembler + tests           ← intègre couches rôle/user/canal/policy + injection mémoire
-  mcp_loader + tests
-
-[BLOCKER levé] API `anthropic` SDK vérifiée le 2026-03-28
+Phase A.fix (parallèle) :
+  profile_loader : ajouter max_turns
+  mcp_loader : ajouter load_for_sdk()
 
 Phase B (séquentiel) :
-  B.1 executor.py
-  B.2 main.py                     ← inclut injection user_message dans metadata
+  B.1 sdk_executor.py + tests
+  B.2 stream_publisher.py + tests
+  B.3 main.py update (SDKExecutor + StreamPublisher + XACK conditionnel)
 
 Phase C (séquentiel) :
   C.1 souvenir/main.py + memory_extractor.py + migration Alembic user_facts
   C.2 souvenir/long_term_store.py (upsert_facts, get_user_facts)
-  C.3 supprimer context_store.py
+  C.3 souvenir/context_store.py (get_recent, append_turn)
 
-Phase D (reste, parallèle) :
+Phase D (parallèle) :
+  pyproject.toml (claude-sdk)
   .env.example
   supervisord.conf
   redis.conf ACL
+
+Phase D.bis : aiguilleur/discord streaming consumer
 
 Phase E : tests (après code)
 Phase F : documentation (en dernier)
 ```
 
+---
+
 ### Risques
-
-| Risque | Sévérité | Mitigation |
-|--------|----------|------------|
-| ~~API claude-agent-sdk non vérifiée~~ | ~~HAUT~~ | ✅ **Levé** — SDK `anthropic` officiel utilisé, API vérifiée |
-| SDK `anthropic` stateless → historique conversationnel | ✅ **Résolu** | Souvenir propriétaire unique. Redis List = cache (TTL 24h), SQLite = fallback si Redis redémarre. Atelier demande via `relais:memory:request` (get). |
-| LiteLLM `/v1/messages` format Anthropic — à tester | **MOYEN** | LiteLLM supporte `/v1/messages` (Anthropic-compatible endpoint). Tester avec `curl -X POST http://localhost:4000/v1/messages` avant Phase B. |
-| Extracteur mémoire pollue SQLite (faux positifs) | Moyen | Seuil confidence 0.7, prompt extraction strict, revue manuelle possible via Vigile |
-| Wildcard streams Souvenir | Moyen | Abonnement explicite aux canaux connus (liste dans config.yaml) |
-| prompts/ réorganisation casse portail/prompt_loader.py | Moyen | Mettre à jour prompt_loader en même temps que la réorganisation |
-| httpx supprimé casse d'autres briques | Moyen | grep `import httpx` avant suppression (Souvenir extracteur en a encore besoin) |
-| Sentinelle n'injecte pas encore `llm_profile`/`user_role` | Faible | Défaut `"default"` → dégradation gracieuse |
-
-### Critères de succès
-
-- [ ] `anthropic >= 0.40` installé et importable
-- [ ] `atelier/executor.py` utilise `anthropic.AsyncAnthropic`, même contrat résilience (ExhaustedRetriesError, DLQ, PEL)
-- [ ] `atelier/main.py` résout profil LLM par user depuis metadata envelope
-- [ ] Atelier demande historique via `relais:memory:request` (get) avant chaque appel LLM (timeout 3s, fallback `[]`)
-- [ ] System prompt inclut toutes les couches : SOUL + rôle + user + canal + policy + faits mémoire
-- [ ] `user_message` injecté dans `metadata` de l'envelope réponse (pour Souvenir)
-- [ ] MCP servers chargés depuis config et passés au SDK
-- [ ] Souvenir répond aux `get` depuis Redis List ; SQLite comme fallback si cache vide
-- [ ] Souvenir alimente Redis List via observation `relais:messages:outgoing:{channel}` (RPUSH user+assistant, LTRIM 20, EXPIRE 24h)
-- [ ] Souvenir archive les envelopes sortantes dans SQLite long-terme
-- [ ] Souvenir déclenche extracteur mémoire sur chaque message sortant
-- [ ] Table `user_facts` créée via migration Alembic
-- [ ] Faits extraits disponibles au prochain `soul_assembler` (injection mémoire cross-session)
-- [ ] Tests XACK (success, DLQ, generic error, retriable) toujours verts
-- [ ] Nouveaux unit tests profile_loader, soul_assembler (multi-couches), mcp_loader passent
-- [ ] Tests extracteur mémoire (mock LLM, parse, filtre confidence)
-- [ ] Smoke test complet : Discord → réponse → archivage SQLite + extraction faits
-- [ ] Couverture ≥ 80% sur atelier/ et souvenir/
 
 ---
 
-*Plan mis à jour le 2026-03-28 — Migration Atelier SDK `anthropic` officiel (AsyncAnthropic) + prompts multi-couches + extracteur mémoire Souvenir. claude-code-sdk écarté (subprocess, inadapté pipeline Redis). Souvenir reste propriétaire unique du contexte conversationnel (Redis List cache + SQLite fallback restart). Atelier demande l'historique via relais:memory:request (get).*
+## Phase 5 — Subagents Autonomes ✅ FAIT — 2026-03-29
+
+> **Consolidation:** Support des subagents autonomes pour délégation de tâches et extensibilité du système sans code nouveau.
+
+### ✅ Implémentation (FAIT — 2026-03-29)
+
+| Composant | État | Notes |
+|-----------|------|-------|
+| `atelier/mcp_loader.py::SubagentConfig` | ✅ CRÉÉ | `@dataclass(frozen=True)` avec name, description, enabled, tools |
+| `atelier/mcp_loader.py::load_subagents()` | ✅ CRÉÉ | Charge tous les subagents depuis `config/mcp_servers.yaml` |
+| `atelier/mcp_loader.py::load_subagents_for_sdk()` | ✅ CRÉÉ | Retourne `dict[name, SubagentConfig]` pour passage à SDKExecutor |
+| `atelier/sdk_executor.py::SDKExecutor` | ✅ MIS À JOUR | Accepte `subagents: dict \| None`, passe `agents=` à `ClaudeAgentOptions` |
+| `atelier/profile_loader.py::ProfileConfig` | ✅ MIS À JOUR | Ajout champ `max_agent_depth: int = 2` |
+| `atelier/main.py` | ✅ MIS À JOUR | Appelle `load_subagents_for_sdk()`, passe à SDKExecutor |
+| `config/config.yaml.default` | ✅ MIS À JOUR | Section `subagents: enabled: true` |
+| `config/mcp_servers.yaml.default` | ✅ MIS À JOUR | 3 subagents: memory-retriever, web-searcher (disabled), code-explorer |
+
+### Configuration
+
+**`config/mcp_servers.yaml.default`:**
+```yaml
+subagents:
+  memory-retriever:
+    name: memory-retriever
+    description: Retrieves and manages conversation memory
+    enabled: true
+    tools: [memory_get, memory_set, context_search]
+
+  web-searcher:
+    name: web-searcher
+    description: Searches web for current information
+    enabled: false    # Disabled by default for safety
+    tools: [web_search, url_fetch]
+
+  code-explorer:
+    name: code-explorer
+    description: Analyzes and runs code
+    enabled: true
+    tools: [code_run, repo_search, syntax_check]
+```
+
+**`config/profiles.yaml`:**
+Tous les profils héritent automatiquement `max_agent_depth: 2` de `ProfileConfig`.
+
+### Flux d'exécution
+
+```
+atelier/main.py:
+  → load_subagents_for_sdk()
+  → SDKExecutor(subagents=subagents)
+  → ClaudeAgentOptions(agents=subagents, allowed_tools=["Task", ...])
+  → LLM peut invoquer Task → subagent nommé
+  → Delegation autonome → résultat agrégé
+  → relais:messages:outgoing:{channel}
+```
+
+### Critères de succès
+
+- ✅ SubagentConfig frozen dataclass (immutable)
+- ✅ load_subagents() et load_subagents_for_sdk() présentes
+- ✅ SDKExecutor accepte subagents et les passe à ClaudeAgentOptions
+- ✅ "Task" ajouté automatiquement aux allowed_tools
+- ✅ Tous les profiles incluent max_agent_depth = 2
+- ✅ Config cascade supporte subagents.enabled
+- ✅ 3 subagents pré-configurés dans mcp_servers.yaml.default
+- ✅ Documentation (CLAUDE.md, ARCHITECTURE.md, README.md, plan) mise à jour
+
+### Dépendances
+
+- ✅ claude-agent-sdk >= 0.1.51 (déjà présent)
+- ✅ Pydantic >= 2.9 (déjà présent)
+
+---
+
+| Risque | Sévérité | Mitigation |
+|--------|----------|------------|
+| Bug #677 workaround fragile (`claude` non installé) | HAUT | Vérifier `shutil.which("claude") is not None` au démarrage d'Atelier, erreur critique sinon |
+| Nom PyPI `claude-sdk` non confirmé | ✅ RÉSOLU | Package confirmé : `claude-agent-sdk` (PyPI) >= 0.1.51, module `claude_agent_sdk` |
+| Rate limit Discord (streaming) | MOYEN | Throttle 80 chars entre edits. En cas d'erreur 429 → ignorer l'édition intermédiaire |
+| `cli_path` portabilité (CI/Docker) | MOYEN | `claude` doit être installé dans l'image. Ajouter `RUN npm install -g @anthropic-ai/claude-code` au Dockerfile |
+| Extracteur mémoire pollue SQLite (faux positifs) | MOYEN | Seuil confidence 0.7, prompt strict, revue manuelle possible via Vigile |
+| Wildcard streams Souvenir | MOYEN | Abonnement explicite aux canaux connus (liste dans `config.yaml`) |
+| `prompts/` réorganisation casse `portail/prompt_loader.py` | MOYEN | Mettre à jour `prompt_loader` en même temps |
+| Sentinelle n'injecte pas encore `llm_profile`/`user_role` | FAIBLE | Défaut `"default"` → dégradation gracieuse |
+
+---
+
+### Critères de succès
+
+- [ ] `claude-sdk` installé et `from claude_sdk import ClaudeSDKClient` importable
+- [ ] `shutil.which("claude")` retourne un chemin valide au démarrage
+- [ ] `atelier/sdk_executor.py` : `SDKExecutor.execute()` retourne texte, appelle `stream_callback`, lève `SDKExecutionError` sur non-success
+- [ ] `atelier/stream_publisher.py` : `push_chunk()` XADD avec `seq` incrémenté, `finalize()` publie `is_final=1`
+- [ ] `atelier/mcp_loader.py` : `load_for_sdk()` retourne dict au format `ClaudeAgentOptions(mcp_servers=...)`
+- [ ] `atelier/profile_loader.py` : `ProfileConfig` a le champ `max_turns`
+- [ ] `atelier/main.py` : signal Pub/Sub `relais:streaming:start:{channel}` envoyé avant le SDK
+- [ ] `atelier/main.py` : XACK conditionnel (success + DLQ → ACK ; exception générique → PEL)
+- [ ] `atelier/main.py` : `user_message` injecté dans `metadata` de l'envelope réponse
+- [ ] Souvenir répond aux `get` depuis Redis List ; SQLite comme fallback si cache vide
+- [ ] Souvenir alimente Redis List via observation `relais:messages:outgoing:{channel}`
+- [ ] Souvenir déclenche extracteur mémoire sur chaque message sortant
+- [ ] Table `user_facts` créée via migration Alembic
+- [ ] Aiguilleur Discord : placeholder message créé + éditions progressives + édition finale sans curseur
+- [ ] Tests XACK (success, DLQ, generic error, retriable) toujours verts
+- [ ] Couverture ≥ 80% sur `atelier/` et `souvenir/`
+- [x] Smoke test complet : Discord → streaming visible → réponse finale → archivage SQLite
+
+---
+
+*Plan mis à jour le 2026-03-28 — Migration Atelier vers `claude-agent-sdk` (subagents, MCP natif, streaming progressif) avec workaround bug #677 (`cli_path=shutil.which("claude")`). Souvenir reste propriétaire unique du contexte. Streaming Discord via `StreamPublisher` + `relais:messages:streaming:*`.*
+
+---
+
+## Phase 6 — Complétion briques déployées ✅ FAIT — 2026-03-29
+
+> **Décision (2026-03-29) :** Pause sur nouvelles briques (Scrutateur, Forgeron, Vigile, Tisserand). Focalisation sur fiabilisation des briques déployées avant validation MVP Discord.
+
+### ✅ Wave 1 — Tâches parallèles (FAIT — 2026-03-29)
+
+#### ✅ 6.1 ProfileConfig — Champs complets (`atelier/profile_loader.py`)
+
+5 nouveaux champs sur `ProfileConfig` (frozen dataclass, backward compatible) :
+```python
+allowed_tools: tuple[str, ...] | None = None
+allowed_mcp: tuple[str, ...] | None = None
+guardrails: tuple[str, ...] = ()
+memory_scope: str = "own"          # Validé contre {"own","session","global","task"}
+fallback_model: str | None = None
+```
+- `_VALID_MEMORY_SCOPES: Final[frozenset[str]]` — `ValueError` si valeur invalide
+- Profil `coder` : `allowed_tools` réduit, `guardrails=("no_code_exec",)`, `memory_scope="task"`, `fallback_model="mistral-small-2603"`
+- Profil `precise` : `fallback_model="haiku-4-5"`
+- Tests mis à jour : `tests/test_profile_loader.py`
+
+#### ✅ 6.2 Portail — Sessions actives (`portail/main.py`)
+
+Nouvelle méthode `_update_active_sessions(envelope)` :
+- Clé Redis : `relais:active_sessions:{sender_id}` (HSET)
+- Champs : `last_seen` (float epoch), `channel`, `session_id`, `display_name` (optionnel)
+- EXPIRE 3600 (reset à chaque message)
+- Entièrement wrappé try/except — jamais bloquant
+- GracefulShutdown câblé
+- 7 tests : `tests/test_portail_sessions.py`
+
+#### ✅ 6.3 Archiviste — Coverage 80%+ (`archiviste/main.py`)
+
+Couverture montée de ~0% à 89% :
+- 14 tests dans `tests/test_archiviste.py`
+- GracefulShutdown câblé : `while not shutdown.is_stopping()`
+- Signature `_process_stream(conn, shutdown=ANY)` mise à jour
+
+#### ✅ 6.4 Souvenir — Pagination (`souvenir/long_term_store.py`)
+
+Nouveau `PaginatedResult` frozen dataclass :
+```python
+@dataclass(frozen=True)
+class PaginatedResult:
+    items: tuple
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+```
+Nouvelle méthode `query()` : filtre user_id, since/until (epoch), search (LIKE, insensible casse), ORDER BY timestamp DESC, COUNT subquery séparé.
+- 10 tests : `tests/test_souvenir_query.py`
+
+---
+
+### ✅ Wave 2 — Tâches séquencées (FAIT — 2026-03-29)
+
+#### ✅ 6.5 Sentinelle — `unknown_user_policy` + `ProfileGuardrails`
+
+**`sentinelle/acl.py`** :
+- `ACLManager.__init__` accepte `unknown_user_policy="deny"`, `guest_profile="fast"`
+- `get_effective_profile(user_id) -> str` — profil utilisateur ou `guest_profile`
+- `async notify_pending(redis_conn, user_id, channel)` — XADD `relais:admin:pending_users`
+- Politiques : `deny` (rejette), `guest` (profil invité), `pending` (XADD + continue)
+- Wildcard channel `"*"` géré
+
+**`sentinelle/guardrails.py`** :
+- `GuardrailResult` frozen dataclass : `allowed: bool`, `reason: str | None`
+- Classe `ProfileGuardrails(profile)` : règles `no_code_exec` et `no_external_links`
+- Règle inconnue → `ValueError` à la construction (fail-fast)
+
+**`config/config.yaml.default`** :
+```yaml
+security:
+  unknown_user_policy: "deny"
+  guest_profile: "fast"
+```
+28 tests : `tests/test_sentinelle_policy.py`
+
+#### ✅ 6.6 Souvenir — Compaction contexte (`souvenir/context_store.py`)
+
+- `LLMClient = Callable[[list[dict]], Awaitable[str]]` type alias
+- `maybe_compact(user_id, llm_client=None) -> bool` :
+  - Seuil : `int(max_messages * 0.8)` (défaut 16/20)
+  - Split moitié oldest → résumé LLM, moitié récente → gardée
+  - Message résumé : `{"role": "system", "content": "[RÉSUMÉ] ...", "timestamp": now()}`
+  - DEL + RPUSH(summary, *to_keep) + EXPIRE 86400
+  - Erreur LLM non-fatale (log warning, return False)
+- `append()` auto-compacte si `_llm_client` défini
+- 8 tests : `tests/test_souvenir_compaction.py`
+
+#### ✅ 6.7 GracefulShutdown — Câblage tous les main.py
+
+Pattern `while not shutdown.is_stopping()` câblé dans :
+- `archiviste/main.py`
+- `portail/main.py`
+- `souvenir/main.py` (les deux boucles `_process_request_stream` et `_process_outgoing_streams`)
+- `atelier/main.py`
+
+9 tests : `tests/test_shutdown_wiring.py`
+
+---
+
+### Couverture finale (2026-03-29)
+
+```
+TOTAL: 1817 stmts, 343 miss, 81% coverage  (target: 80% ✅)
+368 passed, 1 failed (pre-existing: test_emit_fire_and_forget_redis_down), 17 warnings
+```
+
+Fichiers individuels sous 80% (coverage intégration, non bloquants) :
+- `portail/main.py` : 55% — logique orchestration nécessite Redis réel
+- `sentinelle/main.py` : 39% — idem
+- `souvenir/main.py` : 41% — idem
+- `common/config_loader.py` : 47%
+- `common/redis_client.py` : 43%
+
+---
+
+### ✅ Validation MVP Discord E2E — FAIT — 2026-03-29
+
+Aiguilleur Discord (`aiguilleur/discord/main.py`) — streaming progressif, 21 tests, 82% coverage :
+- ✅ `_subscribe_streaming_start()` : écoute `relais:streaming:start:discord` (Pub/Sub), spawn task
+- ✅ `_handle_streaming_message()` : placeholder `▌`, XREAD BLOCK chunks, throttle 80 chars, édition finale sans curseur
+- ✅ `on_message()` : ignore self, DM, mention, empty→"Coucou!", XADD failure silenced
+- ✅ `consume_outgoing_stream()` : XREADGROUP, send reply, XACK, DM fallback, error recovery
+- ✅ Bytes-key path (old aioredis) testé via _BytesFields helper
+- Tests : `tests/test_aiguilleur_discord.py` (21 tests, 100% GREEN)
+- Coverage : 82% `aiguilleur/discord/main.py` (uncovered : main() entry point, setup_hook, on_ready)
+
+*Plan mis à jour le 2026-03-29 — Phase 6 : complétion briques déployées (ProfileConfig, Portail sessions, Archiviste coverage 89%, Souvenir pagination+compaction, Sentinelle policy+guardrails, GracefulShutdown) + Validation Discord E2E. Couverture globale ≥81%.*

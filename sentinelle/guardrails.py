@@ -1,5 +1,7 @@
 """Content guardrails for La Sentinelle — pre/post LLM input/output filtering."""
 
+from __future__ import annotations
+
 import logging
 import re
 from dataclasses import dataclass
@@ -21,8 +23,32 @@ _BUILTIN_INPUT_PATTERNS: list[str] = [
     r"(?i)jailbreak",
 ]
 
+# ---------------------------------------------------------------------------
+# Profile-based guardrail rule definitions
+# ---------------------------------------------------------------------------
 
-@dataclass
+# Patterns that indicate shell/code execution attempts.
+_NO_CODE_EXEC_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"`[^`]+`"),             # backtick execution: `cmd`
+    re.compile(r"\$\("),                # subshell: $(...)
+    re.compile(r"\bsubprocess\b"),      # subprocess module reference
+    re.compile(r"\bos\.system\s*\("),   # os.system(...)
+    re.compile(r"\bexec\s*\("),         # exec(...)
+    re.compile(r"\beval\s*\("),         # eval(...)
+]
+
+# Patterns that match external URLs.
+_NO_EXTERNAL_LINKS_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"https?://"),           # http:// or https://
+]
+
+_PROFILE_RULE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
+    "no_code_exec": _NO_CODE_EXEC_PATTERNS,
+    "no_external_links": _NO_EXTERNAL_LINKS_PATTERNS,
+}
+
+
+@dataclass(frozen=True)
 class GuardrailResult:
     """Result returned by a guardrail check.
 
@@ -191,3 +217,75 @@ class ContentFilter:
             except re.error as exc:
                 logger.warning("Guardrails: invalid %s pattern %r — skipped (%s)", context, raw, exc)
         return compiled
+
+
+# ---------------------------------------------------------------------------
+# Profile-based guardrail checker
+# ---------------------------------------------------------------------------
+
+
+class ProfileGuardrails:
+    """Applies content rules derived from a user's ProfileConfig.
+
+    Each rule in ``profile.guardrails`` maps to a set of pre-compiled regex
+    patterns. Rules are evaluated in order; the first match short-circuits
+    evaluation and returns a rejected ``GuardrailResult``.
+
+    Args:
+        profile: The ProfileConfig whose ``guardrails`` tuple drives rule selection.
+
+    Raises:
+        ValueError: A rule name listed in the profile has no registered patterns.
+    """
+
+    def __init__(self, profile: Any) -> None:
+        """Initialises ProfileGuardrails by resolving rule patterns from the profile.
+
+        Args:
+            profile: A ProfileConfig instance with a ``guardrails`` attribute of
+                type ``tuple[str, ...]``.
+
+        Raises:
+            ValueError: An entry in ``profile.guardrails`` is not a recognised
+                guardrail rule name.
+        """
+        self._rules: list[tuple[str, list[re.Pattern[str]]]] = []
+        for rule_name in profile.guardrails:
+            patterns = _PROFILE_RULE_PATTERNS.get(rule_name)
+            if patterns is None:
+                raise ValueError(
+                    f"ProfileGuardrails: unknown guardrail rule '{rule_name}'. "
+                    f"Supported rules: {sorted(_PROFILE_RULE_PATTERNS)}"
+                )
+            self._rules.append((rule_name, patterns))
+
+    async def check(self, text: str, user_id: str) -> GuardrailResult:
+        """Evaluates all profile-derived guardrail rules against the message text.
+
+        Rules are tested in the order they appear in the profile's ``guardrails``
+        tuple. Evaluation stops at the first rule that matches.
+
+        Args:
+            text: The message content to evaluate.
+            user_id: Sender identifier used for log context.
+
+        Returns:
+            A frozen ``GuardrailResult``. ``allowed=True`` when no rule fires;
+            ``allowed=False`` with a populated ``reason`` on the first match.
+        """
+        for rule_name, patterns in self._rules:
+            for pattern in patterns:
+                if pattern.search(text):
+                    reason = (
+                        f"Message blocked by profile guardrail '{rule_name}' "
+                        f"(pattern: {pattern.pattern!r})"
+                    )
+                    logger.warning(
+                        "ProfileGuardrail [%s] blocked message from %s: %s",
+                        rule_name,
+                        user_id,
+                        reason,
+                    )
+                    return GuardrailResult(allowed=False, reason=reason)
+
+        return GuardrailResult(allowed=True)

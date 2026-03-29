@@ -1,28 +1,52 @@
-# Serveurs MCP (Model Context Protocol) RELAIS
-# Copié dans ~/.relais/config/mcp_servers.yaml au premier lancement.
-# L'Atelier charge ce fichier pour enrichir le contexte LLM avec des outils externes.
+# MCP (Model Context Protocol) server definitions for RELAIS Atelier.
+# Copy to ~/.relais/config/mcp_servers.yaml and enable the servers you need.
+# The Atelier brick loads this file before each LLM call to inject tool configs.
+#
+# timeout  — seconds to wait for an MCP tool response (default: 10)
+# max_tools — maximum number of tool definitions returned per call (default: 20)
 
-mcp_servers:
-
-  # Serveurs globaux — disponibles pour tous les profils LLM
-  global: []
-    # Exemple de serveur MCP Google Calendar :
-    # - name: calendar
-    #   url: "http://127.0.0.1:8100"
-    #   transport: sse
-    #   enabled: false
-
-  # Serveurs contextuels — activés selon le profil ou la commande
-  contextual: []
-    # Exemple de serveur MCP Brave Search :
-    # - name: brave-search
-    #   url: "http://127.0.0.1:8101"
-    #   transport: sse
-    #   enabled: false
-    #   profiles: [precise, coder]
-
-# Timeout pour les appels MCP (secondes)
 timeout: 10
-
-# Nombre maximum d'outils MCP retournés par appel
 max_tools: 20
+
+# Global servers — available for every LLM profile.
+global:
+  - name: filesystem
+    enabled: true
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  - name: web-search
+    enabled: false
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-brave-search"]
+    env:
+      BRAVE_API_KEY: "${BRAVE_API_KEY}"
+
+# Contextual servers — loaded only when the active LLM profile is listed
+# in their 'profiles' array (or when no profile is specified).
+contextual:
+  - name: code-tools
+    enabled: true
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    profiles: [coder, precise]
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+# Subagents — specialized sub-agents invoked by the principal agent via the Task tool.
+# Each subagent inherits the parent model (model: null) and all MCP servers.
+subagents:
+  - name: memory-retriever
+    description: "Retrieve and store user memories, facts, and past interactions"
+    enabled: true
+
+  - name: web-searcher
+    description: "Search the web for current information and documentation"
+    enabled: false
+
+  - name: code-explorer
+    description: "Explore GitHub repositories, search code and issues"
+    enabled: true
+    tools: ["mcp__github__search_code", "mcp__github__search_repositories", "mcp__github__get_file_contents"]

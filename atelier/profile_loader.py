@@ -8,8 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Final
 
 import yaml
+
+_VALID_MEMORY_SCOPES: Final[frozenset[str]] = frozenset(
+    {"global", "own", "sender", "task"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,13 +45,29 @@ class ProfileConfig:
         model: LiteLLM model identifier (e.g. "mistral-small-2603").
         temperature: Sampling temperature controlling response randomness.
         max_tokens: Maximum number of tokens the LLM may generate.
+        max_turns: Maximum number of agentic turns passed to ClaudeAgentOptions.
         resilience: Retry and fallback configuration for transient failures.
+        max_agent_depth: Maximum subagent recursion depth (Phase 5).
+        allowed_tools: Tuple of allowed MCP tool names; None means unrestricted.
+        allowed_mcp: Tuple of allowed MCP server names; None means unrestricted.
+        guardrails: Content guardrail rules (e.g. "no_bash", "no_code_exec").
+        memory_scope: Memory visibility scope — one of "global", "own", "sender",
+            or "task".
+        fallback_model: Model identifier to use when the primary model fails;
+            None means no fallback at the profile level.
     """
 
     model: str
     temperature: float
     max_tokens: int
     resilience: ResilienceConfig
+    max_turns: int = 20
+    max_agent_depth: int = 2
+    allowed_tools: tuple[str, ...] | None = None
+    allowed_mcp: tuple[str, ...] | None = None
+    guardrails: tuple[str, ...] = ()
+    memory_scope: str = "own"
+    fallback_model: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +148,47 @@ def load_profiles(
             retry_delays=[int(d) for d in resilience_raw["retry_delays"]],
             fallback_model=resilience_raw.get("fallback_model") or None,
         )
+        # Parse optional collection fields into tuples (immutability requirement).
+        raw_allowed_tools = cfg.get("allowed_tools")
+        allowed_tools: tuple[str, ...] | None = (
+            tuple(str(t) for t in raw_allowed_tools)
+            if raw_allowed_tools is not None
+            else None
+        )
+
+        raw_allowed_mcp = cfg.get("allowed_mcp")
+        allowed_mcp: tuple[str, ...] | None = (
+            tuple(str(m) for m in raw_allowed_mcp)
+            if raw_allowed_mcp is not None
+            else None
+        )
+
+        raw_guardrails = cfg.get("guardrails")
+        guardrails: tuple[str, ...] = (
+            tuple(str(g) for g in raw_guardrails) if raw_guardrails else ()
+        )
+
+        memory_scope: str = str(cfg.get("memory_scope", "own"))
+        if memory_scope not in _VALID_MEMORY_SCOPES:
+            raise ValueError(
+                f"Invalid memory_scope '{memory_scope}' for profile '{name}'. "
+                f"Must be one of: {sorted(_VALID_MEMORY_SCOPES)}"
+            )
+
+        fallback_model: str | None = cfg.get("fallback_model") or None
+
         result[name] = ProfileConfig(
             model=str(cfg["model"]),
             temperature=float(cfg["temperature"]),
             max_tokens=int(cfg["max_tokens"]),
             resilience=resilience,
+            max_turns=int(cfg["max_turns"]) if "max_turns" in cfg else 20,
+            max_agent_depth=int(cfg["max_agent_depth"]) if "max_agent_depth" in cfg else 2,
+            allowed_tools=allowed_tools,
+            allowed_mcp=allowed_mcp,
+            guardrails=guardrails,
+            memory_scope=memory_scope,
+            fallback_model=fallback_model,
         )
 
     return result

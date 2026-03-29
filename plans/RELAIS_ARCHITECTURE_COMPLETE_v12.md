@@ -16,6 +16,15 @@
 - **Variable `RELAIS_HOME`** — override explicite du répertoire utilisateur
 - **Initialisation au premier lancement** — création automatique de `~/.relais/` avec les fichiers par défaut
 
+### Phase 5 — Subagents autonomes
+
+- **`SubagentConfig`** — dataclass frozen dans `atelier/mcp_loader.py` : champs `name`, `description`, `enabled`, `tools`
+- **`load_subagents_for_sdk()`** — charge les définitions depuis `mcp_servers.yaml`, vérifie le master switch `subagents.enabled` dans `config.yaml`, retourne un `dict[str, AgentDefinition]` prêt pour `ClaudeAgentOptions.agents`
+- **`AgentDefinition`** (claude-agent-sdk) — `prompt` auto-généré depuis `description`, `model=None` (hérite du parent), `mcpServers=None` (hérite tous les MCPs), `maxTurns=max_agent_depth`
+- **`max_agent_depth`** — nouveau champ de `ProfileConfig` (défaut `2`), limite la récursion des sous-agents via `maxTurns` dans chaque `AgentDefinition`
+- **Master switch** — `subagents.enabled: true/false` dans `config.yaml` désactive globalement tous les sous-agents sans toucher au YAML des profils
+- **Sous-agents par défaut** : `memory-retriever` (activé), `web-searcher` (désactivé), `code-explorer` (activé, via GitHub MCP, restriction d'outils)
+
 ---
 
 ## Table des matières
@@ -712,12 +721,12 @@ user sentinelle on >${REDIS_PASS_SENTINELLE}
   +subscribe +publish +xreadgroup +xack +xadd
 
 user atelier    on >${REDIS_PASS_ATELIER}
-  ~relais:tasks ~relais:memory:* ~relais:events:* ~relais:logs
+  ~relais:tasks ~relais:tasks:failed ~relais:memory:* ~relais:messages:streaming:* ~relais:messages:outgoing:* ~relais:events:* ~relais:logs
   +subscribe +publish +xreadgroup +xack +xadd
 
 user souvenir   on >${REDIS_PASS_SOUVENIR}
-  ~relais:memory:* ~relais:sessions:* ~relais:logs
-  +subscribe +publish +get +set +expire +xreadgroup +xack +xadd
+  ~relais:memory:* ~relais:sessions:* ~relais:context:* ~relais:messages:outgoing:* ~relais:logs
+  +subscribe +publish +get +set +expire +rpush +ltrim +lrange +xreadgroup +xack +xadd
 
 user veilleur   on >${REDIS_PASS_VEILLEUR}
   ~relais:tasks ~relais:push:* ~relais:logs
@@ -758,12 +767,19 @@ user default    off
 
 ```
 STREAMS (at-least-once — perte inacceptable)
-  relais:tasks             Portail/Veilleur → Atelier
-  relais:memory:request    Atelier → Souvenir
-  relais:memory:response   Souvenir → Atelier
-  relais:security          Portail ↔ Sentinelle
-  relais:logs              Toutes → Archiviste (audit critique)
-  relais:skills:new        Forgeron → Vigile
+  relais:tasks                          Portail/Veilleur → Atelier
+  relais:tasks:failed                   Atelier → DLQ (SDKExecutionError exhausted)
+  relais:memory:request                 Atelier → Souvenir
+  relais:memory:response                Souvenir → Atelier
+  relais:messages:incoming:{channel}    Aiguilleur → Portail
+  relais:messages:outgoing:{channel}    Atelier → Aiguilleur + Souvenir (observer)
+  relais:messages:streaming:{ch}:{corr} Atelier → Aiguilleur (progressive chunks)
+  relais:security                       Portail ↔ Sentinelle
+  relais:logs                           Toutes → Archiviste (audit critique)
+  relais:skills:new                     Forgeron → Vigile
+
+LISTS (fast cache — volatile)
+  relais:context:{session_id}           Souvenir stores (RPUSH/LTRIM), Atelier reads
 
 PUB/SUB (fire & forget — perte acceptable)
   relais:messages:incoming       Aiguilleur → Portail
@@ -1046,64 +1062,334 @@ channels:
 
 ## 11. L'Atelier — exécution des agents, résilience LLM, sous-agents
 
+**Updated 2026-03-28:** L'Atelier now uses `claude-agent-sdk` instead of direct HTTP calls to LiteLLM. This enables native MCP support, multi-turn conversations with memory, progressive streaming, and automatic subagent invocation.
+
+### Architecture générale
+
+L'Atelier follows this flow for each incoming task:
+
+```
+Incoming envelope
+  ↓
+Parse + load profile (model, max_turns, resilience, mcp_servers)
+  ↓
+Request context from Souvenir (relais:memory:request stream)
+  ↓
+Assemble system prompt (6 layers: SOUL + role + user + channel + policy + user_facts)
+  ↓
+Load MCP servers for profile (mcp_loader.load_for_sdk)
+  ↓
+Execute via claude-agent-sdk (SDKExecutor)
+  ├─ Uses system-installed `claude` CLI (workaround for bug #677)
+  ├─ Env: ANTHROPIC_BASE_URL=http://localhost:4000 (LiteLLM proxy)
+  ├─ Env: ANTHROPIC_API_KEY=litellm-master-key
+  └─ Subagents invoked automatically: memory-retriever, web-searcher, calendar-agent
+  ↓
+If streaming capable (Discord/Telegram): publish chunks to relais:messages:streaming:{channel}:{correlation_id}
+  ↓
+Publish response to relais:messages:outgoing:{channel}
+  ↓
+Conditional XACK (success or DLQ) — never lose messages on retry
+```
+
+### SDK integration — claude-agent-sdk
+
+L'Atelier uses the `claude-agent-sdk` Python library via `atelier/sdk_executor.py`:
+
+```python
+# atelier/sdk_executor.py
+import shutil, os
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AgentDefinition
+
+class SDKExecutor:
+    """Executes LLM tasks via claude-agent-sdk with native MCP, subagents, and streaming."""
+
+    async def execute(
+        self,
+        envelope: Envelope,
+        context: list[dict],
+        stream_callback=None
+    ) -> str:
+        """Execute task via SDK. Returns assembled reply text."""
+        options = ClaudeAgentOptions(
+            cli_path=shutil.which("claude"),        # Workaround bug #677
+            env={
+                "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
+                "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY",
+                                     os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
+            },
+            system_prompt=self._soul_prompt,       # Assembled via soul_assembler
+            model=self._profile.model,             # e.g. "claude-opus-4-6"
+            max_turns=getattr(self._profile, "max_turns", 20),
+            mcp_servers=self._mcp_servers,         # Loaded via mcp_loader.load_for_sdk()
+            agents=self._build_subagents(),        # memory-retriever, web-searcher, calendar-agent
+            permission_mode="bypassPermissions",   # Autonomous operation
+        )
+
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(user_prompt)
+            full_reply = ""
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        text = getattr(block, "text", None)
+                        if text:
+                            full_reply += text
+                            if stream_callback:
+                                await stream_callback(text)  # Progressive streaming
+                elif isinstance(message, ResultMessage):
+                    if message.subtype != "success":
+                        raise SDKExecutionError(f"SDK non-success: {message.subtype}")
+                    break
+        return full_reply
+
+class SDKExecutionError(Exception):
+    """Non-retriable SDK failure (not transient network error)."""
+    pass
+```
+
+**Rationale for `cli_path` workaround:**
+
+The `claude-agent-sdk` binary bundle (bug #677) ignores `ANTHROPIC_BASE_URL` environment variable, routing always to Anthropic API. By setting `cli_path=shutil.which("claude")`, we force the system-installed Claude Code CLI, which **does** respect `ANTHROPIC_BASE_URL`. This allows routing through the LiteLLM proxy at `http://localhost:4000` for model flexibility.
+
+| Tool | `ANTHROPIC_BASE_URL` respected |
+|------|------------------------------|
+| Claude Code CLI (`claude`) | ✅ Oui, nativement |
+| SDK Python `anthropic` | ✅ Oui |
+| `claude-agent-sdk` binaire bundlé | ❌ Bug #677 — ignoré |
+| `claude-agent-sdk` + `cli_path=shutil.which("claude")` | ✅ Oui (workaround) |
+
+### ProfileConfig — champs `max_turns` et `max_agent_depth`
+
+```python
+# atelier/profile_loader.py
+@dataclass(frozen=True)
+class ProfileConfig:
+    model: str
+    temperature: float
+    max_tokens: int
+    resilience: ResilienceConfig
+    max_turns: int = 20          # ← Nombre max de tours agentic (ClaudeAgentOptions)
+    max_agent_depth: int = 2     # ← Profondeur max de récursion des sous-agents
+```
+
+`max_agent_depth` est passé comme `maxTurns` à chaque `AgentDefinition`, limitant ainsi la profondeur d'imbrication agent → sous-agent. La valeur `0` désactive les sous-agents pour ce profil.
+
 ### Résilience LLM — fallback automatique
 
-Si le backend LLM primaire est indisponible, L'Atelier tente 3 fois avec backoff exponentiel, puis bascule automatiquement vers le modèle de fallback défini dans le profil.
+Si le backend LLM primaire (LiteLLM proxy) est indisponible, L'Atelier tente 3 fois avec backoff exponentiel. Après épuisement, le message est envoyé vers la DLQ `relais:tasks:failed`.
 
 ```yaml
 # config/profiles.yaml — section résilience dans chaque profil
-ADMIN:
+default:
   model: claude-opus-4-6
-  base_url: http://localhost:4000
-  llm_resilience:
-    retries: 3
-    backoff_base: 2          # délais : 2s, 4s, 8s
-    fallback_model: llama3.2
-    fallback_base_url: http://localhost:11434  # Ollama local
-    fallback_message: null   # null = pas de message à l'utilisateur
-                             # ou "Service momentanément limité, je continue..."
+  max_turns: 20
+  temperature: 0.7
+  max_tokens: 2048
+  resilience:
+    retry_attempts: 3
+    retry_delays: [2, 5, 15]              # délais en secondes, backoff
+    fallback_model: null                  # N/A avec claude-agent-sdk
 ```
 
+**Pattern XACK dans `atelier/main.py`** (fix pour perte silencieuse de tâches) :
+
 ```python
-# atelier/executor.py
-class AgentExecutor:
+success = False
+try:
+    reply = await sdk_executor.execute(envelope, context, stream_callback)
+    await redis_conn.xadd("relais:messages:outgoing:{channel}", {"payload": response_envelope.to_json()})
+    success = True
+except SDKExecutionError as e:
+    # Non-retriable SDK error → Dead Letter Queue
+    await redis_conn.xadd("relais:tasks:failed", {
+        "payload": envelope.to_json(),
+        "reason": str(e),
+        "attempts": 1,
+        "failed_at": time.time()
+    })
+    success = True  # ACK — message dans DLQ, pas perdu
+except (httpx.ConnectError, httpx.TimeoutException) as e:
+    # Retriable network error — ne pas ACK, laisse en PEL
+    logger.warning(f"LLM unreachable: {e}")
+    pass
+finally:
+    if success:
+        await redis_conn.xack(self.stream_in, self.group_name, message_id)
+```
 
-    async def execute_with_resilience(self, task: AgentTask) -> AgentResult:
-        profile = load_profile(task.profile_id)
-        resilience = profile.llm_resilience
+### Subagents autonomes — architecture Phase 5
 
-        for attempt in range(resilience.retries + 1):
-            try:
-                return await self._execute(task, profile.model, profile.base_url)
-            except LLMUnavailableError as e:
-                if attempt < resilience.retries:
-                    delay = resilience.backoff_base ** attempt
-                    await asyncio.sleep(delay)
-                    await publish_event(self.redis, "relais:events:error", {
-                        "brick": "atelier",
-                        "error_type": "llm_retry",
-                        "attempt": attempt + 1,
-                        "delay_next": resilience.backoff_base ** (attempt + 1),
-                        "correlation_id": task.correlation_id
-                    })
-                else:
-                    # All retries exhausted — switch to fallback
-                    if resilience.fallback_model:
-                        if resilience.fallback_message:
-                            await self._send_partial_response(
-                                resilience.fallback_message, task
-                            )
-                        return await self._execute(
-                            task,
-                            resilience.fallback_model,
-                            resilience.fallback_base_url
-                        )
-                    raise
+L'Atelier charge les sous-agents depuis `mcp_servers.yaml` via `atelier/mcp_loader.py`. Le principal agent les invoque automatiquement via l'outil `Task` du SDK quand il juge opportun de déléguer.
+
+#### SubagentConfig — dataclass de configuration
+
+```python
+# atelier/mcp_loader.py
+@dataclass(frozen=True)
+class SubagentConfig:
+    """Immutable configuration for a single subagent entry.
+
+    Subagents are specialized sub-agents invoked by the principal agent via
+    the Task tool. They inherit the parent model and all MCP servers by default.
+    """
+    name: str
+    description: str
+    enabled: bool = True
+    tools: list[str] | None = None   # None = tous les outils disponibles
+```
+
+#### load_subagents_for_sdk() — conversion vers AgentDefinition
+
+```python
+# atelier/mcp_loader.py
+def load_subagents_for_sdk(
+    config_path: str | Path | None = None,
+    config_yaml_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return subagent configs as an AgentDefinition dict for ClaudeAgentOptions.
+
+    Checks the master switch in config.yaml first — returns {} immediately when
+    subagents.enabled is false. Otherwise calls load_subagents() and converts
+    each SubagentConfig to an AgentDefinition instance.
+    """
+    if not _subagents_master_switch_enabled(resolved_config_yaml):
+        return {}                    # ← Master switch OFF : aucun sous-agent
+
+    subagents = load_subagents(config_path=config_path)
+    result: dict[str, Any] = {}
+    for sub in subagents:
+        prompt = f"You are a specialized subagent. Your role: {sub.description}."
+        result[sub.name] = AgentDefinition(
+            description=sub.description,
+            prompt=prompt,           # Auto-généré depuis description
+            tools=sub.tools,         # None = pas de restriction
+            model=None,              # Hérite du modèle de l'agent parent
+            mcpServers=None,         # Hérite de tous les MCPs du parent
+        )
+    return result
+```
+
+`AgentDefinition` (claude-agent-sdk v0.1.51) :
+
+| Champ | Valeur injectée | Effet |
+|-------|----------------|-------|
+| `description` | chaîne YAML | Texte décrivant le rôle pour le principal |
+| `prompt` | auto-généré depuis `description` | System prompt du sous-agent |
+| `model` | `None` | Hérite du modèle du principal agent |
+| `mcpServers` | `None` | Hérite de tous les MCPs configurés |
+| `tools` | liste ou `None` | Restreint les outils accessibles |
+| `maxTurns` | `profile.max_agent_depth` | Limite la profondeur de récursion |
+
+#### Master switch — config.yaml
+
+```yaml
+# config/config.yaml
+subagents:
+  enabled: true    # false = désactive tous les sous-agents globalement
+```
+
+Quand `enabled: false`, `load_subagents_for_sdk()` retourne `{}` immédiatement, sans lire `mcp_servers.yaml`. Le champ `agents=` de `ClaudeAgentOptions` est alors `None` : l'outil `Task` n'est pas disponible et le principal agent ne peut invoquer aucun sous-agent.
+
+#### Sous-agents par défaut — mcp_servers.yaml
+
+```yaml
+# config/mcp_servers.yaml.default
+subagents:
+  - name: memory-retriever
+    description: "Retrieve and store user memories, facts, and past interactions"
+    enabled: true             # ← Activé par défaut
+
+  - name: web-searcher
+    description: "Search the web for current information and documentation"
+    enabled: false            # ← Désactivé par défaut (nécessite BRAVE_API_KEY)
+
+  - name: code-explorer
+    description: "Explore GitHub repositories, search code and issues"
+    enabled: true             # ← Activé, limité aux outils GitHub
+    tools:
+      - "mcp__github__search_code"
+      - "mcp__github__search_repositories"
+      - "mcp__github__get_file_contents"
+```
+
+#### Intégration dans SDKExecutor
+
+```python
+# atelier/sdk_executor.py
+options = ClaudeAgentOptions(
+    # ...
+    agents=load_subagents_for_sdk(),   # dict[str, AgentDefinition] | None
+    # ...
+)
+```
+
+Quand `agents` est un dict non vide, le SDK expose l'outil `Task` au principal agent. Celui-ci l'invoque librement selon les besoins de la tâche. La profondeur de récursion est limitée par `maxTurns=profile.max_agent_depth` dans chaque `AgentDefinition`.
+
+### Streaming progressif — édition temps réel Discord/Telegram
+
+Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier publie les chunks au fur et à mesure dans `relais:messages:streaming:{channel}:{correlation_id}` :
+
+```python
+# atelier/stream_publisher.py
+class StreamPublisher:
+    """Publishes response chunks for real-time message editing."""
+    STREAM_TTL_SECONDS = 300
+    STREAM_MAXLEN = 500
+
+    async def push_chunk(self, chunk: str, is_final: bool = False):
+        """Append chunk to streaming Redis stream."""
+        await self.redis.xadd(
+            f"relais:messages:streaming:{self.channel}:{self.correlation_id}",
+            {"seq": self.seq, "chunk": chunk, "is_final": int(is_final)},
+            maxlen=self.STREAM_MAXLEN,
+            approximate=True
+        )
+        # Set TTL on the stream
+        await self.redis.expire(
+            f"relais:messages:streaming:{self.channel}:{self.correlation_id}",
+            self.STREAM_TTL_SECONDS
+        )
+        self.seq += 1
+
+    async def finalize(self):
+        """Signal end of response stream."""
+        await self.push_chunk("", is_final=True)
+```
+
+**Aiguilleur (Discord) consomme via:**
+
+```python
+# aiguilleur/discord/main.py
+STREAM_EDIT_THROTTLE_CHARS = 80
+STREAM_READ_BLOCK_MS = 150
+
+async def _handle_streaming_message(self, envelope: Envelope):
+    """Send placeholder, read chunks, edit message progressively."""
+    msg = await self.channel.send("▌")  # Placeholder
+    accumulated = ""
+
+    while True:
+        # XREAD relais:messages:streaming:discord:{correlation_id}
+        chunks = await redis.xread(
+            {f"relais:messages:streaming:discord:{envelope.correlation_id}": "$"},
+            block=self.STREAM_READ_BLOCK_MS
+        )
+        for chunk_data in chunks:
+            if chunk_data.get("is_final"):
+                # Final edit without cursor
+                await msg.edit(content=accumulated)
+                break
+            chunk = chunk_data.get("chunk", "")
+            accumulated += chunk
+            if len(accumulated) >= self.STREAM_EDIT_THROTTLE_CHARS:
+                await msg.edit(content=accumulated + " ▌")
+                await asyncio.sleep(0.2)  # Rate limit edits
 ```
 
 ### Context window compaction
 
-Le Souvenir surveille la taille de l'historique avant de le retourner à L'Atelier. Quand l'historique dépasse 80% du context window du modèle, un LLM léger (Haiku) génère un résumé qui remplace les anciens messages.
+Le Souvenir surveille la taille de l'historique. Quand l'historique dépasse 80% du context window du modèle, un LLM léger (Haiku) génère un résumé qui remplace les anciens messages.
 
 ```python
 # souvenir/context_store.py
@@ -1118,42 +1404,32 @@ class ContextStore:
     }
     COMPACTION_THRESHOLD = 0.80  # 80% du context window
 
-    async def load_with_compaction(
-        self, session_id: str, model: str
-    ) -> tuple[str, bool]:
-        """
-        Returns (history_text, was_compacted).
-        Triggers compaction if history exceeds 80% of model context window.
-        """
-        messages = await self._load_raw(session_id)
-        history_tokens = estimate_tokens(messages)
-        limit = self.CONTEXT_WINDOW_LIMITS.get(model, 100_000)
+    async def get_recent(
+        self, session_id: str, limit: int = 20
+    ) -> list[dict]:
+        """Get recent messages from Redis (cache) with SQLite fallback."""
+        # Try Redis first (fast path)
+        messages = await self.redis_list.get_recent(session_id, limit)
+        if messages:
+            return messages
 
-        if history_tokens > limit * self.COMPACTION_THRESHOLD:
-            summary = await self._compact(messages, session_id)
-            # Persist summary as new starting point in long-term memory
-            await self.long_term.save_summary(session_id, summary)
-            return summary, True
+        # Fallback to SQLite if Redis miss
+        return await self.long_term.get_recent_messages(session_id, limit)
 
-        return format_history(messages), False
-
-    async def _compact(self, messages: list, session_id: str) -> str:
-        """
-        Summarizes history via a lightweight LLM call (Haiku).
-        Keeps the last 5 messages verbatim for continuity.
-        """
-        recent = messages[-5:]
-        to_summarize = messages[:-5]
-
-        summary = await llm_summarize(
-            model="claude-haiku-4-5",
-            content=format_history(to_summarize),
-            instruction="Résume cette conversation en conservant les faits essentiels."
-        )
-
-        # Replace old messages with summary + recent messages
-        await self._replace_history(session_id, summary, recent)
-        return format_history([{"role": "system", "content": f"[Résumé] {summary}"}] + recent)
+    async def append_turn(self, session_id: str, user_msg: str, assistant_msg: str):
+        """Append user+assistant pair to session history."""
+        await self.redis_list.rpush(session_id, {
+            "role": "user",
+            "content": user_msg,
+            "timestamp": time.time()
+        })
+        await self.redis_list.rpush(session_id, {
+            "role": "assistant",
+            "content": assistant_msg,
+            "timestamp": time.time()
+        })
+        await self.redis_list.ltrim(session_id, 0, 19)  # Keep last 20
+        await self.redis_list.expire(session_id, 86400)  # 24h TTL
 ```
 
 ### Limites des sous-agents
@@ -1226,17 +1502,152 @@ await shutdown.wait_for_tasks()
 
 ---
 
-## 12. Le Souvenir — mémoire, compaction, pagination
+## 12. Le Souvenir — mémoire, dual-stream, extraction de faits
+
+**Updated 2026-03-28:** Souvenir now consumes two streams (memory requests from Atelier + observes outgoing messages). Automated memory extraction via fast LLM identifies user facts for long-term storage.
 
 ### Deux niveaux de mémoire
 
 ```
-Mémoire contexte  → Redis (volatile, TTL configurable par canal)
-                    Historique conversationnel avec compaction automatique
-                    Clé : relais:sessions:{session_id}:messages
+Mémoire contexte  → Redis (volatile, TTL 24h)
+                    Cache rapide pour l'historique conversationnel
+                    Clé : relais:context:{session_id} (List Redis)
 
-Mémoire longue    → SQLite (dev) → PostgreSQL (prod) via Alembic
-                    Faits persistés, résumés de session, préférences
+Mémoire longue    → SQLite (dev) → PostgreSQL (prod) via Alembic migrations
+                    Messages archivés + faits utilisateur structurés
+                    Tables: messages, user_facts
+```
+
+### Architecture dual-stream
+
+Souvenir consomme deux streams :
+
+**Stream 1 : `relais:memory:request`** (Atelier → Souvenir)
+- Action `get` : retourner l'historique pour une session donnée
+- Flux : Atelier envoie `{action: "get", session_id, correlation_id}` → Souvenir répond via `relais:memory:response`
+
+**Stream 2 : `relais:messages:outgoing:{channel}`** (observe) — NOUVEAU
+- Observer toutes les réponses assistantes (from all channels)
+- Pour chaque message sortant : extraire les faits utilisateur, archiver en SQLite, mettre en cache Redis
+
+```python
+# souvenir/main.py — dual consumer groups
+consumer_get = StreamConsumer(redis, "relais:memory:request", "souvenir_memory")
+consumer_out = StreamConsumer(redis, f"relais:messages:outgoing:*", "souvenir_outgoing")
+
+while not shutdown.is_set():
+    # Handle memory get requests
+    for msg_id, payload in await consumer_get.read(count=5, block_ms=100):
+        await _handle_get_request(payload)
+        await consumer_get.ack(msg_id)
+
+    # Observe outgoing messages (extract facts, archive)
+    for channel_name in ["discord", "telegram", "rest"]:
+        stream = f"relais:messages:outgoing:{channel_name}"
+        for msg_id, payload in await consumer_out.read(stream, count=1, block_ms=100):
+            await _handle_outgoing(payload)
+            await consumer_out.ack(msg_id)
+```
+
+### Flux mémoire : get (Atelier → Souvenir → Atelier)
+
+```
+1. Atelier → XADD relais:memory:request {action: "get", session_id, correlation_id}
+
+2. Souvenir._handle_get_request():
+   a. Try Redis List relais:context:{session_id} (cache, fast path)
+   b. If miss → SQLite SELECT (fallback on Redis restart)
+   c. XADD relais:memory:response {correlation_id, messages: [...]}
+
+3. Atelier ← XREAD relais:memory:response (timeout 3s, filter by correlation_id)
+```
+
+### Flux mémoire : outgoing (observation + extraction)
+
+```
+1. relais:messages:outgoing:{channel} published by Atelier
+
+2. Souvenir._handle_outgoing():
+   a. Extract user message from envelope.metadata["user_message"]
+   b. Extract assistant reply from envelope.content
+   c. RPUSH relais:context:{session_id} [user_msg, assistant_reply]
+      LTRIM -20, EXPIRE 24h
+   d. long_term_store.archive(envelope)  ← existing (SQLite messages)
+   e. memory_extractor.extract(envelope) ← NEW (identify user facts)
+```
+
+### Memory extraction — identification automatique de faits utilisateur
+
+Nouvelle étape dans `_handle_outgoing` :
+
+```python
+# souvenir/memory_extractor.py — NOUVEAU
+class MemoryExtractor:
+    """Fast LLM call to extract durable user facts from conversation."""
+
+    async def extract(self, envelope: Envelope) -> list[UserFact]:
+        """Analyze user message + assistant reply, extract structured facts."""
+        user_msg = envelope.metadata.get("user_message", "")
+        assistant_reply = envelope.content
+
+        prompt = f"""Analyse cet échange utilisateur-assistant.
+        Extrais les faits durables sur l'utilisateur (préférences, contraintes, objectifs).
+
+        Échange:
+        Utilisateur: {user_msg}
+        Assistant: {assistant_reply}
+
+        Réponds en JSON strict: [{{"fact": "...", "category": "preference|constraint|goal|context", "confidence": 0.0-1.0}}]
+        """
+
+        # Fast LLM call via LiteLLM proxy (profil "fast", Haiku)
+        response = await self.llm_fast.complete(
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=500
+        )
+
+        try:
+            facts = json.loads(response)
+            # Filter confidence > 0.7
+            return [f for f in facts if f.get("confidence", 0) > 0.7]
+        except json.JSONDecodeError:
+            logger.warning(f"Memory extraction parse error: {response}")
+            return []
+
+    async def store(self, sender_id: str, facts: list[UserFact]):
+        """Upsert facts into SQLite user_facts table (fire-and-forget)."""
+        for fact in facts:
+            # Hash (sender_id, fact) for idempotency
+            fact_hash = hashlib.sha256(f"{sender_id}:{fact['fact']}".encode()).hexdigest()
+            await self.long_term.upsert_fact(
+                id=fact_hash,
+                sender_id=sender_id,
+                fact=fact["fact"],
+                category=fact["category"],
+                confidence=fact["confidence"],
+                source_corr=fact.get("source_corr"),
+                created_at=time.time(),
+                updated_at=time.time()
+            )
+```
+
+**Table `user_facts` (Alembic migration):**
+
+```sql
+CREATE TABLE user_facts (
+    id TEXT PRIMARY KEY,
+    sender_id TEXT NOT NULL,
+    fact TEXT NOT NULL,
+    category TEXT,  -- preference, constraint, goal, context
+    confidence REAL,
+    source_corr TEXT,  -- correlation_id du message source
+    created_at REAL,
+    updated_at REAL,
+    INDEX idx_sender_id (sender_id),
+    INDEX idx_category (category)
+);
 ```
 
 ### Scopes mémoire
@@ -1766,11 +2177,59 @@ Dashboards Grafana dans `scrutateur/grafana/dashboards/`.
 
 ---
 
-## 22. SOUL.md — personnalité JARVIS & i18n
+## 22. SOUL.md & prompts — personnalité JARVIS multi-couches
+
+**Updated 2026-03-28:** Prompts are now organized in a structured directory layout (6 layers), assembled by `soul_assembler.py`.
+
+### Structure multi-couches des prompts
+
+L'Atelier assemble le system prompt en 6 couches, séparées par `\n\n---\n\n` :
+
+```
+prompts/
+├── soul/
+│   └── SOUL.md                    ← Layer 1: Core personality (always attempted)
+├── roles/
+│   ├── admin.md                   ← Layer 2: Role-specific instructions
+│   └── user.md
+├── users/                         ← Layer 3: Per-user overrides (created by user)
+│   └── discord_12345_678.md
+├── channels/
+│   ├── discord_default.md         ← Layer 4: Channel formatting rules
+│   ├── telegram_default.md
+│   └── whatsapp_default.md
+└── policies/
+    ├── in_meeting.md              ← Layer 5: Active reply policy overlay
+    ├── out_of_hours.md
+    └── vacation.md
+```
+
+**Layer assembly order :**
+
+| Order | Source | File | Always present |
+|-------|--------|------|---|
+| 1 | Personality | `soul/SOUL.md` | Yes (error if missing) |
+| 2 | Role | `prompts/roles/{role}.md` | No (optional) |
+| 3 | User | `prompts/users/{sender_id}.md` | No (optional) |
+| 4 | Channel | `prompts/channels/{channel}_default.md` | No (warning if missing) |
+| 5 | Policy | `prompts/policies/{reply_policy}.md` | No (optional) |
+| 6 | Memory | Injected user facts from SQLite | No (optional) |
+
+```python
+# atelier/soul_assembler.py
+system_prompt = assemble_system_prompt(
+    prompts_dir="~/.relais/prompts",
+    channel="discord",
+    sender_id="discord:123456789",
+    user_role="admin",
+    reply_policy="in_meeting",
+    user_facts=["Préfère la concision", "Occupé jeudi 14h-15h"]
+)
+```
 
 ### Internationalisation — SOUL.md gère tout
 
-Aucun mécanisme technique supplémentaire. SOUL.md instruite JARVIS d'utiliser la langue de son interlocuteur. Le LLM détecte automatiquement la langue entrante et répond dans la même langue. Les notifications système natives (macOS/Linux) restent en français car elles sont générées par Le Crieur, pas par le LLM.
+SOUL.md instructions à JARVIS d'utiliser la langue de son interlocuteur. Le LLM détecte automatiquement la langue entrante et répond dans la même langue. Les notifications système natives (macOS/Linux) restent en français car elles sont générées par Le Crieur, pas par le LLM.
 
 ```markdown
 # soul/SOUL.md (extrait)
@@ -2426,5 +2885,6 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 ---
 
 *RELAIS — Document d'Architecture v12 — 2026-03-27*
+*Updated 2026-03-28: Phase 2.2-bis — claude-agent-sdk migration, streaming, and memory extraction*
 *"Transmettre avec fiabilité, de toute origine vers toute destination."*
 *— JARVIS, assistant de Benjamin*

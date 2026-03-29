@@ -314,3 +314,317 @@ def test_long_term_store_default_path_respects_relais_home(
     # the env var is sufficient — no module reload required.
     store = LongTermStore()
     assert store._db_path == custom_home / "storage" / "memory.db"
+
+
+# ---------------------------------------------------------------------------
+# ContextStore — new methods: get_recent() and append_turn()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_get_recent_returns_last_n_from_redis(
+    context_store: ContextStore, mock_redis: AsyncMock
+) -> None:
+    """get_recent() doit retourner les N derniers éléments depuis Redis."""
+    all_entries = [
+        json.dumps({"role": "user", "content": f"msg{i}"}).encode()
+        for i in range(5)
+    ]
+    # LRANGE with -3, -1 returns last 3
+    mock_redis.lrange.return_value = all_entries[-3:]
+
+    result = await context_store.get_recent("sess-001", limit=3)
+
+    assert len(result) == 3
+    mock_redis.lrange.assert_awaited_once_with("relais:context:sess-001", -3, -1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_get_recent_returns_empty_list_when_no_cache(
+    context_store: ContextStore, mock_redis: AsyncMock
+) -> None:
+    """get_recent() doit retourner [] quand Redis ne contient rien."""
+    mock_redis.lrange.return_value = []
+
+    result = await context_store.get_recent("sess-empty", limit=20)
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_append_turn_rpush_and_ltrim(
+    context_store: ContextStore, mock_redis: AsyncMock
+) -> None:
+    """append_turn() doit RPUSH 2 items, LTRIM à -20, et EXPIRE 86400."""
+    await context_store.append_turn("sess-002", user_content="hello", assistant_content="hi")
+
+    assert mock_redis.rpush.await_count == 1
+    call_args = mock_redis.rpush.call_args
+    key = call_args[0][0]
+    assert key == "relais:context:sess-002"
+    # 2 items pushed: user turn + assistant turn
+    assert len(call_args[0]) == 3  # key + 2 items
+
+    mock_redis.ltrim.assert_awaited_once_with("relais:context:sess-002", -20, -1)
+    mock_redis.expire.assert_awaited_once_with("relais:context:sess-002", 86400)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_append_turn_format(
+    context_store: ContextStore, mock_redis: AsyncMock
+) -> None:
+    """append_turn() doit stocker chaque tour en JSON {role, content}."""
+    await context_store.append_turn("sess-003", user_content="bonjour", assistant_content="salut")
+
+    call_args = mock_redis.rpush.call_args[0]
+    # call_args = (key, user_turn_json, assistant_turn_json)
+    user_turn = json.loads(call_args[1])
+    assistant_turn = json.loads(call_args[2])
+
+    assert user_turn == {"role": "user", "content": "bonjour"}
+    assert assistant_turn == {"role": "assistant", "content": "salut"}
+
+
+# ---------------------------------------------------------------------------
+# LongTermStore — new methods: upsert_facts(), get_user_facts(),
+#                               get_recent_messages(), archive()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_upsert_facts_inserts_new_facts(long_term_store: LongTermStore) -> None:
+    """upsert_facts() doit insérer de nouveaux faits utilisateur."""
+    facts = [{"fact": "likes Python", "category": "preference", "confidence": 0.9}]
+    await long_term_store.upsert_facts("user_a", facts)
+
+    result = await long_term_store.get_user_facts("user_a")
+    assert "likes Python" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_upsert_facts_updates_existing_fact(long_term_store: LongTermStore) -> None:
+    """upsert_facts() avec le même fait doit mettre à jour sans dupliquer."""
+    facts = [{"fact": "likes Python", "category": "preference", "confidence": 0.9}]
+    await long_term_store.upsert_facts("user_b", facts)
+    # Update confidence
+    facts2 = [{"fact": "likes Python", "category": "preference", "confidence": 0.95}]
+    await long_term_store.upsert_facts("user_b", facts2)
+
+    result = await long_term_store.get_user_facts("user_b")
+    # Should have only one entry, not two
+    assert result.count("likes Python") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_get_user_facts_returns_list_of_strings(long_term_store: LongTermStore) -> None:
+    """get_user_facts() doit retourner une liste de chaînes (les faits)."""
+    facts = [
+        {"fact": "loves cats", "category": "preference", "confidence": 0.8},
+        {"fact": "works remotely", "category": "lifestyle", "confidence": 0.9},
+    ]
+    await long_term_store.upsert_facts("user_c", facts)
+
+    result = await long_term_store.get_user_facts("user_c")
+
+    assert isinstance(result, list)
+    for item in result:
+        assert isinstance(item, str)
+    assert "loves cats" in result
+    assert "works remotely" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_get_recent_messages_returns_last_n(long_term_store: LongTermStore) -> None:
+    """get_recent_messages() doit retourner les N derniers messages depuis SQLite."""
+    from common.envelope import Envelope
+
+    # Archive several messages
+    for i in range(7):
+        env = Envelope(
+            content=f"response {i}",
+            sender_id="user_d",
+            channel="discord",
+            session_id="sess_d",
+            metadata={"user_message": f"question {i}"},
+        )
+        await long_term_store.archive(env)
+
+    result = await long_term_store.get_recent_messages("sess_d", limit=5)
+
+    assert len(result) == 5
+    for item in result:
+        assert "role" in item
+        assert "content" in item
+
+
+# ---------------------------------------------------------------------------
+# Souvenir main — dual-stream handler tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch
+from common.envelope import Envelope
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_souvenir_handles_get_action_from_redis_cache() -> None:
+    """handle_request() avec action=get doit retourner le cache Redis via XADD."""
+    from souvenir.main import Souvenir
+
+    cached_turns = [
+        json.dumps({"role": "user", "content": "hello"}).encode(),
+        json.dumps({"role": "assistant", "content": "hi"}).encode(),
+    ]
+
+    mock_redis = AsyncMock()
+    mock_redis.lrange = AsyncMock(return_value=cached_turns)
+    mock_redis.xadd = AsyncMock()
+
+    souvenir = Souvenir.__new__(Souvenir)
+    souvenir.stream_res = "relais:memory:response"
+    context_store = ContextStore(redis=mock_redis)
+    long_term_store = AsyncMock()
+    long_term_store.get_recent_messages = AsyncMock(return_value=[])
+
+    await souvenir._handle_get_request(
+        redis_conn=mock_redis,
+        context_store=context_store,
+        long_term_store=long_term_store,
+        session_id="sess-x",
+        correlation_id="corr-1",
+    )
+
+    mock_redis.xadd.assert_awaited_once()
+    xadd_call = mock_redis.xadd.call_args
+    stream = xadd_call[0][0]
+    payload = json.loads(xadd_call[0][1]["payload"])
+    assert stream == "relais:memory:response"
+    assert payload["correlation_id"] == "corr-1"
+    assert len(payload["messages"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_souvenir_get_falls_back_to_sqlite_when_cache_empty() -> None:
+    """handle_get_request() doit utiliser SQLite quand Redis cache est vide."""
+    from souvenir.main import Souvenir
+
+    mock_redis = AsyncMock()
+    mock_redis.lrange = AsyncMock(return_value=[])
+    mock_redis.xadd = AsyncMock()
+
+    sqlite_messages = [
+        {"role": "user", "content": "from sqlite"},
+        {"role": "assistant", "content": "sqlite reply"},
+    ]
+
+    souvenir = Souvenir.__new__(Souvenir)
+    souvenir.stream_res = "relais:memory:response"
+    context_store = ContextStore(redis=mock_redis)
+    long_term_store = AsyncMock()
+    long_term_store.get_recent_messages = AsyncMock(return_value=sqlite_messages)
+
+    await souvenir._handle_get_request(
+        redis_conn=mock_redis,
+        context_store=context_store,
+        long_term_store=long_term_store,
+        session_id="sess-y",
+        correlation_id="corr-2",
+    )
+
+    long_term_store.get_recent_messages.assert_awaited_once_with("sess-y", limit=20)
+    xadd_payload = json.loads(mock_redis.xadd.call_args[0][1]["payload"])
+    assert len(xadd_payload["messages"]) == 2
+    assert xadd_payload["messages"][0]["content"] == "from sqlite"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_souvenir_handles_outgoing_appends_context() -> None:
+    """_handle_outgoing() doit appeler append_turn avec user+assistant."""
+    from souvenir.main import Souvenir
+
+    mock_redis = AsyncMock()
+    mock_redis.rpush = AsyncMock()
+    mock_redis.ltrim = AsyncMock()
+    mock_redis.expire = AsyncMock()
+
+    env = Envelope(
+        content="je vais bien",
+        sender_id="user_e",
+        channel="discord",
+        session_id="sess-e",
+        metadata={"user_message": "comment vas-tu?"},
+    )
+
+    souvenir = Souvenir.__new__(Souvenir)
+    context_store = ContextStore(redis=mock_redis)
+    long_term_store = AsyncMock()
+    long_term_store.archive = AsyncMock()
+    long_term_store.upsert_facts = AsyncMock()
+
+    memory_extractor = AsyncMock()
+    memory_extractor.extract = AsyncMock(return_value=[])
+
+    await souvenir._handle_outgoing(
+        envelope=env,
+        context_store=context_store,
+        long_term_store=long_term_store,
+        memory_extractor=memory_extractor,
+    )
+
+    mock_redis.rpush.assert_awaited_once()
+    call_args = mock_redis.rpush.call_args[0]
+    user_turn = json.loads(call_args[1])
+    assistant_turn = json.loads(call_args[2])
+    assert user_turn["content"] == "comment vas-tu?"
+    assert assistant_turn["content"] == "je vais bien"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_souvenir_handles_outgoing_triggers_memory_extraction() -> None:
+    """_handle_outgoing() doit appeler memory_extractor.extract et upsert_facts si faits."""
+    from souvenir.main import Souvenir
+
+    mock_redis = AsyncMock()
+    mock_redis.rpush = AsyncMock()
+    mock_redis.ltrim = AsyncMock()
+    mock_redis.expire = AsyncMock()
+
+    env = Envelope(
+        content="j'adore les chats",
+        sender_id="user_f",
+        channel="telegram",
+        session_id="sess-f",
+        metadata={"user_message": "dis-moi quelque chose"},
+    )
+
+    extracted_facts = [{"fact": "loves cats", "category": "preference", "confidence": 0.9}]
+
+    souvenir = Souvenir.__new__(Souvenir)
+    context_store = ContextStore(redis=mock_redis)
+    long_term_store = AsyncMock()
+    long_term_store.archive = AsyncMock()
+    long_term_store.upsert_facts = AsyncMock()
+
+    memory_extractor = AsyncMock()
+    memory_extractor.extract = AsyncMock(return_value=extracted_facts)
+
+    await souvenir._handle_outgoing(
+        envelope=env,
+        context_store=context_store,
+        long_term_store=long_term_store,
+        memory_extractor=memory_extractor,
+    )
+
+    memory_extractor.extract.assert_awaited_once_with(env)
+    long_term_store.upsert_facts.assert_awaited_once_with("user_f", extracted_facts)

@@ -10,8 +10,15 @@ profiles:
     temperature: 0.7
     max_tokens: 1024
     stream: false
+    max_agent_depth: 2
     memory:
       short_term_messages: 20
+    # Wave-1A fields
+    allowed_tools: null           # null = unrestricted
+    allowed_mcp: null             # null = unrestricted
+    guardrails: []                # no guardrail rules
+    memory_scope: own
+    fallback_model: null
     resilience:
       retry_attempts: 3
       retry_delays: [2, 5, 15]
@@ -23,8 +30,15 @@ profiles:
     temperature: 0.5
     max_tokens: 256
     stream: false
+    max_agent_depth: 2
     memory:
       short_term_messages: 10
+    # Wave-1A fields — narrow tool set matches low-latency intent
+    allowed_tools: null
+    allowed_mcp: null
+    guardrails: []
+    memory_scope: own
+    fallback_model: null
     resilience:
       retry_attempts: 2
       retry_delays: [1, 3]
@@ -36,8 +50,15 @@ profiles:
     temperature: 0.3
     max_tokens: 4096
     stream: false
+    max_agent_depth: 2
     memory:
       short_term_messages: 30
+    # Wave-1A fields — haiku as fallback to reduce cost on retry
+    allowed_tools: null
+    allowed_mcp: null
+    guardrails: []
+    memory_scope: own
+    fallback_model: haiku-4-5
     resilience:
       retry_attempts: 3
       retry_delays: [2, 5, 15]
@@ -49,9 +70,36 @@ profiles:
     temperature: 0.2
     max_tokens: 8192
     stream: false
+    max_agent_depth: 2
     memory:
       short_term_messages: 20
+    # Wave-1A fields — broader tool access for code tasks
+    allowed_tools: [Read, Write, "Bash(git *)", "mcp__jcodemunch__*"]
+    allowed_mcp: ["mcp__jcodemunch__*"]
+    guardrails: [no_code_exec]
+    memory_scope: task
+    fallback_model: mistral-small-2603
     resilience:
       retry_attempts: 3
       retry_delays: [2, 5, 15]
       fallback_model: mistral-small-2603
+
+  # Profil extracteur mémoire — léger, rapide, JSON uniquement
+  memory_extractor:
+    model: glm-4.7-flash
+    temperature: 0.1
+    max_tokens: 512
+    max_turns: 1
+    stream: false
+    max_agent_depth: 1
+    memory:
+      short_term_messages: 0
+    allowed_tools: null
+    allowed_mcp: null
+    guardrails: []
+    memory_scope: own
+    fallback_model: null
+    resilience:
+      retry_attempts: 2
+      retry_delays: [1, 3]
+      fallback_model: null

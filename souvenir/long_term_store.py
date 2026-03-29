@@ -1,21 +1,49 @@
 """Mémoire longue durée via SQLModel + SQLite async."""
 
+import hashlib
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from common.config_loader import resolve_storage_dir
-from souvenir.models import Memory
+from souvenir.models import ArchivedMessage, Memory, UserFact
+
+if TYPE_CHECKING:
+    from common.envelope import Envelope
+
+
+@dataclass(frozen=True)
+class PaginatedResult:
+    """Result container for a paginated query over archived messages.
+
+    Attributes:
+        items: Tuple of ArchivedMessage objects matching the query filters for
+            the requested page.
+        total: Total count of rows matching the filters, regardless of
+            limit/offset (used to build pagination UI).
+        limit: Maximum number of items requested per page.
+        offset: Number of matching rows skipped before this page.
+        has_more: True when additional pages exist beyond this one, i.e.
+            ``total > offset + len(items)``.
+    """
+
+    items: tuple
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
 
 logger = logging.getLogger(__name__)
 
-
+# TODO : il faudrait une méthode pour lister les clés existantes de souvenir d'un utilisateur
 class LongTermStore:
     """Mémoire longue durée dans SQLite (~/.relais/memory.db).
 
@@ -156,6 +184,213 @@ class LongTermStore:
             result = await session.exec(stmt)
             rows = result.all()
         return [r.model_dump() for r in rows]
+
+    async def upsert_facts(self, sender_id: str, facts: list[dict]) -> None:
+        """Insère ou met à jour des faits utilisateur par ``(sender_id, fact_hash)``.
+
+        Le hash est calculé sur ``sender_id:fact_text`` — deux appels avec le
+        même fait mettent à jour ``confidence``, ``category`` et ``updated_at``
+        sans créer de doublon.
+
+        Args:
+            sender_id: Identifiant de l'utilisateur propriétaire des faits.
+            facts: Liste de dicts avec les clés ``fact``, ``category``,
+                ``confidence`` et optionnellement ``source_corr``.
+        """
+        now = time.time()
+        async with self._session_factory() as session:
+            for fact_data in facts:
+                fact_text = fact_data["fact"]
+                fact_hash = hashlib.md5(
+                    f"{sender_id}:{fact_text}".encode()
+                ).hexdigest()
+                stmt = select(UserFact).where(
+                    UserFact.sender_id == sender_id,
+                    UserFact.fact_hash == fact_hash,
+                )
+                result = await session.exec(stmt)
+                existing = result.first()
+                if existing:
+                    existing.confidence = fact_data.get("confidence", existing.confidence)
+                    existing.category = fact_data.get("category", existing.category)
+                    existing.updated_at = now
+                    session.add(existing)
+                else:
+                    new_fact = UserFact(
+                        sender_id=sender_id,
+                        fact=fact_text,
+                        category=fact_data.get("category"),
+                        confidence=fact_data.get("confidence", 1.0),
+                        source_corr=fact_data.get("source_corr"),
+                        fact_hash=fact_hash,
+                    )
+                    session.add(new_fact)
+            await session.commit()
+        logger.debug("Upserted %d facts for sender=%s", len(facts), sender_id)
+
+    async def get_user_facts(self, sender_id: str, limit: int = 20) -> list[str]:
+        """Retourne la liste des faits connus d'un utilisateur (chaînes de texte).
+
+        Triés par ``updated_at`` descendant pour obtenir les plus récents en
+        premier.
+
+        Args:
+            sender_id: Identifiant de l'utilisateur.
+            limit: Nombre maximum de faits retournés (défaut: 20).
+
+        Returns:
+            Liste de chaînes représentant les faits.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(UserFact)
+                .where(UserFact.sender_id == sender_id)
+                .order_by(UserFact.updated_at.desc())  # type: ignore[arg-type]
+                .limit(limit)
+            )
+            result = await session.exec(stmt)
+            return [row.fact for row in result.all()]
+
+    async def archive(self, envelope: "Envelope") -> None:
+        """Archive un message sortant (réponse assistant + message utilisateur).
+
+        Stocke deux lignes dans ``archived_messages`` : le message utilisateur
+        (extrait de ``envelope.metadata["user_message"]``) et la réponse de
+        l'assistant (``envelope.content``).
+
+        Args:
+            envelope: L'enveloppe du message sortant.
+        """
+        now = time.time()
+        user_message = envelope.metadata.get("user_message", "")
+        async with self._session_factory() as session:
+            if user_message:
+                session.add(
+                    ArchivedMessage(
+                        session_id=envelope.session_id,
+                        sender_id=envelope.sender_id,
+                        channel=envelope.channel,
+                        role="user",
+                        content=user_message,
+                        correlation_id=envelope.correlation_id,
+                        created_at=now - 0.001,  # slightly before assistant
+                    )
+                )
+            session.add(
+                ArchivedMessage(
+                    session_id=envelope.session_id,
+                    sender_id=envelope.sender_id,
+                    channel=envelope.channel,
+                    role="assistant",
+                    content=envelope.content,
+                    correlation_id=envelope.correlation_id,
+                    created_at=now,
+                )
+            )
+            await session.commit()
+        logger.debug("Archived message for session=%s", envelope.session_id)
+
+    async def get_recent_messages(
+        self, session_id: str, limit: int = 20
+    ) -> list[dict]:
+        """Retourne les N derniers messages d'une session depuis SQLite.
+
+        Fallback utilisé quand le cache Redis est vide. Retourne les messages
+        dans l'ordre chronologique (plus ancien en premier).
+
+        Args:
+            session_id: Identifiant de la session.
+            limit: Nombre maximum de messages (défaut: 20).
+
+        Returns:
+            Liste de dicts ``{"role": str, "content": str}``.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(ArchivedMessage)
+                .where(ArchivedMessage.session_id == session_id)
+                .order_by(ArchivedMessage.created_at.desc())  # type: ignore[arg-type]
+                .limit(limit)
+            )
+            result = await session.exec(stmt)
+            rows = result.all()
+        rows = list(reversed(rows))
+        return [{"role": row.role, "content": row.content} for row in rows]
+
+    async def query(
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
+        since: float | None = None,
+        until: float | None = None,
+        search: str | None = None,
+    ) -> PaginatedResult:
+        """Return a paginated slice of archived messages for a user.
+
+        Filters are cumulative: all provided filters must match. Results are
+        ordered by ``created_at`` descending (most recent first).
+
+        Args:
+            user_id: The ``sender_id`` of the user whose messages to query.
+            limit: Maximum number of rows to return in this page (default 20).
+            offset: Number of matching rows to skip before this page (default 0).
+            since: If provided, only include messages with
+                ``created_at >= since`` (epoch seconds, inclusive).
+            until: If provided, only include messages with
+                ``created_at <= until`` (epoch seconds, inclusive).
+            search: If provided, only include messages whose ``content`` field
+                contains this substring (case-insensitive).
+
+        Returns:
+            A frozen ``PaginatedResult`` with ``items`` (tuple of
+            ``ArchivedMessage`` objects), ``total`` (unsliced count), ``limit``,
+            ``offset``, and ``has_more``.
+        """
+        base_stmt = select(ArchivedMessage).where(
+            ArchivedMessage.sender_id == user_id
+        )
+        if since is not None:
+            base_stmt = base_stmt.where(
+                ArchivedMessage.created_at >= since  # type: ignore[arg-type]
+            )
+        if until is not None:
+            base_stmt = base_stmt.where(
+                ArchivedMessage.created_at <= until  # type: ignore[arg-type]
+            )
+        if search is not None:
+            pattern = f"%{search}%"
+            base_stmt = base_stmt.where(
+                ArchivedMessage.content.ilike(pattern)  # type: ignore[union-attr]
+            )
+
+        count_stmt = select(func.count()).select_from(
+            base_stmt.subquery()
+        )
+
+        page_stmt = (
+            base_stmt
+            .order_by(ArchivedMessage.created_at.desc())  # type: ignore[arg-type]
+            .offset(offset)
+            .limit(limit)
+        )
+
+        async with self._session_factory() as session:
+            count_result = await session.exec(count_stmt)
+            total: int = count_result.one()
+
+            page_result = await session.exec(page_stmt)
+            rows = page_result.all()
+
+        items = tuple(rows)
+        has_more = total > offset + len(items)
+        return PaginatedResult(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=has_more,
+        )
 
     async def close(self) -> None:
         """Libère les ressources de l'engine async (connexions aiosqlite).

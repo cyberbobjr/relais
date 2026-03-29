@@ -209,6 +209,7 @@ __marimo__/
 dump.rdb
 
 # RELAIS runtime data
+.relais/
 .relais/logs/
 .relais/storage/
 .relais/redis.sock

@@ -5,11 +5,12 @@ from typing import Any
 
 from common.redis_client import RedisClient
 from common.envelope import Envelope
+from common.shutdown import GracefulShutdown
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
     stream=sys.stdout
 )
 logger = logging.getLogger("sentinelle")
@@ -30,12 +31,19 @@ class Sentinelle:
         self.group_name: str = "sentinelle_group"
         self.consumer_name: str = "sentinelle_1"
 
-    async def _process_stream(self, redis_conn: Any) -> None:
+    async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
         """Consume security checks from Gateway and forward approved messages.
+
+        Exits cleanly when ``shutdown.is_stopping()`` returns True.
 
         Args:
             redis_conn: Active Redis connection.
+            shutdown: GracefulShutdown instance controlling the loop lifetime.
+                If None a new instance is created (backward-compatible).
         """
+        if shutdown is None:
+            shutdown = GracefulShutdown()
+
         try:
             await redis_conn.xgroup_create(self.stream_in, self.group_name, mkstream=True)
         except Exception as e:
@@ -44,7 +52,7 @@ class Sentinelle:
 
         logger.info("Sentinel listening to security queue...")
 
-        while True:
+        while not shutdown.is_stopping():
             try:
                 results = await redis_conn.xreadgroup(
                     self.group_name,
@@ -82,9 +90,12 @@ class Sentinelle:
                                 await redis_conn.xadd("relais:logs", {
                                     "level": "INFO",
                                     "brick": "sentinelle",
+                                    "correlation_id": envelope.correlation_id,
+                                    "sender_id": envelope.sender_id,
                                     "message": (
                                         f"Approved {envelope.correlation_id} to atelier"
-                                    )
+                                    ),
+                                    "content_preview": envelope.content[:60] if envelope.content else "",
                                 })
                             else:
                                 logger.warning(
@@ -93,9 +104,12 @@ class Sentinelle:
                                 await redis_conn.xadd("relais:logs", {
                                     "level": "WARN",
                                     "brick": "sentinelle",
+                                    "correlation_id": envelope.correlation_id,
+                                    "sender_id": envelope.sender_id,
                                     "message": (
                                         f"Blocked unauthorized message {envelope.correlation_id}"
-                                    )
+                                    ),
+                                    "content_preview": envelope.content[:60] if envelope.content else "",
                                 })
 
                         except Exception as inner_e:
@@ -103,7 +117,9 @@ class Sentinelle:
                             await redis_conn.xadd("relais:logs", {
                                 "level": "ERROR",
                                 "brick": "sentinelle",
-                                "message": f"Validation error: {inner_e}"
+                                "correlation_id": "",
+                                "message": f"Validation error: {inner_e}",
+                                "error": str(inner_e),
                             })
                         finally:
                             # Acknowledge the message
@@ -114,7 +130,13 @@ class Sentinelle:
                 await asyncio.sleep(1)
 
     async def start(self) -> None:
-        """Starts La Sentinelle service and its main processing loop."""
+        """Starts La Sentinelle service and its main processing loop.
+
+        Registers SIGTERM/SIGINT handlers via GracefulShutdown so the process
+        exits cleanly when sent a termination signal.
+        """
+        shutdown = GracefulShutdown()
+        shutdown.install_signal_handlers()
         redis_conn = await self.client.get_connection()
         await redis_conn.xadd("relais:logs", {
             "level": "INFO",
@@ -122,11 +144,12 @@ class Sentinelle:
             "message": "Sentinelle started"
         })
         try:
-            await self._process_stream(redis_conn)
+            await self._process_stream(redis_conn, shutdown=shutdown)
         except asyncio.CancelledError:
             logger.info("Sentinelle shutting down...")
         finally:
             await self.client.close()
+            logger.info("Sentinelle stopped gracefully")
 
 
 if __name__ == "__main__":

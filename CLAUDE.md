@@ -26,16 +26,21 @@ The main pipeline flows through these bricks in order:
    - ACL validation (users.yaml), content guardrails pre/post-LLM filtering
    - Produces: `relais:tasks` (or refuses if ACL fails)
 
-4. **Atelier** (`atelier/`) - Transformer executing LLM calls
+4. **Atelier** (`atelier/`) - Transformer executing LLM calls via claude-agent-sdk
    - Consumes: `relais:tasks`
-   - Loads SOUL personality + context, calls LiteLLM with resilient retry (2s, 5s, 15s)
-   - Handles ExhaustedRetriesError → DLQ (`relais:tasks:failed`)
+   - Loads SOUL personality + context, calls LLM via claude-agent-sdk (ClaudeSDKClient)
+   - **Phase 5:** Supports subagents (memory-retriever, web-searcher, code-explorer) via `SubagentConfig` + `load_subagents_for_sdk()`
+   - Profiles include `max_agent_depth: int = 2` (limits subagent recursion)
+   - Bug #677 workaround: cli_path=shutil.which("claude") ensures ANTHROPIC_BASE_URL is respected for LiteLLM proxy routing
+   - Handles SDKExecutionError → DLQ (`relais:tasks:failed`)
+   - Streams output to `relais:messages:streaming:{channel}:{correlation_id}` for real-time Discord/Telegram rendering
    - Produces: `relais:messages:outgoing:{channel}`
 
-5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory
-   - Consumes: `relais:messages:outgoing:*` (observes responses)
+5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
+   - Dual-stream consumer: `relais:memory:request` (Atelier requests) + `relais:messages:outgoing:*` (response observer)
    - Short-term: Redis List `relais:context:{user_id}` (20 msgs, TTL 24h)
-   - Long-term: SQLite `~/.relais/storage/messages.db`
+   - Long-term: SQLite `~/.relais/storage/messages.db` with user_facts table
+   - Memory extractor: parses LLM responses to extract and store user facts (confidence threshold 0.7)
 
 ### Observer & Support Services
 
@@ -55,9 +60,10 @@ The main pipeline flows through these bricks in order:
   - `config_loader.py`: YAML config cascade (user > system > project)
 
 - **config/** - YAML configuration files
-  - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings
+  - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings, `subagents: enabled: true`
   - `litellm.yaml`: Model definitions, router settings, master key
-  - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
+  - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays, `max_agent_depth: 2`
+  - `mcp_servers.yaml`: Subagent definitions (memory-retriever, web-searcher, code-explorer)
   - `users.yaml.default`: User registry with display_name, role, channels, llm_profile
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 
@@ -102,14 +108,17 @@ Bricks use:
 
 ### Error Handling & Resilience
 
-**Atelier (LLM caller)** implements resilient retry:
+**Atelier (LLM caller)** implements resilient retry with conditional XACK:
 ```
 On exception:
-  - RETRIABLE (httpx.ConnectError, TimeoutException): Return False → stays in PEL, re-delivered
-  - HTTP 502/503/504: Retry with backoff [2s, 5s, 15s]
-  - HTTP 4xx (400, 401): Re-raise (non-retriable)
-  - ExhaustedRetriesError: Route to DLQ relais:tasks:failed, ACK (avoid poisoning PEL)
-  - Unexpected errors: Log and ACK (safety net)
+  - RETRIABLE (ConnectError, TimeoutException): Do NOT ACK → stays in PEL, re-delivered
+  - SDKExecutionError or success: Route to output/DLQ, then ACK only on success or final error
+  - ExhaustedRetriesError: Route to DLQ relais:tasks:failed, then ACK (avoid poisoning PEL)
+
+XACK pattern (critical):
+  - Only ACK after successful publish to output stream OR final error to DLQ
+  - Never ACK on transient errors (no ACK = message stays in PEL for re-delivery)
+  - This prevents silent message loss if LiteLLM restarts during processing
 ```
 
 ### Configuration Cascade
@@ -145,8 +154,10 @@ poetry install
 uv sync
 ```
 
-Core dependencies: `redis >=5.0`, `litellm >=1.25`, `supervisor >=4.2`, `httpx >=0.27`, `pydantic >=2.9`
+Core dependencies: `redis >=5.0`, `claude-agent-sdk >=0.1.51`, `supervisor >=4.2`, `httpx >=0.27`, `pydantic >=2.9`
 Dev: `pytest >=9.0`, `pytest-asyncio >=1.3`
+
+Note: `litellm` is no longer a direct dependency (Atelier uses claude-agent-sdk with LiteLLM proxy via ANTHROPIC_BASE_URL)
 
 ### Running Services
 
@@ -218,11 +229,114 @@ cp .env.example .env
 ```
 
 Set required keys:
-- `OPENROUTER_API_KEY` - LLM provider (if using OpenRouter)
+- `ANTHROPIC_BASE_URL` - LiteLLM proxy address (e.g., http://localhost:4000)
+- `ANTHROPIC_API_KEY` - LiteLLM master key (or `ANTHROPIC_AUTH_TOKEN`)
 - `REDIS_SOCKET_PATH` - Redis Unix socket path
-- `LITELLM_BASE_URL` - LiteLLM proxy address
 - Channel bot tokens: `DISCORD_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, etc.
 - Per-brick Redis passwords: `REDIS_PASS_PORTAIL`, `REDIS_PASS_ATELIER`, etc.
+- `claude` CLI must be installed: `npm install -g @anthropic-ai/claude-code`
+
+## Atelier Subagents (Phase 5)
+
+### Overview
+
+Atelier now supports autonomous subagents for enhanced task handling. Subagents are defined in `config/mcp_servers.yaml` and automatically loaded by Atelier at startup.
+
+### SubagentConfig Dataclass
+
+Located in `atelier/mcp_loader.py`:
+```python
+@dataclass(frozen=True)
+class SubagentConfig:
+    name: str           # e.g., "memory-retriever"
+    description: str    # Agent purpose
+    enabled: bool       # Enable/disable per agent
+    tools: list[str]    # List of allowed tools for this agent
+```
+
+### Configuration
+
+**`config/config.yaml.default`:**
+```yaml
+subagents:
+  enabled: true         # Enable subagent support globally
+```
+
+**`config/mcp_servers.yaml.default`:**
+```yaml
+subagents:
+  memory-retriever:
+    enabled: true
+    description: "Retrieves and manages conversation memory"
+    tools: [memory_get, memory_set, context_search]
+
+  web-searcher:
+    enabled: false      # Disabled by default for safety
+    description: "Searches web for current information"
+    tools: [web_search, url_fetch]
+
+  code-explorer:
+    enabled: true
+    description: "Analyzes and runs code"
+    tools: [code_run, repo_search, syntax_check]
+```
+
+### Profile Configuration
+
+All profiles in `config/profiles.yaml` include `max_agent_depth: 2`:
+
+```python
+@dataclass(frozen=True)
+class ProfileConfig:
+    name: str
+    model: str
+    temperature: float
+    max_tokens: int
+    max_turns: int
+    max_agent_depth: int = 2     # Limits subagent recursion (Phase 5)
+    # ... other fields
+```
+
+### Loading & Usage
+
+**In `atelier/main.py`:**
+```python
+from atelier.mcp_loader import load_subagents_for_sdk
+
+# Load configured subagents
+subagents = await load_subagents_for_sdk()
+
+# Pass to SDKExecutor
+executor = SDKExecutor(
+    model=profile.model,
+    subagents=subagents,    # Phase 5 addition
+    # ... other params
+)
+```
+
+**In `atelier/sdk_executor.py`:**
+```python
+class SDKExecutor:
+    def __init__(self, ..., subagents: dict | None = None):
+        self.subagents = subagents
+
+    async def execute(self, envelope, context, stream_callback=None) -> str:
+        options = ClaudeAgentOptions(
+            # ... existing options
+            agents=self.subagents,  # Phase 5 addition
+            # Tasks are automatically enabled
+            allowed_tools=["Task", *other_tools],  # "Task" added for subagent invocation
+        )
+```
+
+### Enabling/Disabling Subagents
+
+Subagents can be toggled via configuration:
+1. **Globally:** `config.yaml` → `subagents.enabled: true/false`
+2. **Per-agent:** `mcp_servers.yaml` → `subagents.{name}.enabled: true/false`
+3. **Runtime:** Stop Atelier, update config, restart
+
+**Safety note:** `web-searcher` is disabled by default to prevent unintended external lookups.
 
 ## Common Development Tasks
 

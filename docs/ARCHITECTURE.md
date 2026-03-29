@@ -1,7 +1,7 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour:** 2026-03-28
-**Phases implémentées:** 1, 2, 3 (MVP core loop)
+**Dernière mise à jour:** 2026-03-29
+**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (Subagents autonomes)
 
 ---
 
@@ -147,10 +147,12 @@ PIPELINE CORE
 │   ▼
 │ ATELIER (transformer)
 │ ├─ Charge SOUL + contexte long-term
-│ ├─ Appelle LiteLLM (retry 3× backoff)
+│ ├─ Appelle LLM via claude-agent-sdk (SDKExecutor)
+│ ├─ Streams output → relais:messages:streaming:{channel}:{correlation_id}
 │ ├─ Publie réponse si succès
 │ └─ Publie en DLQ si échec après retries
 │   ├─ relais:messages:outgoing:*
+│   ├─ relais:messages:streaming:{channel}:{correlation_id}
 │   └─ relais:tasks:failed (DLQ)
 │       ▼
 │ SOUVENIR (consumer)
@@ -188,10 +190,11 @@ SORTANT (Canaux externes)
 
 | Stream | Consumer | Producteur | Contenu |
 |--------|----------|-----------|---------|
-| `relais:tasks` | Sentinelle/Souvenir | Portail | Tâche validée |
+| `relais:tasks` | Sentinelle/Atelier | Portail | Tâche validée |
 | `relais:context:{session_id}` | (Redis List) | Souvenir | Historique court-terme (max 20 msgs, TTL 24h) |
-| `relais:memory:request` | Souvenir | Atelier/Workshop | Requêtes mémoire (`append`, `get`, `store_memory`) |
-| `relais:memory:response` | Atelier/Workshop | Souvenir | Réponses mémoire (historique court-terme) |
+| `relais:memory:request` | Souvenir | Atelier | Requêtes mémoire (`get`) avant appel SDK |
+| `relais:memory:response` | Atelier | Souvenir | Réponses mémoire (contexte court-terme) |
+| `relais:messages:streaming:{channel}:{correlation_id}` | Aiguilleur/{channel} | Atelier | Chunks streaming progressif (Discord edit mode) |
 
 ### Streams de sortie
 
@@ -575,13 +578,14 @@ Redis déduire automatiquement = load balancing gratuit.
 
 ### Redis ACL
 
-Chaque brick a mot de passe séparé (`.env`):
+Chaque brick a mot de passe séparé (`.env`). Atelier a accès aux streams de streaming:
 
 ```yaml
 # redis.conf
 user portail +@all ~* >$REDIS_PASS_PORTAIL
 user sentinelle +@all ~* >$REDIS_PASS_SENTINELLE
-user atelier +@all ~* >$REDIS_PASS_ATELIER
+user atelier +@all ~relais:messages:streaming:* >$REDIS_PASS_ATELIER
+user souvenir +@all ~relais:messages:outgoing:* >$REDIS_PASS_SOUVENIR
 ```
 
 ### Sentinelle ACL
@@ -677,6 +681,99 @@ alembic current
 ```
 
 > En test, `LongTermStore._create_tables()` peut être appelé directement (crée le schéma sans Alembic).
+
+---
+
+## Atelier — Exécution LLM et Streaming Progressif
+
+### Architecture SDKExecutor
+
+L'Atelier utilise `SDKExecutor` wrappant `claude-agent-sdk` (PyPI: `claude-agent-sdk >=0.1.51`):
+
+```python
+class SDKExecutor:
+    async def execute(self, envelope, context, stream_callback=None) -> str:
+        # Workaround Bug #677: cli_path=shutil.which("claude")
+        # Force le binaire système qui respecte ANTHROPIC_BASE_URL
+        options = ClaudeAgentOptions(
+            cli_path=shutil.which("claude"),
+            env={
+                "ANTHROPIC_BASE_URL": "http://localhost:4000",  # LiteLLM proxy
+                "ANTHROPIC_API_KEY": "litellm-master-key",
+            },
+            system_prompt=assembled_soul,
+            model=profile.model,
+            max_turns=profile.max_turns,
+            mcp_servers=mcp_config,  # MCP natif (pas de conversion ToolParam)
+        )
+
+        # Streaming via callbacks
+        async for chunk in client.execute(options, stream_callback=stream_callback):
+            if stream_callback:
+                await stream_callback(chunk)  # Publié via StreamPublisher
+```
+
+### Streaming Progressif
+
+Atelier publie les chunks d'une réponse au fur et à mesure via `StreamPublisher`:
+
+```
+relais:messages:streaming:{channel}:{correlation_id}
+├─ seq: 1, text: "Bonjour", is_final: 0
+├─ seq: 2, text: "Bonjour, c'est", is_final: 0
+├─ seq: 3, text: "Bonjour, c'est sympa", is_final: 1
+└─ (Aiguilleur/Discord édite le message en temps réel)
+```
+
+**Throttling Discord:** 80 caractères minimum entre éditions (rate limit 5 req/5s).
+
+### Subagents Autonomes (Phase 5)
+
+Atelier supporte les subagents autonomes pour étendre les capacités du système sans intervention manuelle.
+
+**Architecture:**
+- `SubagentConfig` dataclass dans `atelier/mcp_loader.py` (name, description, enabled, tools)
+- `load_subagents_for_sdk()` charge tous les subagents configurés depuis `config/mcp_servers.yaml`
+- `SDKExecutor` accepte `subagents: dict | None` et passe `agents=` à `ClaudeAgentOptions`
+- `"Task"` automatiquement ajouté aux `allowed_tools` pour activer la délégation aux subagents
+
+**Configuration:**
+- `config/config.yaml.default` : `subagents: enabled: true`
+- `config/mcp_servers.yaml.default` : Trois subagents pré-configurés
+  - `memory-retriever` (activé) : Récupère/gère la mémoire conversationnelle
+  - `web-searcher` (désactivé par défaut) : Recherche web
+  - `code-explorer` (activé) : Analyse et exécution de code
+
+**Contrôle de profondeur:**
+- `ProfileConfig.max_agent_depth: int = 2` limite la récursion des subagents
+- Tous les profils dans `config/profiles.yaml` héritent cette limite
+
+**Flux d'exécution:**
+```
+Atelier → SDKExecutor.execute(envelope, context, subagents)
+  ↓
+ClaudeAgentOptions(agents=subagents, allowed_tools=["Task", ...])
+  ↓
+LLM peut invoquer Task → subagent nommé → delegation autonome
+  ↓
+Résultat agrégé → relais:messages:outgoing:{channel}
+```
+
+### Souvenir — Dual-Stream avec Extracteur Mémoire
+
+Souvenir consomme deux streams:
+
+1. **`relais:memory:request`** (Atelier demande contexte avant appel SDK)
+   - Action `get` → retourne historique court-terme (Redis) ou fallback SQLite
+   - Action `append_turn` → ajoute un tour conversation
+
+2. **`relais:messages:outgoing:*`** (observer les réponses finales)
+   - MemoryExtractor parse la réponse LLM
+   - Extrait user_facts (faits sur l'utilisateur) avec threshold confiance 0.7
+   - Stocke dans SQLite `user_facts` table
+
+**Redis List (`relais:context:{session_id}`):** Cache rapide 20 msgs, TTL 24h
+**SQLite (`memory.db`):** Source de vérité, fallback si Redis redémarre
 
 ---
 

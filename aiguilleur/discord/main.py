@@ -13,6 +13,13 @@ import json
 import discord
 from dotenv import load_dotenv
 
+# ---------------------------------------------------------------------------
+# Streaming constants
+# ---------------------------------------------------------------------------
+
+STREAM_EDIT_THROTTLE_CHARS = 80   # Edit Discord message every N chars (rate limit ~5 edits/s)
+STREAM_READ_BLOCK_MS = 150        # XREAD block timeout in ms
+
 # Make sure we can import common
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -22,7 +29,7 @@ load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s',
     stream=sys.stdout
 )
 logger = logging.getLogger("aiguilleur_discord")
@@ -44,8 +51,10 @@ class RelaisDiscordClient(discord.Client):
     async def setup_hook(self):
         """Called once the bot is logging in."""
         self.redis_conn = await self.redis_client.get_connection()
+        self._redis = self.redis_conn
         await self.redis_conn.xadd("relais:logs", {"level": "INFO", "brick": "aiguilleur-discord", "message": "Starting Discord API connection"})
         self.loop.create_task(self.consume_outgoing_stream())
+        self.loop.create_task(self._subscribe_streaming_start())
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -133,6 +142,102 @@ class RelaisDiscordClient(discord.Client):
                 logger.error(f"Background stream error: {e}")
                 await asyncio.sleep(1)
 
+    async def _subscribe_streaming_start(self) -> None:
+        """Listen on Redis Pub/Sub relais:streaming:start:discord.
+
+        When a streaming session starts, spawns _handle_streaming_message()
+        as an asyncio task so it does not block the subscriber loop.
+        """
+        pubsub = self._redis.pubsub()
+        await pubsub.subscribe("relais:streaming:start:discord")
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            try:
+                data = json.loads(message["data"])
+                envelope = Envelope.from_json(json.dumps(data))
+                asyncio.create_task(self._handle_streaming_message(envelope))
+            except Exception as exc:
+                logger.warning("streaming start parse error: %s", exc)
+
+    async def _handle_streaming_message(self, envelope: Envelope) -> None:
+        """Stream LLM chunks into a Discord message via live edits.
+
+        Flow:
+        1. Send a placeholder '▌' message to Discord.
+        2. XREAD relais:messages:streaming:discord:{correlation_id} in a loop.
+        3. Accumulate chunks; edit when buffer >= STREAM_EDIT_THROTTLE_CHARS or is_final.
+        4. Final edit removes the cursor '▌'.
+
+        Args:
+            envelope: The envelope whose correlation_id identifies the Redis stream
+                      and whose metadata carries the target discord_channel_id.
+        """
+        channel_id = int(envelope.metadata.get("discord_channel_id", 0))
+
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except Exception as exc:
+                logger.error("Cannot find discord channel %s: %s", channel_id, exc)
+                return
+
+        stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
+
+        # Send placeholder to reserve the message slot
+        try:
+            msg = await channel.send("▌")
+        except Exception as exc:
+            logger.error("Failed to send streaming placeholder: %s", exc)
+            return
+
+        accumulated = ""
+        buffer = ""
+        last_id = "0"
+
+        while True:
+            try:
+                results = await self._redis.xread(
+                    {stream_key: last_id},
+                    block=STREAM_READ_BLOCK_MS,
+                    count=10,
+                )
+            except Exception as exc:
+                logger.warning("xread streaming error: %s", exc)
+                break
+
+            if not results:
+                continue  # timeout — keep waiting
+
+            for _, entries in results:
+                for entry_id, fields in entries:
+                    last_id = entry_id
+
+                    # Support both str and bytes keys (aioredis version differences)
+                    if isinstance(fields, dict):
+                        chunk = fields.get("chunk", "")
+                        is_final = fields.get("is_final", "0") == "1"
+                    else:
+                        chunk = fields.get(b"chunk", b"").decode()
+                        is_final = fields.get(b"is_final", b"0").decode() == "1"
+
+                    buffer += chunk
+                    accumulated += chunk
+
+                    should_edit = len(buffer) >= STREAM_EDIT_THROTTLE_CHARS or is_final
+                    if should_edit:
+                        display = accumulated if is_final else accumulated + "▌"
+                        try:
+                            await msg.edit(content=display)
+                        except Exception as edit_exc:
+                            logger.debug("Discord edit error (non-fatal): %s", edit_exc)
+                        buffer = ""
+
+                    if is_final:
+                        return
+
+
 def main():
     token = os.environ.get("DISCORD_BOT_TOKEN")
     if not token or token == "dummy":
@@ -140,7 +245,7 @@ def main():
         sys.exit(1)
         
     client = RelaisDiscordClient()
-    client.run(token)
+    client.run(token, log_handler=None)
 
 if __name__ == "__main__":
     from pathlib import Path
