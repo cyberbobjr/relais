@@ -160,6 +160,8 @@ class SDKExecutor:
                         raise SDKExecutionError(
                             f"SDK returned non-success result: {message.subtype}"
                         )
+                    if not full_reply and message.result:
+                        full_reply = message.result
                     break
 
         return full_reply
