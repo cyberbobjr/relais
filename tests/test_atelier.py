@@ -78,19 +78,18 @@ def _default_profile_mock() -> MagicMock:
     """Return a MagicMock that behaves like a ProfileConfig.
 
     Returns:
-        MagicMock with model, max_turns, and max_agent_depth set.
+        MagicMock with model and max_turns set.
     """
     m = MagicMock()
     m.model = "claude-opus-4-5"
     m.max_turns = 10
-    m.max_agent_depth = 2
     return m
 
 
 def _make_atelier_with_patches(extra_patches: dict | None = None):
     """Instantiate Atelier with __init__-time loaders patched out.
 
-    Patches load_profiles, load_for_sdk, load_subagents_for_sdk, and
+    Patches load_profiles, load_for_sdk, make_skills_tools, and
     resolve_profile before the Atelier() call so that __init__ does not
     hit the filesystem.
 
@@ -109,7 +108,7 @@ def _make_atelier_with_patches(extra_patches: dict | None = None):
     patches = {
         "atelier.main.load_profiles": profiles_map,
         "atelier.main.load_for_sdk": {},
-        "atelier.main.load_subagents_for_sdk": {},
+        "atelier.main.make_skills_tools": [],
         "atelier.main.resolve_profile": profile_mock,
     }
     if extra_patches:
@@ -240,7 +239,7 @@ async def test_xack_not_sent_on_generic_exception() -> None:
 @pytest.mark.asyncio
 async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
     """_handle_message() resolves the LLM profile from envelope.metadata['llm_profile']."""
-    fast_profile = MagicMock(model="claude-haiku-4-5", max_turns=5, max_agent_depth=2)
+    fast_profile = MagicMock(model="claude-haiku-4-5", max_turns=5)
     default_profile = _default_profile_mock()
     profiles = {"fast": fast_profile, "default": default_profile}
 
@@ -382,20 +381,6 @@ async def test_handle_message_acks_on_success() -> None:
                         pass
 
     redis_conn.xack.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# Phase 4.1 — startup CLI validation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_atelier_startup_raises_if_claude_cli_not_found() -> None:
-    """Atelier.__init__ raises RuntimeError if the claude CLI is not on PATH."""
-    with patch("atelier.main.shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="claude CLI not found"):
-            from atelier.main import Atelier as _Atelier
-            _Atelier()
 
 
 # ---------------------------------------------------------------------------
@@ -658,3 +643,148 @@ async def test_fetch_context_uses_xadd_id_not_dollar() -> None:
         f"Expected '999999-0' but got '{captured_last_ids[0]}'. "
         "The fix must use XADD return ID minus 1 ms, not '$'."
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_streaming_publish_payload_is_full_envelope_json() -> None:
+    """_handle_message must publish the full envelope JSON to relais:streaming:start:discord.
+
+    The Pub/Sub payload must be a valid JSON string deserializable as an
+    Envelope (containing at least correlation_id), NOT a bare UUID string.
+    Publishing a bare correlation_id causes json.loads() to raise
+    JSONDecodeError in the Aiguilleur subscriber.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(channel="discord")
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.SDKExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value="reply")
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+            mock_pub = AsyncMock()
+            mock_pub.push_chunk = AsyncMock()
+            mock_pub.finalize = AsyncMock()
+            MockStreamPublisher.return_value = mock_pub
+
+            with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                    with patch("atelier.main.load_for_sdk", return_value={}):
+                        try:
+                            await atelier._process_stream(redis_conn)
+                        except asyncio.CancelledError:
+                            pass
+
+    publish_calls = [
+        c for c in redis_conn.publish.await_args_list
+        if c.args[0] == "relais:streaming:start:discord"
+    ]
+    assert len(publish_calls) == 1, "Expected exactly one publish to relais:streaming:start:discord"
+
+    payload = publish_calls[0].args[1]
+    # Must be valid JSON (not a bare UUID string)
+    parsed = json.loads(payload)
+    assert parsed.get("correlation_id") == envelope.correlation_id, (
+        f"Expected correlation_id '{envelope.correlation_id}' in JSON payload, "
+        f"got: {parsed}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming deduplication — streamed metadata flag (Option C)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
+    """_handle_message() sets metadata["streamed"]=True for streaming-capable channels.
+
+    When the envelope channel is "discord" (a STREAMING_CAPABLE_CHANNEL), the
+    response envelope published to relais:messages:outgoing:discord must carry
+    metadata["streamed"] == True so the Aiguilleur can edit instead of re-send.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(channel="discord")
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.SDKExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value="Streamed reply")
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+            mock_pub = AsyncMock()
+            mock_pub.push_chunk = AsyncMock()
+            mock_pub.finalize = AsyncMock()
+            MockStreamPublisher.return_value = mock_pub
+
+            with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                    with patch("atelier.main.load_for_sdk", return_value={}):
+                        try:
+                            await atelier._process_stream(redis_conn)
+                        except asyncio.CancelledError:
+                            pass
+
+    outgoing_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == "relais:messages:outgoing:discord"
+    ]
+    assert len(outgoing_calls) == 1
+    payload_json = outgoing_calls[0].args[1]["payload"]
+    response_data = json.loads(payload_json)
+    assert response_data["metadata"].get("streamed") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_no_streamed_flag_for_non_streaming_channel() -> None:
+    """_handle_message() must NOT set metadata["streamed"] for non-streaming channels.
+
+    When the envelope channel is "whatsapp" (not in STREAMING_CAPABLE_CHANNELS),
+    the response envelope must not carry a streamed flag.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(channel="whatsapp")
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.SDKExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value="Non-streamed reply")
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                with patch("atelier.main.load_for_sdk", return_value={}):
+                    try:
+                        await atelier._process_stream(redis_conn)
+                    except asyncio.CancelledError:
+                        pass
+
+    outgoing_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == "relais:messages:outgoing:whatsapp"
+    ]
+    assert len(outgoing_calls) == 1
+    payload_json = outgoing_calls[0].args[1]["payload"]
+    response_data = json.loads(payload_json)
+    assert "streamed" not in response_data["metadata"]

@@ -77,7 +77,7 @@ async def test_handle_streaming_message_sends_placeholder():
     iteration begins.
     """
     # Import inside test to allow patching at module level
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     channel_id = int(envelope.metadata["discord_channel_id"])
@@ -119,7 +119,7 @@ async def test_handle_streaming_message_edits_as_chunks_arrive():
     With STREAM_EDIT_THROTTLE_CHARS=80, intermediate edits fire only on is_final,
     so we expect exactly one edit call: the final "Hello world" (no cursor).
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -158,7 +158,7 @@ async def test_handle_streaming_message_throttles_edits():
     We send chunks totalling >= 80 chars before is_final to trigger a mid-stream
     edit, then confirm a second final edit occurs without the cursor.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient, STREAM_EDIT_THROTTLE_CHARS
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient, STREAM_EDIT_THROTTLE_CHARS
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -207,7 +207,7 @@ async def test_handle_streaming_message_stops_on_final():
 
     Verifies the while loop exits cleanly and does not poll Redis further.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -242,7 +242,7 @@ async def test_subscribe_streaming_start_launches_handler():
     We publish one envelope to the Pub/Sub channel and assert that
     _handle_streaming_message was called with the deserialized Envelope.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     pubsub_message = {
@@ -295,7 +295,7 @@ async def test_handle_streaming_message_handles_discord_429_gracefully():
     (triggered by is_final=1) must still be attempted.
     """
     import discord as discord_lib
-    from aiguilleur.discord.main import RelaisDiscordClient, STREAM_EDIT_THROTTLE_CHARS
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient, STREAM_EDIT_THROTTLE_CHARS
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -370,7 +370,7 @@ async def test_on_message_ignores_own_messages():
 
     No XADD call should be made.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     mock_user = MagicMock()
     mock_user.id = 42
@@ -382,7 +382,7 @@ async def test_on_message_ignores_own_messages():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -398,7 +398,7 @@ async def test_on_message_queues_envelope_on_mention():
     The envelope payload should be valid JSON containing the sender_id.
     """
     import json
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     mock_user = MagicMock()
     mock_user.id = 100
@@ -420,7 +420,7 @@ async def test_on_message_queues_envelope_on_mention():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -443,7 +443,7 @@ async def test_on_message_dm_queues_envelope():
     DM channel check: isinstance(message.channel, discord.DMChannel).
     """
     import discord as discord_lib
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     mock_user = MagicMock()
     mock_user.id = 100
@@ -460,7 +460,7 @@ async def test_on_message_dm_queues_envelope():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -478,7 +478,7 @@ async def test_on_message_empty_content_defaults_to_coucou():
     the default greeting is used.
     """
     import json
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     mock_user = MagicMock()
     mock_user.id = 100
@@ -495,7 +495,7 @@ async def test_on_message_empty_content_defaults_to_coucou():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -514,7 +514,7 @@ async def test_on_message_xadd_failure_does_not_raise():
 
     Redis failure should be logged without crashing the event handler.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     mock_user = MagicMock()
     mock_user.id = 100
@@ -531,7 +531,7 @@ async def test_on_message_xadd_failure_does_not_raise():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -551,7 +551,7 @@ async def test_consume_outgoing_sends_reply_and_xack():
 
     One message arrives via xreadgroup; channel.send and XACK must be called.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     env = _make_envelope()
     env_json = env.to_json()
@@ -582,14 +582,14 @@ async def test_consume_outgoing_sends_reply_and_xack():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
         client.stream_out = "relais:messages:outgoing:discord"
         client.group_name = "discord_relay_group"
         client.consumer_name = "discord_test"
         client.is_closed = is_closed
         client.get_channel = MagicMock(return_value=mock_channel)
 
-        await client.consume_outgoing_stream()
+        await client._consume_outgoing_stream()
 
     mock_channel.send.assert_called_once_with(env.content)
     mock_redis.xack.assert_called_once_with(
@@ -605,7 +605,7 @@ async def test_consume_outgoing_dm_fallback_when_channel_not_in_cache():
     When the channel is not cached, the bot falls back to fetching the user and
     creating a DM channel to deliver the reply.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     env = _make_envelope(sender_id="discord:123456789")
     env_json = env.to_json()
@@ -637,7 +637,7 @@ async def test_consume_outgoing_dm_fallback_when_channel_not_in_cache():
 
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-        client.redis_conn = mock_redis
+        client._redis_conn = mock_redis
         client.stream_out = "relais:messages:outgoing:discord"
         client.group_name = "discord_relay_group"
         client.consumer_name = "discord_test"
@@ -645,7 +645,7 @@ async def test_consume_outgoing_dm_fallback_when_channel_not_in_cache():
         client.get_channel = MagicMock(return_value=None)   # not in cache
         client.fetch_user = AsyncMock(return_value=mock_user)
 
-        await client.consume_outgoing_stream()
+        await client._consume_outgoing_stream()
 
     mock_user.create_dm.assert_called_once()
     mock_dm_channel.send.assert_called_once_with(env.content)
@@ -658,7 +658,7 @@ async def test_consume_outgoing_xreadgroup_exception_does_not_crash():
 
     The stream error is caught and the loop retries after a short sleep.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     mock_redis = AsyncMock()
     call_count = {"n": 0}
@@ -673,14 +673,14 @@ async def test_consume_outgoing_xreadgroup_exception_does_not_crash():
     with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
         with patch("asyncio.sleep", new_callable=AsyncMock):
             client = RelaisDiscordClient.__new__(RelaisDiscordClient)
-            client.redis_conn = mock_redis
+            client._redis_conn = mock_redis
             client.stream_out = "relais:messages:outgoing:discord"
             client.group_name = "discord_relay_group"
             client.consumer_name = "discord_test"
             client.is_closed = is_closed
 
             # Must not raise
-            await client.consume_outgoing_stream()
+            await client._consume_outgoing_stream()
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +695,7 @@ async def test_handle_streaming_message_channel_fetch_fallback():
 
     get_channel returns None → fetch_channel is called and streaming proceeds.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -730,7 +730,7 @@ async def test_handle_streaming_message_channel_not_found_returns():
     Both get_channel (None) and fetch_channel (raises) fail → function exits
     without touching xread or send.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
 
@@ -750,11 +750,12 @@ async def test_handle_streaming_message_channel_not_found_returns():
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_streaming_message_placeholder_send_failure_returns():
+
     """_handle_streaming_message must return early when placeholder send fails.
 
     If channel.send('▌') raises, no xread calls should be made.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
 
@@ -780,7 +781,7 @@ async def test_handle_streaming_message_xread_exception_breaks_loop():
 
     After an xread exception the function exits without calling msg.edit.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
 
@@ -809,7 +810,7 @@ async def test_handle_streaming_message_empty_xread_continues_until_final():
 
     First xread returns [] (timeout), second returns is_final chunk.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -845,7 +846,7 @@ async def test_handle_streaming_message_bytes_keys():
     Some aioredis versions return {b'chunk': ..., b'is_final': ...} instead
     of str keys. The function must decode them correctly.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     envelope = _make_envelope()
     stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
@@ -885,12 +886,267 @@ async def test_handle_streaming_message_bytes_keys():
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_handle_streaming_message_uses_reply_to_fallback():
+    """_handle_streaming_message must resolve channel via 'reply_to' when 'discord_channel_id' is absent.
+
+    on_message() creates envelopes with metadata={'reply_to': '<channel_id>'}
+    but never sets 'discord_channel_id'.  The streaming handler must fall back
+    to 'reply_to' so the channel lookup succeeds.  Without this fallback,
+    channel_id resolves to 0 and get_channel() returns None, silently
+    dropping the streamed reply.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    # Envelope with ONLY reply_to — no discord_channel_id (mirrors on_message reality)
+    envelope = Envelope(
+        content="Hello!",
+        sender_id="discord:123456789",
+        channel="discord",
+        session_id="sess-stream",
+        correlation_id="corr-stream-001",
+        metadata={"reply_to": "999888777"},
+    )
+
+    mock_message = AsyncMock()
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=mock_message)
+
+    final_entry = ("entry-1", {"chunk": "Hi", "seq": "0", "is_final": "1"})
+    stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
+    mock_redis = AsyncMock()
+    mock_redis.xread = AsyncMock(
+        return_value=_make_xread_result([final_entry], stream_key)
+    )
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis = mock_redis
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._handle_streaming_message(envelope)
+
+    # Must have looked up channel 999888777 (from reply_to), not 0
+    client.get_channel.assert_called_once_with(999888777)
+    mock_channel.send.assert_called_once_with("▌")
+
+
+# ---------------------------------------------------------------------------
+# Streaming deduplication tests (Option C — Redis key + streamed metadata flag)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_streaming_message_stores_discord_id_in_redis():
+    """_handle_streaming_message must store the Discord message ID in Redis after sending placeholder.
+
+    After channel.send('▌'), setex must be called with the key
+    relais:streamed_msg:{correlation_id}, TTL=300, value=str(msg.id).
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    envelope = _make_envelope(correlation_id="corr-test-setex")
+
+    mock_message = AsyncMock()
+    mock_message.id = 99900111222
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=mock_message)
+
+    final_entry = ("entry-1", {"chunk": "Hi", "seq": "0", "is_final": "1"})
+    mock_redis = AsyncMock()
+    mock_redis.xread = AsyncMock(
+        return_value=_make_xread_result(
+            [final_entry],
+            f"relais:messages:streaming:discord:{envelope.correlation_id}",
+        )
+    )
+    mock_redis.setex = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis = mock_redis
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._handle_streaming_message(envelope)
+
+    mock_redis.setex.assert_awaited_once_with(
+        f"relais:streamed_msg:{envelope.correlation_id}",
+        300,
+        str(mock_message.id),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_consume_outgoing_edits_streamed_message():
+    """consume_outgoing_stream must edit the existing message when metadata["streamed"] is True.
+
+    When the envelope carries the streamed flag and the Redis key is present,
+    get_partial_message().edit() must be called and channel.send() must NOT be called.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = _make_envelope(correlation_id="corr-edit-001")
+    env.metadata["streamed"] = True
+    env_json = env.to_json()
+
+    discord_msg_id = "12345678901234"
+
+    mock_partial = AsyncMock()
+    mock_partial.edit = AsyncMock()
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+    mock_channel.get_partial_message = MagicMock(return_value=mock_partial)
+
+    is_closed_calls = [False, True]
+    call_idx = {"n": 0}
+
+    def is_closed():
+        v = is_closed_calls[call_idx["n"]]
+        call_idx["n"] = min(call_idx["n"] + 1, len(is_closed_calls) - 1)
+        return v
+
+    mock_redis = AsyncMock()
+    mock_redis.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+    mock_redis.xreadgroup = AsyncMock(
+        return_value=[
+            (
+                b"relais:messages:outgoing:discord",
+                [(b"msg-edit-1", {"payload": env_json})]
+            )
+        ]
+    )
+    mock_redis.get = AsyncMock(return_value=discord_msg_id)
+    mock_redis.delete = AsyncMock()
+    mock_redis.xack = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis_conn = mock_redis
+        client.stream_out = "relais:messages:outgoing:discord"
+        client.group_name = "discord_relay_group"
+        client.consumer_name = "discord_test"
+        client.is_closed = is_closed
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._consume_outgoing_stream()
+
+    mock_channel.get_partial_message.assert_called_once_with(int(discord_msg_id))
+    mock_partial.edit.assert_awaited_once_with(content=env.content)
+    mock_channel.send.assert_not_called()
+    mock_redis.delete.assert_awaited_once_with(
+        f"relais:streamed_msg:{env.correlation_id}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_consume_outgoing_sends_new_message_when_not_streamed():
+    """consume_outgoing_stream must call channel.send() when envelope has no streamed flag.
+
+    Normal (non-streaming) path: absent metadata["streamed"] → send as new message.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = _make_envelope()
+    env_json = env.to_json()
+
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    is_closed_calls = [False, True]
+    call_idx = {"n": 0}
+
+    def is_closed():
+        v = is_closed_calls[call_idx["n"]]
+        call_idx["n"] = min(call_idx["n"] + 1, len(is_closed_calls) - 1)
+        return v
+
+    mock_redis = AsyncMock()
+    mock_redis.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+    mock_redis.xreadgroup = AsyncMock(
+        return_value=[
+            (
+                b"relais:messages:outgoing:discord",
+                [(b"msg-no-stream", {"payload": env_json})]
+            )
+        ]
+    )
+    mock_redis.xack = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis_conn = mock_redis
+        client.stream_out = "relais:messages:outgoing:discord"
+        client.group_name = "discord_relay_group"
+        client.consumer_name = "discord_test"
+        client.is_closed = is_closed
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._consume_outgoing_stream()
+
+    mock_channel.send.assert_called_once_with(env.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_consume_outgoing_fallback_send_when_redis_key_missing():
+    """consume_outgoing_stream must fall back to channel.send() when the Redis key is absent.
+
+    If metadata["streamed"] is True but the Redis key has expired (TTL elapsed),
+    the bot must send a new message rather than silently dropping the reply.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = _make_envelope(correlation_id="corr-fallback")
+    env.metadata["streamed"] = True
+    env_json = env.to_json()
+
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    is_closed_calls = [False, True]
+    call_idx = {"n": 0}
+
+    def is_closed():
+        v = is_closed_calls[call_idx["n"]]
+        call_idx["n"] = min(call_idx["n"] + 1, len(is_closed_calls) - 1)
+        return v
+
+    mock_redis = AsyncMock()
+    mock_redis.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+    mock_redis.xreadgroup = AsyncMock(
+        return_value=[
+            (
+                b"relais:messages:outgoing:discord",
+                [(b"msg-fallback", {"payload": env_json})]
+            )
+        ]
+    )
+    mock_redis.get = AsyncMock(return_value=None)  # key expired / never set
+    mock_redis.xack = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis_conn = mock_redis
+        client.stream_out = "relais:messages:outgoing:discord"
+        client.group_name = "discord_relay_group"
+        client.consumer_name = "discord_test"
+        client.is_closed = is_closed
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._consume_outgoing_stream()
+
+    mock_channel.send.assert_called_once_with(env.content)
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_subscribe_streaming_start_error_handling():
     """_subscribe_streaming_start must not crash on malformed Pub/Sub payloads.
 
     An invalid JSON payload should be caught and logged, then the loop continues.
     """
-    from aiguilleur.discord.main import RelaisDiscordClient
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     bad_message = {"type": "message", "data": "not valid json {{{"}
     good_envelope = _make_envelope()

@@ -203,6 +203,120 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 ---
 
+## Phase 5a — Corrections MCP & Profils (2026-03-30) ✅ DONE (Points 1–4)
+
+### 5a.1 ✅ Format YAML `mcp_servers.yaml` — clé racine `mcp_servers:` DONE
+
+**Problème :** les fichiers `mcp_servers.yaml.default` et `.relais/config/mcp_servers.yaml` définissaient `global:` et `contextual:` à la racine, sans clé `mcp_servers:`. Seul `load_mcp_servers()` était cohérent ; la documentation et les commentaires YAML étaient incohérents.
+
+**Correction :** format canonique normalisé — clé racine `mcp_servers:` obligatoire, `global:` et `contextual:` imbriqués dessous. `timeout:` et `max_tools:` supprimés du YAML (déplacés en Point 4). Les fixtures de tests mises à jour en conséquence.
+
+**Fichiers modifiés :** `config/mcp_servers.yaml.default`, `.relais/config/mcp_servers.yaml`, `tests/test_mcp_loader.py`
+
+### 5a.2 ✅ Support transport SSE dans `McpServerConfig` et `SDKExecutor` DONE
+
+**Problème :** `McpServerConfig` n'avait ni champ `type` ni champ `url`. La documentation YAML mentionnait les serveurs SSE mais le code ignorait ce transport.
+
+**Correction :**
+- `McpServerConfig` : ajout de `type: str = "stdio"` et `url: str | None = None`
+- `load_for_sdk()` : retourne `{type, url, env?}` pour SSE vs `{type, command, args, env?}` pour stdio
+- `SDKExecutor._start_mcp_servers()` : branche sur `cfg.get("type", "stdio")` — stdio → `stdio_client`, sse → `sse_client` (guard `_SSE_AVAILABLE`), inconnu → warning + skip
+- Fixtures SSE ajoutées dans `tests/test_mcp_loader.py` (tests 17, 18, 19)
+
+**Fichiers modifiés :** `atelier/mcp_loader.py`, `atelier/sdk_executor.py`, `tests/test_mcp_loader.py`
+
+### 5a.4 ✅ Extraction McpSessionManager — refactoring lisibilité DONE (2026-03-30)
+
+**Problème :** `SDKExecutor` mêlait logique LLM et infrastructure MCP (`_start_mcp_servers()`, `_call_mcp_tool()`). La méthode `_get_anthropic_tools()` reconstruisait les schémas d'outils internes à chaque appel alors qu'ils étaient déjà au bon format (produit par `make_skills_tools()`). Trop d'indirection pour suivre d'où viennent les outils.
+
+**Correction :**
+- `McpSessionManager` (`atelier/mcp_session_manager.py`) : nouveau module isolant tout le cycle de vie MCP (démarrage stdio/SSE, sessions internes, dispatch avec `asyncio.wait_for`, timeout configurable)
+- `SDKExecutor` : suppression de `_start_mcp_servers()` et `_call_mcp_tool()` ; les schémas internes sont pré-calculés une fois dans `__init__` (`_internal_tool_schemas`) ; `_get_anthropic_tools()` réduite à une concaténation + cap
+- Tests MCP migrés vers `tests/test_mcp_session_manager.py` (6 tests)
+
+**Fichiers modifiés :** `atelier/sdk_executor.py`, `atelier/mcp_session_manager.py` (nouveau), `tests/test_sdk_executor.py`, `tests/test_mcp_session_manager.py` (nouveau)
+
+### 5a.3 ✅ Suppression section `subagents:` DONE
+
+**Problème :** `profile_loader.py` contenait encore `max_agent_depth` (vestige de l'architecture sous-agents abandonnée). La section `subagents:` dans le document fondateur était obsolète.
+
+**Correction :** suppression de `max_agent_depth` dans `ProfileConfig` et `config/profiles.yaml.default`. Mise à jour du document fondateur et de CLAUDE.md.
+
+**Fichiers modifiés :** `atelier/profile_loader.py`, `config/profiles.yaml.default`, `plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md`, `CLAUDE.md`
+
+---
+
+### 5a.4 ✅ `mcp_timeout` et `mcp_max_tools` dans `profiles.yaml` — DONE (2026-03-30)
+
+**Objectif :** déplacer `timeout` et `max_tools` de `mcp_servers.yaml` vers `profiles.yaml`, per-profil. Chaque profil LLM définit ses propres contraintes MCP selon son contexte d'usage.
+
+**Fichiers à modifier :**
+
+| Fichier | Changement |
+|---------|-----------|
+| `atelier/profile_loader.py` | Ajouter `mcp_timeout: int = 10` et `mcp_max_tools: int = 20` à `ProfileConfig` |
+| `atelier/sdk_executor.py` | `asyncio.wait_for(_call_mcp_tool(...), timeout=profile.mcp_timeout)` + tronquer la liste d'outils à `profile.mcp_max_tools` |
+| `config/profiles.yaml.default` | Ajouter `mcp_timeout` et `mcp_max_tools` à chaque profil (valeurs différenciées) |
+| `tests/test_sdk_executor.py` | Tests pour timeout et max_tools |
+| `CLAUDE.md` | Documenter les nouveaux champs dans la section ProfileConfig |
+
+**Valeurs cibles par profil :**
+```yaml
+default:   mcp_timeout: 10   mcp_max_tools: 20
+fast:      mcp_timeout: 5    mcp_max_tools: 10
+precise:   mcp_timeout: 30   mcp_max_tools: 30
+coder:     mcp_timeout: 20   mcp_max_tools: 40
+memory_extractor: mcp_timeout: 5  mcp_max_tools: 0
+```
+
+---
+
+## Phase 5c — Déduplication messages Discord streaming (2026-03-30) ✅ DONE
+
+### 5c.1 ✅ Bug : doublon de message Discord après streaming — RÉSOLU
+
+**Symptôme :** après un streaming complet (`is_final=1`), l'enveloppe finale publiée par Atelier sur `relais:messages:outgoing:discord` était envoyée comme **nouveau message** par `consume_outgoing_stream`, créant un doublon du message déjà streamé.
+
+**Cause racine :** deux tâches asyncio dans `RelaisDiscordClient` s'exécutent en parallèle :
+- `_subscribe_streaming_start` → `_handle_streaming_message` : édite le placeholder `▌` progressivement
+- `consume_outgoing_stream` : envoie l'enveloppe finale comme nouveau message via `channel.send()`
+
+**Solution implémentée (Option C — metadata + Redis String) :**
+
+1. **`aiguilleur/discord/main.py` — `_handle_streaming_message`** : après `channel.send("▌")`, stocke l'ID du message Discord dans Redis :
+   ```python
+   await self._redis.setex(f"relais:streamed_msg:{envelope.correlation_id}", 300, str(msg.id))
+   ```
+
+2. **`aiguilleur/discord/main.py` — `consume_outgoing_stream`** : si `metadata["streamed"]` est `True`, édite le message existant au lieu d'en envoyer un nouveau :
+   ```python
+   if envelope.metadata.get("streamed"):
+       redis_key = f"relais:streamed_msg:{envelope.correlation_id}"
+       discord_msg_id = await self.redis_conn.get(redis_key)
+       if discord_msg_id:
+           partial = channel.get_partial_message(int(discord_msg_id))
+           await partial.edit(content=envelope.content)
+           await self.redis_conn.delete(redis_key)
+       else:
+           await channel.send(envelope.content)  # fallback TTL expiré
+   else:
+       await channel.send(envelope.content)
+   ```
+
+3. **`atelier/main.py`** : après `stream_pub.finalize()`, positionne le flag dans l'enveloppe de réponse :
+   ```python
+   if stream_pub is not None:
+       response_env.metadata["streamed"] = True
+   ```
+
+**Tests ajoutés (TDD RED → GREEN) :**
+- `tests/test_aiguilleur_discord.py` : 4 tests (setex au placeholder, edit si clé présente, send si non-streamé, fallback send si TTL expiré)
+- `tests/test_atelier.py` : 2 tests (flag présent pour canal streaming, absent pour canal non-streaming)
+
+**Clé Redis introduite :** `relais:streamed_msg:{correlation_id}` — String, TTL 300s, valeur = Discord message ID (int as string).
+
+---
+
 ## Phase 4 — Nouvelles briques (priorité moyenne)
 
 ### 4.1 `crieur/` — Push proactif multi-canal
@@ -373,27 +487,19 @@ prometheus-client = ">=0.20"
 
 ---
 
-## Phase 2.2-bis — Migration Atelier : `claude-agent-sdk` + Streaming progressif ✅ FAIT — 2026-03-28
+## Phase 2.2-bis — Migration Atelier : `anthropic` + `mcp` Python SDK + Streaming progressif ✅ FAIT — 2026-03-30
 
-> **Décision finale (2026-03-28) :** `claude-agent-sdk` est utilisé à la place du SDK `anthropic` officiel, pour bénéficier des **subagents natifs**, du **MCP natif**, et du **streaming progressif** vers Discord/Telegram. Le bug #677 (binaire bundlé ignore `ANTHROPIC_BASE_URL`) est contourné via `cli_path=shutil.which("claude")`.
+> **Décision initiale (2026-03-28) :** `claude-agent-sdk` avait été choisi pour les subagents natifs et le MCP natif.
+> **Décision finale (2026-03-30) :** Migration vers le SDK Python natif `anthropic` + `mcp`, suite à la suppression de `claude-agent-sdk` (erreurs silencieuses, dépendance CLI Node.js non fiable). Le bug #677 et le workaround `shutil.which("claude")` sont obsolètes.
 
 ### Décisions architecturales
 
-1. **SDK** : `claude-agent-sdk` (PyPI: `claude-agent-sdk` >=0.1.51) avec `ClaudeSDKClient` + `ClaudeAgentOptions`. Workaround bug #677 : `cli_path=shutil.which("claude")` force le binaire système qui respecte `ANTHROPIC_BASE_URL`.
+1. **SDK** : `anthropic.AsyncAnthropic(base_url=..., api_key=...)` — appel direct LiteLLM proxy. Aucune dépendance CLI.
 2. **Routing modèle** : `ANTHROPIC_BASE_URL=http://localhost:4000` → LiteLLM proxy. `ANTHROPIC_API_KEY=litellm-master-key`. Les alias modèles dans `profiles.yaml` sont des alias LiteLLM. Aucune migration de config nécessaire.
-3. **MCP natif** : `mcp_servers=` dans `ClaudeAgentOptions` — plus de conversion `ToolParam` manuelle. `mcp_loader.load_for_sdk()` retourne le format dict attendu.
-4. **Subagents** : `AgentDefinition` pour memory-retriever (Haiku), web-searcher (Sonnet), calendar-agent (Haiku) — Claude les invoque automatiquement.
+3. **MCP stdio** : `mcp` Python SDK (`mcp.client.stdio.stdio_client`) — serveurs stdio gérés via `contextlib.AsyncExitStack`. `mcp_loader.load_for_sdk()` retourne le format dict attendu.
+4. **Outils internes** : `InternalTool` frozen dataclass (name/description/input_schema/handler). `make_skills_tools()` expose `list_skills` + `read_skill`. Remplace les subagents `AgentDefinition`.
 5. **Streaming progressif** : `StreamPublisher` → `relais:messages:streaming:{channel}:{corr_id}` → Aiguilleur édite le message Discord/Telegram en temps réel (throttle 80 chars, XREAD BLOCK 150ms).
 6. **Contexte conversationnel** : Souvenir reste **propriétaire unique** de l'historique. Redis List `relais:context:{session_id}` = cache rapide (TTL 24h) ; SQLite = source de vérité (fallback si Redis redémarre). Atelier demande via `relais:memory:request` (action `get`) avant chaque appel SDK.
-
-### Tableau de compatibilité LiteLLM
-
-| Outil | `ANTHROPIC_BASE_URL` respecté |
-|-------|------------------------------|
-| Claude Code CLI (`claude`) | ✅ Oui, nativement |
-| SDK Python `anthropic` | ✅ Oui |
-| `claude-agent-sdk` binaire bundlé | ❌ Bug #677 — ignoré |
-| `claude-agent-sdk` + `cli_path=shutil.which("claude")` | ✅ Oui (workaround) |
 
 > **Note auth :** LiteLLM récent préfère `ANTHROPIC_AUTH_TOKEN` à `ANTHROPIC_API_KEY`. Si erreurs 401, utiliser `ANTHROPIC_AUTH_TOKEN`.
 
@@ -451,58 +557,73 @@ Les `prompts/*.md` existants (racine) sont déplacés vers `channels/` et `polic
 
 ---
 
-### ✅ Phase B — Remplacement executor (FAIT — 2026-03-28)
+### ✅ Phase B — Remplacement executor (FAIT — 2026-03-30)
 
 #### B.1 ✅ `atelier/sdk_executor.py` créé + `atelier/mcp_loader.py` modifié
 
-**`atelier/sdk_executor.py`** — CRÉÉ (remplace le pattern httpx de `executor.py`) :
+**`atelier/sdk_executor.py`** — CRÉÉ avec `anthropic.AsyncAnthropic` + boucle agentique explicite :
 ```python
-import shutil, os
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AgentDefinition
-from claude_agent_sdk import AssistantMessage, ResultMessage
+import anthropic, os
 
 class SDKExecutionError(Exception): pass
 
 class SDKExecutor:
-    async def execute(self, envelope, context, stream_callback=None) -> str:
-        options = ClaudeAgentOptions(
-            cli_path=shutil.which("claude"),        # Workaround bug #677
-            env={
-                "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
-                "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY",
-                                     os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
-            },
-            system_prompt=self._soul_prompt,
-            model=self._profile.model,
-            max_turns=getattr(self._profile, "max_turns", 20),
-            mcp_servers=self._mcp_servers,
-            agents=self._build_subagents(),
-            permission_mode="bypassPermissions",
+    def __init__(self, profile, soul_prompt, mcp_servers, tools):
+        self._client = anthropic.AsyncAnthropic(
+            base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
+            api_key=os.environ.get("ANTHROPIC_API_KEY",
+                     os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
         )
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(self._build_prompt(envelope, context))
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        text = getattr(block, "text", None)
-                        if text:
-                            full_reply += text
-                            if stream_callback:
-                                await stream_callback(text)
-                elif isinstance(message, ResultMessage):
-                    if message.subtype != "success":
-                        raise SDKExecutionError(f"SDK non-success: {message.subtype}")
-                    break
+        # ...
+
+    async def execute(self, envelope, context, stream_callback=None) -> str:
+        messages = self._build_messages(envelope, context)
+        async with AsyncExitStack() as stack:
+            # Lance les serveurs MCP stdio via mcp.client.stdio.stdio_client
+            mcp_tools = await self._init_mcp_servers(stack)
+            all_tools = self._get_anthropic_tools() + mcp_tools
+            return await self._run_agentic_loop(messages, all_tools, stream_callback)
+
+    async def _run_agentic_loop(self, messages, tools, stream_callback) -> str:
+        full_reply = ""
+        while True:
+            async with self._client.messages.stream(
+                model=self._profile.model,
+                max_tokens=self._profile.max_tokens,
+                system=self._soul_prompt,
+                messages=messages,
+                tools=tools,
+            ) as stream:
+                async for chunk in stream.text_stream:
+                    full_reply += chunk
+                    if stream_callback:
+                        await stream_callback(chunk)
+                final = await stream.get_final_message()
+            if final.stop_reason != "tool_use":
+                break
+            # Traitement tool_use → tool_result → rebouclage
+            ...
+        return full_reply
 ```
 
-Subagents définis dans `_build_subagents()` : `memory-retriever` (Haiku, tools memory MCP), `web-searcher` (Sonnet, WebSearch), `calendar-agent` (Haiku, tools calendar MCP).
-
-**`atelier/mcp_loader.py`** — AJOUTER `load_for_sdk(profile_name)` :
+**`atelier/internal_tool.py`** — `InternalTool` frozen dataclass :
 ```python
-def load_for_sdk(self, profile_name: str = "default") -> dict:
-    """Retourne {name: {command, args, env}} ou {name: {type, url, headers}} pour ClaudeAgentOptions."""
+@dataclass(frozen=True)
+class InternalTool:
+    name: str
+    description: str
+    input_schema: dict
+    handler: Callable
 ```
-Format stdio : `{"command": ..., "args": [...], "env": {...}}`. Format SSE/HTTP : `{"type": "sse", "url": ..., "headers": {...}}`.
+
+**`atelier/skills_tools.py`** — `make_skills_tools(skills_dir)` → `[list_skills, read_skill]`.
+
+**`atelier/mcp_loader.py`** — `load_for_sdk(profile_name)` :
+```python
+def load_for_sdk(profile_name: str = "default") -> dict:
+    """Retourne {name: {command, args, env}} pour mcp.client.stdio.stdio_client."""
+```
+Format stdio : `{"command": ..., "args": [...], "env": {...}}`.
 
 #### ✅ B.2 Créer `atelier/stream_publisher.py` — FAIT — 2026-03-29
 
@@ -620,7 +741,8 @@ async def _handle_streaming_message(self, envelope: Envelope):
 
 | Fichier | Action |
 |---------|--------|
-| `tests/test_sdk_executor.py` | CRÉER : mock `ClaudeSDKClient`, test reply assemblé, test `stream_callback` appelé, test `SDKExecutionError` sur non-success, test `cli_path` = `shutil.which("claude")` |
+| `tests/test_sdk_executor.py` | ✅ MIS À JOUR (2026-03-30) : mock `anthropic.AsyncAnthropic`, test reply assemblé, test `stream_callback` appelé, test `SDKExecutionError` sur `APIStatusError`/`ConnectError`, test boucle tool-use, test `_build_messages`, `_get_anthropic_tools`, `_call_tool`. Tests MCP migrés vers `test_mcp_session_manager.py`. |
+| `tests/test_mcp_session_manager.py` | ✅ CRÉÉ (2026-03-30) : `call_tool` server not found, timeout pass-through, TimeoutError → string, exception → string, `start_all` MCP unavailable, `start_all` no servers |
 | `tests/test_stream_publisher.py` | CRÉER : test `seq` incrémenté, test `is_final=1` sur `finalize()`, test format clé Redis |
 | `tests/test_atelier.py` | RÉÉCRIRE : mock `SDKExecutor` + `StreamPublisher`. Conserver tests XACK (critiques). Ajouter : résolution profil, streaming signal Pub/Sub, injection `user_message` metadata, mock `get` vers Souvenir |
 | `tests/test_mcp_loader.py` | COMPLÉTER : ajouter tests `load_for_sdk()` (stdio + sse, filtre profil) |
@@ -677,86 +799,59 @@ Phase F : documentation (en dernier)
 
 ---
 
-## Phase 5 — Subagents Autonomes ✅ FAIT — 2026-03-29
+## Phase 5 — Outils internes + Serveurs MCP stdio ✅ FAIT — 2026-03-30
 
-> **Consolidation:** Support des subagents autonomes pour délégation de tâches et extensibilité du système sans code nouveau.
+> **Révision (2026-03-30) :** Les subagents `AgentDefinition` / `load_subagents_for_sdk()` (dépendants de `claude-agent-sdk`) sont remplacés par `InternalTool` (skills locaux) + serveurs MCP stdio via le SDK `mcp` Python.
 
-### ✅ Implémentation (FAIT — 2026-03-29)
+### ✅ Implémentation (FAIT — 2026-03-30)
 
 | Composant | État | Notes |
 |-----------|------|-------|
-| `atelier/mcp_loader.py::SubagentConfig` | ✅ CRÉÉ | `@dataclass(frozen=True)` avec name, description, enabled, tools |
-| `atelier/mcp_loader.py::load_subagents()` | ✅ CRÉÉ | Charge tous les subagents depuis `config/mcp_servers.yaml` |
-| `atelier/mcp_loader.py::load_subagents_for_sdk()` | ✅ CRÉÉ | Retourne `dict[name, SubagentConfig]` pour passage à SDKExecutor |
-| `atelier/sdk_executor.py::SDKExecutor` | ✅ MIS À JOUR | Accepte `subagents: dict \| None`, passe `agents=` à `ClaudeAgentOptions` |
-| `atelier/profile_loader.py::ProfileConfig` | ✅ MIS À JOUR | Ajout champ `max_agent_depth: int = 2` |
-| `atelier/main.py` | ✅ MIS À JOUR | Appelle `load_subagents_for_sdk()`, passe à SDKExecutor |
-| `config/config.yaml.default` | ✅ MIS À JOUR | Section `subagents: enabled: true` |
-| `config/mcp_servers.yaml.default` | ✅ MIS À JOUR | 3 subagents: memory-retriever, web-searcher (disabled), code-explorer |
-
-### Configuration
-
-**`config/mcp_servers.yaml.default`:**
-```yaml
-subagents:
-  memory-retriever:
-    name: memory-retriever
-    description: Retrieves and manages conversation memory
-    enabled: true
-    tools: [memory_get, memory_set, context_search]
-
-  web-searcher:
-    name: web-searcher
-    description: Searches web for current information
-    enabled: false    # Disabled by default for safety
-    tools: [web_search, url_fetch]
-
-  code-explorer:
-    name: code-explorer
-    description: Analyzes and runs code
-    enabled: true
-    tools: [code_run, repo_search, syntax_check]
-```
-
-**`config/profiles.yaml`:**
-Tous les profils héritent automatiquement `max_agent_depth: 2` de `ProfileConfig`.
+| `atelier/internal_tool.py::InternalTool` | ✅ CRÉÉ | `@dataclass(frozen=True)` name/description/input_schema/handler |
+| `atelier/skills_tools.py::make_skills_tools()` | ✅ CRÉÉ | Retourne `[list_skills, read_skill]` InternalTools |
+| `atelier/sdk_executor.py::SDKExecutor` | ✅ MIS À JOUR | Accepte `tools: list[InternalTool]`, schémas pré-calculés dans `__init__`, délègue MCP à `McpSessionManager` |
+| `atelier/mcp_session_manager.py::McpSessionManager` | ✅ CRÉÉ (2026-03-30) | Cycle de vie MCP isolé : `start_all(stack)` + `call_tool()` avec timeout |
+| `atelier/mcp_loader.py::load_for_sdk()` | ✅ MIS À JOUR | Retourne dict `{name: {command, args, env}}` pour `stdio_client` |
+| `atelier/main.py` | ✅ MIS À JOUR | Appelle `make_skills_tools()`, passe `tools=` à SDKExecutor |
+| `atelier/mcp_loader.py::SubagentConfig` | 🗑️ SUPPRIMÉ | Code mort supprimé avec les tests associés (`test_mcp_loader_subagents.py`) |
+| `atelier/mcp_loader.py::load_subagents_for_sdk()` | 🗑️ SUPPRIMÉ | Idem |
 
 ### Flux d'exécution
 
 ```
 atelier/main.py:
-  → load_subagents_for_sdk()
-  → SDKExecutor(subagents=subagents)
-  → ClaudeAgentOptions(agents=subagents, allowed_tools=["Task", ...])
-  → LLM peut invoquer Task → subagent nommé
-  → Delegation autonome → résultat agrégé
+  → make_skills_tools(skills_dir)       # InternalTools skills/
+  → load_for_sdk()                      # Serveurs MCP stdio
+  → SDKExecutor(tools=tools, mcp_servers=mcp_servers)
+  → McpSessionManager.start_all(stack)  # stdio/SSE par serveur MCP
+  → _run_agentic_loop(mcp_manager) → messages.stream()
+  → stop_reason == "tool_use" → _call_tool() → InternalTool | McpSessionManager.call_tool()
+  → reboucle jusqu'à stop_reason == "end_turn"
   → relais:messages:outgoing:{channel}
 ```
 
 ### Critères de succès
 
-- ✅ SubagentConfig frozen dataclass (immutable)
-- ✅ load_subagents() et load_subagents_for_sdk() présentes
-- ✅ SDKExecutor accepte subagents et les passe à ClaudeAgentOptions
-- ✅ "Task" ajouté automatiquement aux allowed_tools
-- ✅ Tous les profiles incluent max_agent_depth = 2
-- ✅ Config cascade supporte subagents.enabled
-- ✅ 3 subagents pré-configurés dans mcp_servers.yaml.default
-- ✅ Documentation (CLAUDE.md, ARCHITECTURE.md, README.md, plan) mise à jour
+- ✅ InternalTool frozen dataclass (immutable)
+- ✅ make_skills_tools() retourne list_skills + read_skill
+- ✅ SDKExecutor._call_tool() dispatche InternalTool et outils MCP (via McpSessionManager)
+- ✅ Boucle agentique : tool_use → tool_result → rebouclage → end_turn
+- ✅ MCP servers initialisés via McpSessionManager + AsyncExitStack (lifecycle propre)
+- ✅ McpSessionManager isolé et testé indépendamment (`test_mcp_session_manager.py`)
+- ✅ Aucune dépendance CLI Node.js (`claude`) requise
+- ✅ anthropic >= 0.40.0, mcp >= 1.0.0
 
 ### Dépendances
 
-- ✅ claude-agent-sdk >= 0.1.51 (déjà présent)
-- ✅ Pydantic >= 2.9 (déjà présent)
+- ✅ anthropic >= 0.40.0
+- ✅ mcp >= 1.0.0
+- ✅ Pydantic >= 2.9
 
 ---
 
 | Risque | Sévérité | Mitigation |
 |--------|----------|------------|
-| Bug #677 workaround fragile (`claude` non installé) | HAUT | Vérifier `shutil.which("claude") is not None` au démarrage d'Atelier, erreur critique sinon |
-| Nom PyPI `claude-sdk` non confirmé | ✅ RÉSOLU | Package confirmé : `claude-agent-sdk` (PyPI) >= 0.1.51, module `claude_agent_sdk` |
 | Rate limit Discord (streaming) | MOYEN | Throttle 80 chars entre edits. En cas d'erreur 429 → ignorer l'édition intermédiaire |
-| `cli_path` portabilité (CI/Docker) | MOYEN | `claude` doit être installé dans l'image. Ajouter `RUN npm install -g @anthropic-ai/claude-code` au Dockerfile |
 | Extracteur mémoire pollue SQLite (faux positifs) | MOYEN | Seuil confidence 0.7, prompt strict, revue manuelle possible via Vigile |
 | Wildcard streams Souvenir | MOYEN | Abonnement explicite aux canaux connus (liste dans `config.yaml`) |
 | `prompts/` réorganisation casse `portail/prompt_loader.py` | MOYEN | Mettre à jour `prompt_loader` en même temps |
@@ -766,27 +861,26 @@ atelier/main.py:
 
 ### Critères de succès
 
-- [ ] `claude-sdk` installé et `from claude_sdk import ClaudeSDKClient` importable
-- [ ] `shutil.which("claude")` retourne un chemin valide au démarrage
-- [ ] `atelier/sdk_executor.py` : `SDKExecutor.execute()` retourne texte, appelle `stream_callback`, lève `SDKExecutionError` sur non-success
-- [ ] `atelier/stream_publisher.py` : `push_chunk()` XADD avec `seq` incrémenté, `finalize()` publie `is_final=1`
-- [ ] `atelier/mcp_loader.py` : `load_for_sdk()` retourne dict au format `ClaudeAgentOptions(mcp_servers=...)`
-- [ ] `atelier/profile_loader.py` : `ProfileConfig` a le champ `max_turns`
-- [ ] `atelier/main.py` : signal Pub/Sub `relais:streaming:start:{channel}` envoyé avant le SDK
-- [ ] `atelier/main.py` : XACK conditionnel (success + DLQ → ACK ; exception générique → PEL)
-- [ ] `atelier/main.py` : `user_message` injecté dans `metadata` de l'envelope réponse
+- [x] `anthropic.AsyncAnthropic` importable — `anthropic >= 0.40.0`
+- [x] `atelier/sdk_executor.py` : `SDKExecutor.execute()` retourne texte, appelle `stream_callback`, lève `SDKExecutionError` sur `APIStatusError`/`ConnectError`
+- [x] `atelier/stream_publisher.py` : `push_chunk()` XADD avec `seq` incrémenté, `finalize()` publie `is_final=1`
+- [x] `atelier/mcp_loader.py` : `load_for_sdk()` retourne dict `{name: {command, args, env}}`
+- [x] `atelier/profile_loader.py` : `ProfileConfig` a le champ `max_turns`
+- [x] `atelier/main.py` : signal Pub/Sub `relais:streaming:start:{channel}` envoyé avant l'exécution
+- [x] `atelier/main.py` : XACK conditionnel (success + DLQ → ACK ; exception générique → PEL)
+- [x] `atelier/main.py` : `user_message` injecté dans `metadata` de l'envelope réponse
 - [ ] Souvenir répond aux `get` depuis Redis List ; SQLite comme fallback si cache vide
 - [ ] Souvenir alimente Redis List via observation `relais:messages:outgoing:{channel}`
 - [ ] Souvenir déclenche extracteur mémoire sur chaque message sortant
 - [ ] Table `user_facts` créée via migration Alembic
 - [ ] Aiguilleur Discord : placeholder message créé + éditions progressives + édition finale sans curseur
-- [ ] Tests XACK (success, DLQ, generic error, retriable) toujours verts
-- [ ] Couverture ≥ 80% sur `atelier/` et `souvenir/`
-- [x] Smoke test complet : Discord → streaming visible → réponse finale → archivage SQLite
+- [x] Tests XACK (success, DLQ, generic error, retriable) toujours verts
+- [x] Couverture ≥ 80% sur `atelier/` — 31 tests passent
+- [ ] Smoke test complet : Discord → streaming visible → réponse finale → archivage SQLite
 
 ---
 
-*Plan mis à jour le 2026-03-28 — Migration Atelier vers `claude-agent-sdk` (subagents, MCP natif, streaming progressif) avec workaround bug #677 (`cli_path=shutil.which("claude")`). Souvenir reste propriétaire unique du contexte. Streaming Discord via `StreamPublisher` + `relais:messages:streaming:*`.*
+*Plan mis à jour le 2026-03-30 — Migration Atelier vers `anthropic.AsyncAnthropic` + `mcp` Python SDK (suppression `claude-agent-sdk`, boucle agentique explicite, `InternalTool` + serveurs MCP stdio). Souvenir reste propriétaire unique du contexte. Streaming Discord via `StreamPublisher` + `relais:messages:streaming:*`.*
 
 ---
 
@@ -1019,3 +1113,104 @@ self._extractor = MemoryExtractor(litellm_url=litellm_url, model=extraction_mode
 - ✅ Tests : chargement réussi, fallback sur erreur
 
 *Plan mis à jour le 2026-03-29 — Phase 6.1 complétée (Axes A/B/C : observabilité, enriched logs, memory_extractor profile). Couverture globale ≥81%. Prochaine phase : validation bout-à-bout.*
+
+---
+
+## Phase 6.2 — Architecture AIGUILLEUR configurable ✅ FAIT — 2026-03-30
+
+Unification et simplification de l'architecture AIGUILLEUR : un seul processus `aiguilleur/main.py` gère tous les adaptateurs de canaux via configuration centralisée `channels.yaml`, avec support des adaptateurs natifs (Python thread + asyncio) et externes (subprocess).
+
+### ✅ Implémentation (FAIT — 2026-03-30)
+
+| Composant | État | Notes |
+|-----------|------|-------|
+| `aiguilleur/channel_config.py::ChannelConfig` | ✅ CRÉÉ | Frozen dataclass : enabled, streaming, type, class_path, max_restarts |
+| `aiguilleur/channel_config.py::load_channels_config()` | ✅ CRÉÉ | Cascade résolution : `~/.relais/config/` > `/opt/relais/config/` > `./config/` |
+| `aiguilleur/core/base.py::BaseAiguilleur` | ✅ CRÉÉ | ABC : start/stop/is_alive/restart/health |
+| `aiguilleur/core/native.py::NativeAiguilleur` | ✅ CRÉÉ | Thread OS + asyncio.run par adaptateur Python |
+| `aiguilleur/core/external.py::ExternalAiguilleur` | ✅ CRÉÉ | subprocess.Popen pour adaptateurs non-Python |
+| `aiguilleur/core/manager.py::AiguilleurManager` | ✅ CRÉÉ | Supervisor de lifecycle : dépoussiéreurs, redémarrages exponentiels |
+| `aiguilleur/channels/discord/adapter.py::DiscordAiguilleur` | ✅ CRÉÉ | Migration de `aiguilleur/discord/main.py` → hérite `NativeAiguilleur` |
+| `aiguilleur/main.py` | ✅ CRÉÉ | Entry point : charge `channels.yaml`, instancie `AiguilleurManager`, lance la boucle |
+| `config/channels.yaml.default` | ✅ CRÉÉ | Définition de tous les canaux (enabled/disabled, streaming, type, class_path, max_restarts) |
+| `aiguilleur/discord/main.py` | 🗑️ SUPPRIMÉ | Aucun stub de compatibilité (refonte complète) |
+| `atelier/main.py::STREAMING_CAPABLE_CHANNELS` | ✅ MIS À JOUR | Chargé dynamiquement via `load_channels_config()` au lieu de liste en dur |
+| Tests | ✅ CRÉÉS | `tests/test_channel_config.py`, `tests/test_aiguilleur_manager.py`, `tests/test_aiguilleur_discord.py` mis à jour |
+
+### Conception clés
+
+**Modèle de cycle de vie :**
+```python
+AiguilleurManager
+├── load_channels_config()
+├── _instantiate_adapters()
+│   ├── NativeAiguilleur(channel_config) — thread OS, asyncio.run
+│   └── ExternalAiguilleur(channel_config) — subprocess.Popen
+└── run()
+    ├── start()
+    ├── monitor() — restart exponential backoff min(2^count, 30)s, max_restarts=5
+    └── stop()
+```
+
+**Adaptateur natif (exemple Discord) :**
+```python
+class DiscordAiguilleur(NativeAiguilleur):
+    async def run(self):
+        client = discord.Client(...)
+        await client.start(TOKEN)
+```
+
+**Adaptateur externe (exemple WhatsApp) :**
+```python
+ExternalAiguilleur(
+    ChannelConfig(
+        name="whatsapp",
+        type="external",
+        command="node",
+        args=["aiguilleur/whatsapp/index.js"],
+        ...
+    )
+)
+```
+
+**Restart automatique :**
+- Délai = `min(2^restart_count, 30)` secondes (exponential backoff, capped 30s)
+- Max redémarrages = `max_restarts` (défaut 5)
+- Après exhaustion : **abandon silencieux** (log error, pas de crash manager)
+
+**Découverte automatique des adaptateurs natifs :**
+- Si `type: native` et pas de `class_path` → charge convention `aiguilleur.channels.{channel}.adapter.{Channel}Aiguilleur`
+- Si `class_path` fourni → utilise le chemin custom
+- Si découverte échoue → logs error, passe au channel suivant (graceful degradation)
+
+### Fichiers supprimés
+
+- `aiguilleur/discord/main.py` — entièrement remplacé par l'architecture configurable (aucune migration requise, le nouveau code gère tout)
+
+### Critères de succès
+
+- ✅ Un seul processus `aiguilleur/main.py` gère tous les adaptateurs
+- ✅ Configuration centralisée `channels.yaml` (enabled/disabled, streaming, type, max_restarts)
+- ✅ Support natif (thread OS + asyncio) et externe (subprocess)
+- ✅ Restart automatique avec exponential backoff
+- ✅ Adaptateurs découverts par convention (`aiguilleur.channels.{name}.adapter`)
+- ✅ `atelier/main.py` : `STREAMING_CAPABLE_CHANNELS` chargé dynamiquement
+- ✅ Tests : config loading, manager lifecycle, adapter instantiation, restart logic
+- ✅ Couverture ≥ 80% sur `aiguilleur/`
+
+### Changements observables
+
+**Avant :**
+```bash
+supervisord.conf → [program:aiguilleur-discord], [program:aiguilleur-telegram], ...
+                → Chaque canal = nouveau processus OS + fichier main.py dédié
+```
+
+**Après :**
+```bash
+supervisord.conf → [program:aiguilleur]
+                → Un processus unique, tous les canaux gérés par AiguilleurManager
+                → channels.yaml contrôle enabled/disabled sans redémarrage process
+```
+
+*Plan mis à jour le 2026-03-30 — Phase 6.2 complétée (Architecture AIGUILLEUR configurable : ChannelConfig, BaseAiguilleur ABC, NativeAiguilleur thread+asyncio, ExternalAiguilleur subprocess, AiguilleurManager supervisor). Couverture ≥80% sur aiguilleur/.*

@@ -12,7 +12,13 @@ RELAIS is a **micro-brick autonomous AI assistant architecture** using Redis Str
 
 The main pipeline flows through these bricks in order:
 
-1. **Aiguilleur** (`aiguilleur/`) - Message relay gateways for external channels (Discord, Telegram, etc.)
+1. **Aiguilleur** (`aiguilleur/`) - Unified configurable channel relay manager
+   - Single process (`aiguilleur/main.py`) manages all channel adapters
+   - `AiguilleurManager` loads channels from `channels.yaml` (enabled/disabled, streaming flag, type, restart policy)
+   - `NativeAiguilleur` (thread + asyncio.run) for Python adapters (e.g., DiscordAiguilleur)
+   - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
+   - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
+   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
 
@@ -26,12 +32,12 @@ The main pipeline flows through these bricks in order:
    - ACL validation (users.yaml), content guardrails pre/post-LLM filtering
    - Produces: `relais:tasks` (or refuses if ACL fails)
 
-4. **Atelier** (`atelier/`) - Transformer executing LLM calls via claude-agent-sdk
+4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `anthropic.AsyncAnthropic`
    - Consumes: `relais:tasks`
-   - Loads SOUL personality + context, calls LLM via claude-agent-sdk (ClaudeSDKClient)
-   - **Phase 5:** Supports subagents (memory-retriever, web-searcher, code-explorer) via `SubagentConfig` + `load_subagents_for_sdk()`
-   - Profiles include `max_agent_depth: int = 2` (limits subagent recursion)
-   - Bug #677 workaround: cli_path=shutil.which("claude") ensures ANTHROPIC_BASE_URL is respected for LiteLLM proxy routing
+   - Loads SOUL personality + context, calls LLM via `anthropic.AsyncAnthropic` (LiteLLM proxy via `ANTHROPIC_BASE_URL`)
+   - Agentic loop: explicit multi-turn tool-use handling (`stop_reason == "tool_use"` → inject `tool_result` → rebuckle)
+   - Internal tools: `InternalTool` frozen dataclass, `make_skills_tools()` exposes `list_skills`/`read_skill`
+   - MCP servers: stdio servers managed via `contextlib.AsyncExitStack` + `mcp.client.stdio.stdio_client`
    - Handles SDKExecutionError → DLQ (`relais:tasks:failed`)
    - Streams output to `relais:messages:streaming:{channel}:{correlation_id}` for real-time Discord/Telegram rendering
    - Produces: `relais:messages:outgoing:{channel}`
@@ -60,10 +66,11 @@ The main pipeline flows through these bricks in order:
   - `config_loader.py`: YAML config cascade (user > system > project)
 
 - **config/** - YAML configuration files
-  - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings, `subagents: enabled: true`
+  - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings
+  - `channels.yaml`: Channel definitions (enabled/disabled, streaming flag, type, class_path, max_restarts)
   - `litellm.yaml`: Model definitions, router settings, master key
-  - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays, `max_agent_depth: 2`
-  - `mcp_servers.yaml`: Subagent definitions (memory-retriever, web-searcher, code-explorer)
+  - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
+  - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)
   - `users.yaml.default`: User registry with display_name, role, channels, llm_profile
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 
@@ -136,8 +143,8 @@ Priority-based startup (`supervisord.conf`):
 - **Priority 1**: `courier` (Redis server)
 - **Priority 5**: `litellm` (LLM proxy, `uv run`)
 - **Priority 8**: `archiviste` (observer, non-blocking)
-- **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir)
-- **Priority 20**: Aiguilleur relays (Discord, Telegram, etc.)
+- **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir) + **aiguilleur** (unified channel manager)
+- ~~Priority 20~~: Aiguilleur relays (DEPRECATED — single `aiguilleur/main.py` process now manages all channels via `channels.yaml`)
 
 All processes log to `~/.relais/logs/` via supervisord stdout_logfile.
 
@@ -154,15 +161,18 @@ poetry install
 uv sync
 ```
 
-Core dependencies: `redis >=5.0`, `claude-agent-sdk >=0.1.51`, `supervisor >=4.2`, `httpx >=0.27`, `pydantic >=2.9`
+Core dependencies: `redis >=5.0`, `anthropic >=0.40.0`, `mcp >=1.0.0`, `supervisor >=4.2`, `httpx >=0.27`, `pydantic >=2.9`
 Dev: `pytest >=9.0`, `pytest-asyncio >=1.3`
 
-Note: `litellm` is no longer a direct dependency (Atelier uses claude-agent-sdk with LiteLLM proxy via ANTHROPIC_BASE_URL)
+Note: `litellm` is no longer a direct dependency (Atelier calls `anthropic.AsyncAnthropic` with `base_url=ANTHROPIC_BASE_URL` to route through the LiteLLM proxy)
 
 ### Running Services
 
 **Single brick** (for development):
 ```bash
+# Aiguilleur (unified channel manager — manages all adapters)
+PYTHONPATH=. uv run python aiguilleur/main.py
+
 # Portail consumer
 PYTHONPATH=. uv run python portail/main.py
 
@@ -234,109 +244,70 @@ Set required keys:
 - `REDIS_SOCKET_PATH` - Redis Unix socket path
 - Channel bot tokens: `DISCORD_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, etc.
 - Per-brick Redis passwords: `REDIS_PASS_PORTAIL`, `REDIS_PASS_ATELIER`, etc.
-- `claude` CLI must be installed: `npm install -g @anthropic-ai/claude-code`
 
-## Atelier Subagents (Phase 5)
+## Atelier — Outils internes & Serveurs MCP
 
-### Overview
+### Internal Tools (`InternalTool`)
 
-Atelier now supports autonomous subagents for enhanced task handling. Subagents are defined in `config/mcp_servers.yaml` and automatically loaded by Atelier at startup.
-
-### SubagentConfig Dataclass
-
-Located in `atelier/mcp_loader.py`:
-```python
-@dataclass(frozen=True)
-class SubagentConfig:
-    name: str           # e.g., "memory-retriever"
-    description: str    # Agent purpose
-    enabled: bool       # Enable/disable per agent
-    tools: list[str]    # List of allowed tools for this agent
-```
-
-### Configuration
-
-**`config/config.yaml.default`:**
-```yaml
-subagents:
-  enabled: true         # Enable subagent support globally
-```
-
-**`config/mcp_servers.yaml.default`:**
-```yaml
-subagents:
-  memory-retriever:
-    enabled: true
-    description: "Retrieves and manages conversation memory"
-    tools: [memory_get, memory_set, context_search]
-
-  web-searcher:
-    enabled: false      # Disabled by default for safety
-    description: "Searches web for current information"
-    tools: [web_search, url_fetch]
-
-  code-explorer:
-    enabled: true
-    description: "Analyzes and runs code"
-    tools: [code_run, repo_search, syntax_check]
-```
-
-### Profile Configuration
-
-All profiles in `config/profiles.yaml` include `max_agent_depth: 2`:
+Internal tools are Python callables exposed to the agentic loop via the `InternalTool` frozen dataclass (in `atelier/internal_tool.py`):
 
 ```python
 @dataclass(frozen=True)
-class ProfileConfig:
+class InternalTool:
     name: str
-    model: str
-    temperature: float
-    max_tokens: int
-    max_turns: int
-    max_agent_depth: int = 2     # Limits subagent recursion (Phase 5)
-    # ... other fields
+    description: str
+    input_schema: dict      # JSON Schema for the tool's arguments
+    handler: Callable       # sync or async callable
 ```
 
-### Loading & Usage
+`make_skills_tools(skills_dir)` (in `atelier/skills_tools.py`) scans the `skills/` directory and returns two built-in tools: `list_skills` and `read_skill`.
 
-**In `atelier/main.py`:**
+### MCP Servers (`mcp_servers.yaml`)
+
+External tools are provided by MCP servers defined in `config/mcp_servers.yaml`. Two transports are supported:
+
+```yaml
+mcp_servers:
+  global:
+    - name: my-stdio-server       # stdio: Atelier spawns a subprocess
+      enabled: true
+      type: stdio
+      command: "uvx"
+      args: ["mcp-server-my-server"]
+    - name: my-sse-server         # sse: Atelier connects to a running HTTP server
+      enabled: true
+      type: sse
+      url: "http://127.0.0.1:8100"
+  contextual: []
+```
+
+`load_for_sdk(profile=None)` (in `atelier/mcp_loader.py`) reads the config cascade and returns a dict keyed by server name. For stdio servers: `{type: "stdio", command, args, env?}`; for SSE servers: `{type: "sse", url, env?}`.
+
+`mcp_timeout` and `mcp_max_tools` are **not** in `mcp_servers.yaml` — they are per-profile fields in `profiles.yaml` (see Agentic Loop section below).
+
+### Agentic Loop
+
+`SDKExecutor` (`atelier/sdk_executor.py`) manages the full lifecycle:
+
 ```python
-from atelier.mcp_loader import load_subagents_for_sdk
-
-# Load configured subagents
-subagents = await load_subagents_for_sdk()
-
-# Pass to SDKExecutor
 executor = SDKExecutor(
-    model=profile.model,
-    subagents=subagents,    # Phase 5 addition
-    # ... other params
+    profile=profile,            # ProfileConfig (model, max_turns, max_tokens, mcp_timeout, mcp_max_tools, …)
+    soul_prompt=soul_prompt,    # assembled system prompt string
+    mcp_servers=mcp_servers,    # dict from load_for_sdk()
+    tools=tools,                # list[InternalTool] from make_skills_tools()
 )
+reply = await executor.execute(envelope, context, stream_callback=...)
 ```
 
-**In `atelier/sdk_executor.py`:**
-```python
-class SDKExecutor:
-    def __init__(self, ..., subagents: dict | None = None):
-        self.subagents = subagents
+Per-profile MCP constraints (fields in `ProfileConfig`):
+- `mcp_timeout` — seconds before `asyncio.wait_for` cancels a single MCP tool call (returns an error string to the model; loop continues)
+- `mcp_max_tools` — max MCP tool definitions passed to the model (`0` = no MCP tools; internal tools are never capped)
 
-    async def execute(self, envelope, context, stream_callback=None) -> str:
-        options = ClaudeAgentOptions(
-            # ... existing options
-            agents=self.subagents,  # Phase 5 addition
-            # Tasks are automatically enabled
-            allowed_tools=["Task", *other_tools],  # "Task" added for subagent invocation
-        )
-```
-
-### Enabling/Disabling Subagents
-
-Subagents can be toggled via configuration:
-1. **Globally:** `config.yaml` → `subagents.enabled: true/false`
-2. **Per-agent:** `mcp_servers.yaml` → `subagents.{name}.enabled: true/false`
-3. **Runtime:** Stop Atelier, update config, restart
-
-**Safety note:** `web-searcher` is disabled by default to prevent unintended external lookups.
+Internally:
+- MCP servers are started via `contextlib.AsyncExitStack` + `mcp.client.stdio.stdio_client`
+- Tool names from MCP servers are prefixed `{server_name}__{tool_name}` to avoid collisions
+- The loop runs until `stop_reason == "end_turn"` or `max_turns` is exhausted
+- `anthropic.AsyncAnthropic(base_url=ANTHROPIC_BASE_URL)` routes calls through the LiteLLM proxy
 
 ## Common Development Tasks
 
@@ -354,7 +325,7 @@ Subagents can be toggled via configuration:
 - **Validation errors** (Portail): Log and continue (don't block pipeline)
 - **Authorization failures** (Sentinelle): Return False to leave in PEL for operator review
 - **LLM failures** (Atelier): Retry with backoff, then route to DLQ if exhausted
-- **Memory service timeouts** (Atelier): Return False to retry (7.5s timeout per attempt)
+- **Memory service timeouts** (Atelier): Return False to retry (3.0s timeout per attempt — intentionally short for graceful degradation)
 
 ### Debugging Stream State
 
@@ -394,6 +365,7 @@ tail -f ~/.relais/logs/events.jsonl
 
 - `docs/ARCHITECTURE.md` - Detailed technical architecture, initialization order, flux diagrams
 - `docs/CONTRIBUTING.md` - Development setup, testing patterns, brick implementation checklist
+- **`docs/REDIS_BUS_API.md`** - **Canonical reference for ALL Redis Streams and Pub/Sub channels** (schemas, consumer groups, XACK contract). Consult this before writing any code that publishes to or consumes from the bus.
 - `README.md` - MVP phases, quick start, configuration structure
 - `pyproject.toml` - Dependencies, package metadata
 

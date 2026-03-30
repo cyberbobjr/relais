@@ -1,7 +1,7 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour:** 2026-03-29
-**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (Subagents autonomes)
+**Dernière mise à jour:** 2026-03-30
+**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (InternalTools + MCP stdio), 5c (déduplication streaming Discord)
 
 ---
 
@@ -147,7 +147,7 @@ PIPELINE CORE
 │   ▼
 │ ATELIER (transformer)
 │ ├─ Charge SOUL + contexte long-term
-│ ├─ Appelle LLM via claude-agent-sdk (SDKExecutor)
+│ ├─ Appelle LLM via anthropic.AsyncAnthropic (SDKExecutor)
 │ ├─ Streams output → relais:messages:streaming:{channel}:{correlation_id}
 │ ├─ Publie réponse si succès
 │ └─ Publie en DLQ si échec après retries
@@ -167,11 +167,41 @@ SORTANT (Canaux externes)
 └─ relais:messages:outgoing:*
    ▼
    AIGUILLEUR/{channel} (producer)
-   ├─ Discord → Discord API
+   ├─ Discord → Discord API  (avec déduplication streaming — voir ci-dessous)
    ├─ Telegram → Telegram API
    ├─ Slack → Slack API
    └─ REST → HTTP webhook
 ```
+
+### Déduplication streaming Discord
+
+Pour les canaux dans `STREAMING_CAPABLE_CHANNELS` (`discord`, `telegram`, `tui`), Atelier publie à la fois :
+- les chunks progressifs sur `relais:messages:streaming:{channel}:{correlation_id}` (rendu live)
+- l'enveloppe finale sur `relais:messages:outgoing:{channel}` (confirmé)
+
+Sans mécanisme de déduplication, Aiguilleur Discord enverrait deux messages identiques. Le mécanisme Option C résout ce problème :
+
+```
+Atelier publie Pub/Sub → relais:streaming:start:discord
+    │
+    ↓
+Aiguilleur: _handle_streaming_message() spawné
+    ├── channel.send("▌")                      → discord_msg_id obtenu
+    └── SETEX relais:streamed_msg:{corr_id} 300 {discord_msg_id}
+        (chunks progressifs → msg.edit())
+
+Atelier XADD → relais:messages:outgoing:discord (metadata.streamed=True)
+    │
+    ↓
+Aiguilleur: consume_outgoing_stream()
+    ├── metadata["streamed"] == True ?
+    │   ├── OUI → GET relais:streamed_msg:{corr_id}
+    │   │         ├── clé présente → partial.edit(content) + DELETE clé  ✓
+    │   │         └── clé absente (TTL expiré) → channel.send() (fallback)
+    └── NON → channel.send() (comportement normal)
+```
+
+**Clé Redis impliquée** : `relais:streamed_msg:{correlation_id}` — String, TTL 300s, valeur = Discord message ID.
 
 ---
 
@@ -195,6 +225,7 @@ SORTANT (Canaux externes)
 | `relais:memory:request` | Souvenir | Atelier | Requêtes mémoire (`get`) avant appel SDK |
 | `relais:memory:response` | Atelier | Souvenir | Réponses mémoire (contexte court-terme) |
 | `relais:messages:streaming:{channel}:{correlation_id}` | Aiguilleur/{channel} | Atelier | Chunks streaming progressif (Discord edit mode) |
+| `relais:streamed_msg:{correlation_id}` | (Redis String, TTL 300s) | Aiguilleur/discord | Discord message ID du placeholder streaming (déduplication) |
 
 ### Streams de sortie
 
@@ -686,32 +717,53 @@ alembic current
 
 ## Atelier — Exécution LLM et Streaming Progressif
 
-### Architecture SDKExecutor
+### Architecture SDKExecutor + McpSessionManager
 
-L'Atelier utilise `SDKExecutor` wrappant `claude-agent-sdk` (PyPI: `claude-agent-sdk >=0.1.51`):
+L'Atelier utilise deux classes complémentaires :
+
+- **`SDKExecutor`** (`atelier/sdk_executor.py`) — boucle agentique, appels LLM via `anthropic.AsyncAnthropic` (PyPI: `anthropic >=0.40.0`), dispatch des outils internes et MCP.
+- **`McpSessionManager`** (`atelier/mcp_session_manager.py`) — cycle de vie des serveurs MCP (démarrage, sessions, dispatch avec timeout). Séparé de l'exécuteur pour que la logique MCP soit isolée et testable indépendamment.
 
 ```python
 class SDKExecutor:
     async def execute(self, envelope, context, stream_callback=None) -> str:
-        # Workaround Bug #677: cli_path=shutil.which("claude")
-        # Force le binaire système qui respecte ANTHROPIC_BASE_URL
-        options = ClaudeAgentOptions(
-            cli_path=shutil.which("claude"),
-            env={
-                "ANTHROPIC_BASE_URL": "http://localhost:4000",  # LiteLLM proxy
-                "ANTHROPIC_API_KEY": "litellm-master-key",
-            },
-            system_prompt=assembled_soul,
-            model=profile.model,
-            max_turns=profile.max_turns,
-            mcp_servers=mcp_config,  # MCP natif (pas de conversion ToolParam)
-        )
+        messages = self._build_messages(envelope, context)
+        mcp_manager = McpSessionManager(self._profile, self._mcp_servers)
+        async with contextlib.AsyncExitStack() as stack:
+            mcp_tools = await mcp_manager.start_all(stack)
+            return await self._run_agentic_loop(
+                messages, mcp_tools, mcp_manager, stream_callback
+            )
 
-        # Streaming via callbacks
-        async for chunk in client.execute(options, stream_callback=stream_callback):
-            if stream_callback:
-                await stream_callback(chunk)  # Publié via StreamPublisher
+    async def _run_agentic_loop(self, messages, mcp_tools, mcp_manager, stream_callback):
+        all_tools = self._internal_tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
+        full_reply = ""
+        for turn in range(self._profile.max_turns):
+            async with self._client.messages.stream(
+                model=self._profile.model, max_tokens=self._profile.max_tokens,
+                system=self._soul_prompt, messages=messages, tools=all_tools
+            ) as stream:
+                async for text in stream.text_stream:
+                    full_reply += text
+                    if stream_callback:
+                        await stream_callback(text)
+                final_msg = await stream.get_final_message()
+            if final_msg.stop_reason != "tool_use":
+                break
+            # Inject tool results and continue loop...
+        return full_reply
 ```
+
+Le client est initialisé avec `base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000")` pour le routage via le proxy LiteLLM.
+
+### Outils internes (InternalTool)
+
+`SDKExecutor` accepte une liste d'`InternalTool` (Python natif) dont les schémas sont pré-calculés à la construction et fusionnés avec les outils MCP à chaque tour :
+
+- **`InternalTool`** — dataclass `(name, description, input_schema, handler)` ; handler sync ou async
+- **`make_skills_tools(skills_dir)`** — expose `list_skills` et `read_skill` pour découverte des SKILL.md
+- Les schémas internes (`_internal_tool_schemas`) sont calculés une seule fois dans `__init__` et réutilisés
+- Les outils internes sont prioritaires sur les outils MCP en cas de nom identique
 
 ### Streaming Progressif
 
@@ -727,34 +779,38 @@ relais:messages:streaming:{channel}:{correlation_id}
 
 **Throttling Discord:** 80 caractères minimum entre éditions (rate limit 5 req/5s).
 
-### Subagents Autonomes (Phase 5)
+### Serveurs MCP — McpSessionManager
 
-Atelier supporte les subagents autonomes pour étendre les capacités du système sans intervention manuelle.
+`McpSessionManager` isole toute l'infrastructure MCP. Les serveurs configurés dans `config/mcp_servers.yaml` sont démarrés comme sous-processus (stdio) ou connexions HTTP (SSE) pour chaque message traité :
 
-**Architecture:**
-- `SubagentConfig` dataclass dans `atelier/mcp_loader.py` (name, description, enabled, tools)
-- `load_subagents_for_sdk()` charge tous les subagents configurés depuis `config/mcp_servers.yaml`
-- `SDKExecutor` accepte `subagents: dict | None` et passe `agents=` à `ClaudeAgentOptions`
-- `"Task"` automatiquement ajouté aux `allowed_tools` pour activer la délégation aux subagents
-
-**Configuration:**
-- `config/config.yaml.default` : `subagents: enabled: true`
-- `config/mcp_servers.yaml.default` : Trois subagents pré-configurés
-  - `memory-retriever` (activé) : Récupère/gère la mémoire conversationnelle
-  - `web-searcher` (désactivé par défaut) : Recherche web
-  - `code-explorer` (activé) : Analyse et exécution de code
-
-**Contrôle de profondeur:**
-- `ProfileConfig.max_agent_depth: int = 2` limite la récursion des subagents
-- Tous les profils dans `config/profiles.yaml` héritent cette limite
-
-**Flux d'exécution:**
 ```
-Atelier → SDKExecutor.execute(envelope, context, subagents)
+McpSessionManager.start_all(stack: AsyncExitStack)
   ↓
-ClaudeAgentOptions(agents=subagents, allowed_tools=["Task", ...])
+  stdio → StdioServerParameters(command, args, env) → stdio_client
+  sse   → sse_client(url)
   ↓
-LLM peut invoquer Task → subagent nommé → delegation autonome
+ClientSession.initialize() → session.list_tools()
+  ↓
+noms préfixés {server}__{tool} → retournés comme list[dict] Anthropic
+  ↓
+McpSessionManager.call_tool("{server}__{tool}", input)
+  → asyncio.wait_for(session.call_tool(...), timeout=mcp_timeout)
+  → résultat injecté dans la boucle (erreur retournée en string, pas levée)
+```
+
+**Flux d'exécution avec tool use:**
+```
+Atelier → SDKExecutor.execute(envelope, context)
+  ↓
+McpSessionManager.start_all(stack) → mcp_tools (schémas Anthropic)
+  ↓
+anthropic.AsyncAnthropic.messages.stream(model, system, messages, tools)
+  ↓
+stop_reason == "tool_use" → _call_tool()
+  → InternalTool.handler()  (outils Python natifs)
+  → McpSessionManager.call_tool()  (outils MCP externes)
+  ↓
+tool_result injecté → tour suivant → jusqu'à end_turn ou max_turns
   ↓
 Résultat agrégé → relais:messages:outgoing:{channel}
 ```

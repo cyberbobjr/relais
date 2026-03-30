@@ -21,28 +21,29 @@ FULL_YAML = textwrap.dedent(
     """\
     timeout: 10
     max_tools: 20
-    global:
-      - name: filesystem
-        enabled: true
-        type: stdio
-        command: npx
-        args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-      - name: web-search
-        enabled: false
-        type: stdio
-        command: npx
-        args: ["-y", "@modelcontextprotocol/server-brave-search"]
-        env:
-          BRAVE_API_KEY: "${BRAVE_API_KEY}"
-    contextual:
-      - name: code-tools
-        enabled: true
-        type: stdio
-        command: npx
-        args: ["-y", "@modelcontextprotocol/server-github"]
-        profiles: [coder, precise]
-        env:
-          GITHUB_TOKEN: "${GITHUB_TOKEN}"
+    mcp_servers:
+      global:
+        - name: filesystem
+          enabled: true
+          type: stdio
+          command: npx
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        - name: web-search
+          enabled: false
+          type: stdio
+          command: npx
+          args: ["-y", "@modelcontextprotocol/server-brave-search"]
+          env:
+            BRAVE_API_KEY: "${BRAVE_API_KEY}"
+      contextual:
+        - name: code-tools
+          enabled: true
+          type: stdio
+          command: npx
+          args: ["-y", "@modelcontextprotocol/server-github"]
+          profiles: [coder, precise]
+          env:
+            GITHUB_TOKEN: "${GITHUB_TOKEN}"
     """
 )
 
@@ -50,13 +51,14 @@ ONLY_GLOBAL_YAML = textwrap.dedent(
     """\
     timeout: 10
     max_tools: 20
-    global:
-      - name: filesystem
-        enabled: true
-        type: stdio
-        command: npx
-        args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-    contextual: []
+    mcp_servers:
+      global:
+        - name: filesystem
+          enabled: true
+          type: stdio
+          command: npx
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      contextual: []
     """
 )
 
@@ -64,13 +66,32 @@ NO_ENV_YAML = textwrap.dedent(
     """\
     timeout: 10
     max_tools: 20
-    global:
-      - name: no-env-server
-        enabled: true
-        type: stdio
-        command: npx
-        args: ["-y", "@modelcontextprotocol/server-test"]
-    contextual: []
+    mcp_servers:
+      global:
+        - name: no-env-server
+          enabled: true
+          type: stdio
+          command: npx
+          args: ["-y", "@modelcontextprotocol/server-test"]
+      contextual: []
+    """
+)
+
+SSE_YAML = textwrap.dedent(
+    """\
+    mcp_servers:
+      global:
+        - name: calendar
+          enabled: true
+          type: sse
+          url: "http://127.0.0.1:8100"
+        - name: search
+          enabled: true
+          type: sse
+          url: "http://127.0.0.1:8101"
+          env:
+            API_KEY: "${SEARCH_API_KEY}"
+      contextual: []
     """
 )
 
@@ -120,6 +141,21 @@ def no_env_yaml(tmp_path: Path) -> Path:
     return p
 
 
+@pytest.fixture()
+def sse_yaml(tmp_path: Path) -> Path:
+    """Write a YAML fixture with SSE servers to a temporary file.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+
+    Returns:
+        Path to the written YAML file.
+    """
+    p = tmp_path / "mcp_servers.yaml"
+    p.write_text(SSE_YAML)
+    return p
+
+
 # ---------------------------------------------------------------------------
 # 1. Returns empty list when no config file found
 # ---------------------------------------------------------------------------
@@ -136,10 +172,10 @@ def test_returns_empty_list_if_no_config(monkeypatch: pytest.MonkeyPatch) -> Non
         monkeypatch: Pytest fixture for safe attribute patching.
     """
     import atelier.mcp_loader as _mod
+    from unittest.mock import patch
 
-    monkeypatch.setattr(_mod, "_CASCADE_DIRS", [Path("/nonexistent/__mcp_cascade_test__")])
-
-    result = load_mcp_servers()
+    with patch.object(_mod, "resolve_config_path", side_effect=FileNotFoundError):
+        result = load_mcp_servers()
 
     assert result == []
 
@@ -320,12 +356,13 @@ def test_config_found_via_cascade(
         monkeypatch: Pytest fixture for safe attribute patching.
     """
     import atelier.mcp_loader as _mod
+    from unittest.mock import patch
 
     config_file = tmp_path / "mcp_servers.yaml"
     config_file.write_text(ONLY_GLOBAL_YAML)
-    monkeypatch.setattr(_mod, "_CASCADE_DIRS", [tmp_path])
 
-    result = load_mcp_servers()
+    with patch.object(_mod, "resolve_config_path", return_value=config_file):
+        result = load_mcp_servers()
 
     assert any(s.name == "filesystem" for s in result)
 
@@ -338,14 +375,15 @@ CONTEXTUAL_DISABLED_YAML = textwrap.dedent(
     """\
     timeout: 10
     max_tools: 20
-    global: []
-    contextual:
-      - name: disabled-contextual
-        enabled: false
-        type: stdio
-        command: npx
-        args: ["-y", "@modelcontextprotocol/server-test"]
-        profiles: [coder]
+    mcp_servers:
+      global: []
+      contextual:
+        - name: disabled-contextual
+          enabled: false
+          type: stdio
+          command: npx
+          args: ["-y", "@modelcontextprotocol/server-test"]
+          profiles: [coder]
     """
 )
 
@@ -382,16 +420,16 @@ def test_load_for_sdk_returns_empty_dict_when_no_config(
         monkeypatch: Pytest fixture for safe attribute patching.
     """
     import atelier.mcp_loader as _mod
+    from unittest.mock import patch
 
-    monkeypatch.setattr(_mod, "_CASCADE_DIRS", [Path("/nonexistent/__sdk_test__")])
-
-    result = load_for_sdk()
+    with patch.object(_mod, "resolve_config_path", side_effect=FileNotFoundError):
+        result = load_for_sdk()
 
     assert result == {}
 
 
 # ---------------------------------------------------------------------------
-# 13. load_for_sdk returns correct dict format for enabled servers
+# 13. load_for_sdk returns correct dict format for stdio servers
 # ---------------------------------------------------------------------------
 
 
@@ -399,8 +437,8 @@ def test_load_for_sdk_returns_empty_dict_when_no_config(
 def test_load_for_sdk_returns_correct_format(full_yaml: Path) -> None:
     """load_for_sdk() returns a dict mapping server name to its config dict.
 
-    The expected format is:
-        {"server_name": {"command": "...", "args": [...], "env": {...}}}
+    For stdio servers the expected format is:
+        {"server_name": {"type": "stdio", "command": "...", "args": [...]}}
 
     The 'env' key is present only when the server's env dict is non-empty.
 
@@ -414,6 +452,7 @@ def test_load_for_sdk_returns_correct_format(full_yaml: Path) -> None:
     assert "web-search" not in result
 
     fs = result["filesystem"]
+    assert fs["type"] == "stdio"
     assert fs["command"] == "npx"
     assert fs["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     # filesystem has no env in the fixture
@@ -474,3 +513,69 @@ def test_load_for_sdk_omits_env_key_when_empty(no_env_yaml: Path) -> None:
 
     assert "no-env-server" in result
     assert "env" not in result["no-env-server"]
+
+
+# ---------------------------------------------------------------------------
+# 17. SSE server config is loaded correctly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_sse_server_config_loaded(sse_yaml: Path) -> None:
+    """load_mcp_servers() populates type, url, and leaves command=None for SSE servers.
+
+    Args:
+        sse_yaml: Fixture path to a YAML file with SSE server definitions.
+    """
+    result = load_mcp_servers(config_path=sse_yaml)
+
+    assert len(result) == 2
+    cal = next(s for s in result if s.name == "calendar")
+    assert cal.type == "sse"
+    assert cal.url == "http://127.0.0.1:8100"
+    assert cal.command is None
+    assert cal.args == []
+
+
+# ---------------------------------------------------------------------------
+# 18. load_for_sdk returns correct format for SSE servers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_for_sdk_sse_server_format(sse_yaml: Path) -> None:
+    """load_for_sdk() returns {type, url} for SSE servers and omits command/args.
+
+    Args:
+        sse_yaml: Fixture path to a YAML file with SSE server definitions.
+    """
+    result = load_for_sdk(config_path=sse_yaml)
+
+    assert "calendar" in result
+    cal = result["calendar"]
+    assert cal["type"] == "sse"
+    assert cal["url"] == "http://127.0.0.1:8100"
+    assert "command" not in cal
+    assert "args" not in cal
+    assert "env" not in cal
+
+
+# ---------------------------------------------------------------------------
+# 19. load_for_sdk includes env for SSE servers when non-empty
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_for_sdk_sse_env_included_when_non_empty(sse_yaml: Path) -> None:
+    """load_for_sdk() includes the 'env' key for SSE servers that have env vars.
+
+    Args:
+        sse_yaml: Fixture path to a YAML file with SSE server definitions.
+    """
+    result = load_for_sdk(config_path=sse_yaml)
+
+    assert "search" in result
+    search = result["search"]
+    assert search["type"] == "sse"
+    assert "env" in search
+    assert search["env"] == {"API_KEY": "${SEARCH_API_KEY}"}

@@ -1,4 +1,6 @@
-"""Unit tests for atelier.sdk_executor — all claude_agent_sdk imports are mocked."""
+"""Unit tests for atelier.sdk_executor — uses anthropic.AsyncAnthropic mocks."""
+
+from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,32 +8,40 @@ import pytest
 
 from common.envelope import Envelope
 from atelier.profile_loader import ProfileConfig, ResilienceConfig
+from atelier.internal_tool import InternalTool
 
 
 # ---------------------------------------------------------------------------
-# Fake SDK types (distinct classes for reliable isinstance() checks)
+# Fake Anthropic SDK types
 # ---------------------------------------------------------------------------
 
 
 class FakeTextBlock:
-    """Fake TextBlock with a .text attribute."""
+    """Fake text content block."""
+
+    type = "text"
 
     def __init__(self, text: str) -> None:
         self.text = text
 
 
-class FakeAssistantMessage:
-    """Fake AssistantMessage with a .content list of blocks."""
+class FakeToolUseBlock:
+    """Fake tool_use content block."""
 
-    def __init__(self, texts: list[str]) -> None:
-        self.content = [FakeTextBlock(t) for t in texts]
+    type = "tool_use"
+
+    def __init__(self, tool_id: str, name: str, input: dict) -> None:
+        self.id = tool_id
+        self.name = name
+        self.input = input
 
 
-class FakeResultMessage:
-    """Fake ResultMessage with a .subtype attribute."""
+class FakeFinalMessage:
+    """Fake final message returned by stream.get_final_message()."""
 
-    def __init__(self, subtype: str) -> None:
-        self.subtype = subtype
+    def __init__(self, stop_reason: str, content: list | None = None) -> None:
+        self.stop_reason = stop_reason
+        self.content = content or []
 
 
 # ---------------------------------------------------------------------------
@@ -40,15 +50,6 @@ class FakeResultMessage:
 
 
 def _make_profile(model: str = "claude-opus-4-5", max_turns: int = 10) -> ProfileConfig:
-    """Build a minimal ProfileConfig for testing.
-
-    Args:
-        model: LLM model identifier.
-        max_turns: Maximum agentic turns.
-
-    Returns:
-        A ProfileConfig instance.
-    """
     return ProfileConfig(
         model=model,
         temperature=0.7,
@@ -59,14 +60,6 @@ def _make_profile(model: str = "claude-opus-4-5", max_turns: int = 10) -> Profil
 
 
 def _make_envelope(content: str = "Hello") -> Envelope:
-    """Build a minimal Envelope for testing.
-
-    Args:
-        content: Message content.
-
-    Returns:
-        An Envelope instance.
-    """
     return Envelope(
         content=content,
         sender_id="discord:123",
@@ -76,478 +69,754 @@ def _make_envelope(content: str = "Hello") -> Envelope:
     )
 
 
-def _make_sdk_context_manager(messages: list) -> AsyncMock:
-    """Build a mock ClaudeSDKClient async context manager.
-
-    The mock client yields the given messages from receive_response().
+def _make_stream_cm(
+    chunks: list[str],
+    stop_reason: str = "end_turn",
+    content: list | None = None,
+):
+    """Build an async context manager that mimics client.messages.stream().
 
     Args:
-        messages: List of message objects to yield from receive_response().
+        chunks: Text chunks yielded by text_stream.
+        stop_reason: Value of final_message.stop_reason.
+        content: List of blocks in final_message.content.
 
     Returns:
-        An async-context-manager mock for ClaudeSDKClient.
+        Async context manager mock yielding a stream_obj with text_stream
+        and get_final_message().
     """
-    async def _aiter():
-        for m in messages:
-            yield m
+    async def _text_stream():
+        for c in chunks:
+            yield c
 
-    client = AsyncMock()
-    client.query = AsyncMock()
-    client.receive_response = MagicMock(return_value=_aiter())
+    stream_obj = MagicMock()
+    stream_obj.text_stream = _text_stream()
+    stream_obj.get_final_message = AsyncMock(
+        return_value=FakeFinalMessage(stop_reason, content or [])
+    )
 
     cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aenter__ = AsyncMock(return_value=stream_obj)
     cm.__aexit__ = AsyncMock(return_value=False)
     return cm
 
 
-def _sdk_patches(cm: AsyncMock):
-    """Return a stack of patches replacing the module-level SDK names.
-
-    Uses the Fake* classes so isinstance() behaves correctly in execute().
+def _make_executor(mock_client=None, profile=None, tools=None, mcp_servers=None):
+    """Instantiate SDKExecutor with a patched AsyncAnthropic client.
 
     Args:
-        cm: The mock context manager to use for ClaudeSDKClient.
+        mock_client: The mock to return from AsyncAnthropic().
+        profile: ProfileConfig to use (defaults to _make_profile()).
+        tools: InternalTool list (defaults to []).
+        mcp_servers: MCP servers dict (defaults to {}).
 
     Returns:
-        A list of active patch context managers (use with nested `with`
-        statements or apply them manually).
+        SDKExecutor instance with patched Anthropic client.
     """
-    return [
-        patch("atelier.sdk_executor.shutil.which", return_value="/usr/local/bin/claude"),
-        patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm),
-        patch("atelier.sdk_executor.ClaudeAgentOptions"),
-        patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage),
-        patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage),
-    ]
+    from atelier.sdk_executor import SDKExecutor
+
+    if mock_client is None:
+        mock_client = MagicMock()
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        return SDKExecutor(
+            profile=profile or _make_profile(),
+            soul_prompt="You are helpful.",
+            mcp_servers=mcp_servers if mcp_servers is not None else {},
+            tools=tools or [],
+        )
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# execute() — basic behaviour
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_execute_returns_text_reply() -> None:
-    """execute() returns the concatenated text from AssistantMessage blocks."""
-    from atelier.sdk_executor import SDKExecutor
+    """execute() returns concatenated text from the stream."""
+    mock_client = MagicMock()
+    mock_client.messages.stream.return_value = _make_stream_cm(
+        ["Hello", " world"], stop_reason="end_turn"
+    )
 
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([
-        FakeAssistantMessage(["Hello"]),
-        FakeResultMessage("success"),
-    ])
-
-    patches = _sdk_patches(cm)
-    for p in patches:
-        p.start()
-    try:
-        executor = SDKExecutor(profile=profile, soul_prompt="You are helpful.", mcp_servers={})
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(), soul_prompt="soul", mcp_servers={}
+        )
         result = await executor.execute(envelope=_make_envelope(), context=[])
-    finally:
-        for p in reversed(patches):
-            p.stop()
 
-    assert result == "Hello"
+    assert result == "Hello world"
 
 
 @pytest.mark.asyncio
 async def test_execute_calls_stream_callback() -> None:
-    """execute() calls stream_callback for each text chunk in AssistantMessage."""
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([
-        FakeAssistantMessage(["chunk1"]),
-        FakeAssistantMessage(["chunk2"]),
-        FakeResultMessage("success"),
-    ])
+    """execute() calls stream_callback for each text chunk."""
+    mock_client = MagicMock()
+    mock_client.messages.stream.return_value = _make_stream_cm(
+        ["chunk1", "chunk2"], stop_reason="end_turn"
+    )
 
     callback_calls: list[str] = []
 
     async def stream_cb(text: str) -> None:
         callback_calls.append(text)
 
-    patches = _sdk_patches(cm)
-    for p in patches:
-        p.start()
-    try:
-        executor = SDKExecutor(profile=profile, soul_prompt="You are helpful.", mcp_servers={})
-        await executor.execute(
-            envelope=_make_envelope(),
-            context=[],
-            stream_callback=stream_cb,
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(), soul_prompt="soul", mcp_servers={}
         )
-    finally:
-        for p in reversed(patches):
-            p.stop()
+        await executor.execute(
+            envelope=_make_envelope(), context=[], stream_callback=stream_cb
+        )
 
     assert callback_calls == ["chunk1", "chunk2"]
 
 
 @pytest.mark.asyncio
-async def test_execute_raises_sdk_execution_error_on_non_success() -> None:
-    """execute() raises SDKExecutionError when ResultMessage.subtype != 'success'."""
-    from atelier.sdk_executor import SDKExecutor, SDKExecutionError
-
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("error")])
-
-    patches = _sdk_patches(cm)
-    for p in patches:
-        p.start()
-    try:
-        executor = SDKExecutor(profile=profile, soul_prompt="You are helpful.", mcp_servers={})
-        with pytest.raises(SDKExecutionError):
-            await executor.execute(envelope=_make_envelope(), context=[])
-    finally:
-        for p in reversed(patches):
-            p.stop()
-
-
-@pytest.mark.asyncio
-async def test_cli_path_uses_shutil_which() -> None:
-    """ClaudeAgentOptions is called with cli_path from shutil.which('claude')."""
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
-
-    mock_which = patch("atelier.sdk_executor.shutil.which", return_value="/custom/bin/claude")
-    mock_client = patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm)
-    mock_options = patch("atelier.sdk_executor.ClaudeAgentOptions")
-    mock_am = patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage)
-    mock_rm = patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage)
-
-    with mock_which as which_m, mock_client, mock_options as options_m, mock_am, mock_rm:
-        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-        await executor.execute(envelope=_make_envelope(), context=[])
-
-    which_m.assert_called_with("claude")
-    call_kwargs = options_m.call_args.kwargs
-    assert call_kwargs.get("cli_path") == "/custom/bin/claude"
-
-
-@pytest.mark.asyncio
-async def test_execute_uses_profile_model_and_max_turns() -> None:
-    """ClaudeAgentOptions receives model and max_turns from the ProfileConfig."""
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile(model="claude-opus-4-5", max_turns=42)
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
-
-    mock_client = patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm)
-    mock_options = patch("atelier.sdk_executor.ClaudeAgentOptions")
-    mock_which = patch("atelier.sdk_executor.shutil.which", return_value="/usr/bin/claude")
-    mock_am = patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage)
-    mock_rm = patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage)
-
-    with mock_which, mock_client, mock_options as options_m, mock_am, mock_rm:
-        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-        await executor.execute(envelope=_make_envelope(), context=[])
-
-    call_kwargs = options_m.call_args.kwargs
-    assert call_kwargs.get("model") == "claude-opus-4-5"
-    assert call_kwargs.get("max_turns") == 42
-
-
-@pytest.mark.asyncio
 async def test_execute_no_stream_callback_works() -> None:
     """execute() works correctly when stream_callback is None."""
-    from atelier.sdk_executor import SDKExecutor
+    mock_client = MagicMock()
+    mock_client.messages.stream.return_value = _make_stream_cm(
+        ["answer"], stop_reason="end_turn"
+    )
 
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([
-        FakeAssistantMessage(["answer"]),
-        FakeResultMessage("success"),
-    ])
-
-    patches = _sdk_patches(cm)
-    for p in patches:
-        p.start()
-    try:
-        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-        result = await executor.execute(
-            envelope=_make_envelope(),
-            context=[],
-            stream_callback=None,
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(), soul_prompt="soul", mcp_servers={}
         )
-    finally:
-        for p in reversed(patches):
-            p.stop()
+        result = await executor.execute(
+            envelope=_make_envelope(), context=[], stream_callback=None
+        )
 
     assert result == "answer"
 
 
-@pytest.mark.unit
-def test_sdk_executor_exposes_resilience_config() -> None:
-    """SDKExecutor exposes the resilience config so callers can implement retry logic.
-
-    The SDK does not retry on proxy/network errors; callers are expected to
-    inspect executor.resilience and wrap execute() with their own backoff loop.
-    """
-    from atelier.sdk_executor import SDKExecutor
-
-    resilience = ResilienceConfig(retry_attempts=3, retry_delays=[2, 5, 15], fallback_model=None)
-    executor = SDKExecutor(
-        profile=ProfileConfig(
-            model="test-model",
-            temperature=0.7,
-            max_tokens=1024,
-            max_turns=10,
-            resilience=resilience,
-        ),
-        soul_prompt="test",
-        mcp_servers={},
+@pytest.mark.asyncio
+async def test_execute_uses_profile_model_and_max_tokens() -> None:
+    """messages.stream() receives model and max_tokens from ProfileConfig."""
+    mock_client = MagicMock()
+    mock_client.messages.stream.return_value = _make_stream_cm(
+        [], stop_reason="end_turn"
     )
+
+    profile = _make_profile(model="claude-haiku-4-5")
+    profile = ProfileConfig(
+        model="claude-haiku-4-5",
+        temperature=0.5,
+        max_tokens=512,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        max_turns=3,
+    )
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=profile, soul_prompt="soul", mcp_servers={}
+        )
+        await executor.execute(envelope=_make_envelope(), context=[])
+
+    kwargs = mock_client.messages.stream.call_args.kwargs
+    assert kwargs["model"] == "claude-haiku-4-5"
+    assert kwargs["max_tokens"] == 512
+
+
+# ---------------------------------------------------------------------------
+# execute() — error handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_raises_sdk_error_on_api_status_error() -> None:
+    """execute() raises SDKExecutionError on anthropic.APIStatusError."""
+    import httpx
+    import anthropic as _anthropic
+    from atelier.sdk_executor import SDKExecutionError
+
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.headers = {"request-id": "test-id"}
+    mock_response.request = MagicMock(spec=httpx.Request)
+    api_err = _anthropic.APIStatusError("server error", response=mock_response, body=None)
+
+    mock_client = MagicMock()
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(side_effect=api_err)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.messages.stream.return_value = cm
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(), soul_prompt="soul", mcp_servers={}
+        )
+        with pytest.raises(SDKExecutionError, match="500"):
+            await executor.execute(envelope=_make_envelope(), context=[])
+
+
+@pytest.mark.asyncio
+async def test_execute_propagates_connection_error_unwrapped() -> None:
+    """execute() lets APIConnectionError propagate WITHOUT wrapping it in SDKExecutionError.
+
+    Transient network errors must NOT be converted to SDKExecutionError
+    (which would cause Atelier to ACK and route to DLQ). Instead they must
+    propagate as-is so _handle_message catches them in the generic except
+    branch and returns False (message stays in PEL for re-delivery).
+    """
+    import anthropic as _anthropic
+    from atelier.sdk_executor import SDKExecutionError
+
+    conn_err = _anthropic.APIConnectionError(request=MagicMock())
+
+    mock_client = MagicMock()
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(side_effect=conn_err)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    mock_client.messages.stream.return_value = cm
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(), soul_prompt="soul", mcp_servers={}
+        )
+        # Must raise the original APIConnectionError, NOT SDKExecutionError
+        with pytest.raises(_anthropic.APIConnectionError):
+            await executor.execute(envelope=_make_envelope(), context=[])
+
+
+@pytest.mark.asyncio
+async def test_execute_exits_after_max_turns() -> None:
+    """execute() stops the agentic loop after max_turns iterations without hanging.
+
+    When the model always returns stop_reason='tool_use', the loop must exit
+    cleanly after max_turns and return whatever text was accumulated.
+    """
+    mock_client = MagicMock()
+
+    tool_block = FakeToolUseBlock("t-loop", "list_skills", {})
+    # Every turn: stop_reason=tool_use — loop would run forever without the cap
+    loop_cm = _make_stream_cm(["partial "], stop_reason="tool_use", content=[tool_block])
+
+    mock_client.messages.stream.return_value = loop_cm
+    # side_effect is not set: always returns the same tool_use mock
+
+    tool = InternalTool(
+        name="list_skills",
+        description="list",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda: "- skill_a",
+    )
+
+    max_turns = 3
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(max_turns=max_turns),
+            soul_prompt="soul",
+            mcp_servers={},
+            tools=[tool],
+        )
+        # Must return without raising; stream is called exactly max_turns times
+        result = await executor.execute(envelope=_make_envelope(), context=[])
+
+    assert mock_client.messages.stream.call_count == max_turns
+    assert "partial" in result  # text accumulated across turns
+
+
+# ---------------------------------------------------------------------------
+# execute() — tool-use agentic loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_handles_tool_use_loop() -> None:
+    """execute() performs a second turn when stop_reason is tool_use."""
+    mock_client = MagicMock()
+
+    tool_block = FakeToolUseBlock("tool-1", "list_skills", {})
+    turn1_content = [FakeTextBlock("thinking..."), tool_block]
+
+    turn1_cm = _make_stream_cm(
+        ["thinking..."], stop_reason="tool_use", content=turn1_content
+    )
+    turn2_cm = _make_stream_cm(["Final answer"], stop_reason="end_turn")
+
+    mock_client.messages.stream.side_effect = [turn1_cm, turn2_cm]
+
+    tool = InternalTool(
+        name="list_skills",
+        description="list skills",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda: "skill_a",
+    )
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(max_turns=5),
+            soul_prompt="soul",
+            mcp_servers={},
+            tools=[tool],
+        )
+        result = await executor.execute(envelope=_make_envelope(), context=[])
+
+    assert "Final answer" in result
+    assert mock_client.messages.stream.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_injects_tool_result_into_messages() -> None:
+    """After tool execution, the result is injected as a user message."""
+    mock_client = MagicMock()
+
+    tool_block = FakeToolUseBlock("t-1", "list_skills", {})
+    turn1_content = [tool_block]
+    turn1_cm = _make_stream_cm([], stop_reason="tool_use", content=turn1_content)
+    turn2_cm = _make_stream_cm(["done"], stop_reason="end_turn")
+
+    mock_client.messages.stream.side_effect = [turn1_cm, turn2_cm]
+
+    tool = InternalTool(
+        name="list_skills",
+        description="list",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda: "- skill_a",
+    )
+
+    captured_messages: list = []
+
+    def capture_stream(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        # Return the appropriate mock based on call count
+        return mock_client.messages.stream.side_effect[0]
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(max_turns=5),
+            soul_prompt="soul",
+            mcp_servers={},
+            tools=[tool],
+        )
+        await executor.execute(envelope=_make_envelope(), context=[])
+
+    # Second call to messages.stream must include tool_result in messages
+    second_call_messages = mock_client.messages.stream.call_args_list[1].kwargs["messages"]
+    tool_result_msgs = [
+        m for m in second_call_messages
+        if m.get("role") == "user"
+        and isinstance(m.get("content"), list)
+        and any(b.get("type") == "tool_result" for b in m["content"])
+    ]
+    assert len(tool_result_msgs) == 1
+
+
+# ---------------------------------------------------------------------------
+# resilience config exposure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_executor_exposes_resilience_config() -> None:
+    """SDKExecutor exposes the resilience config so callers can implement retry."""
+    resilience = ResilienceConfig(retry_attempts=3, retry_delays=[2, 5, 15], fallback_model=None)
+    mock_client = MagicMock()
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=ProfileConfig(
+                model="test-model",
+                temperature=0.7,
+                max_tokens=1024,
+                max_turns=10,
+                resilience=resilience,
+            ),
+            soul_prompt="test",
+            mcp_servers={},
+        )
+
     assert executor.resilience.retry_attempts == 3
     assert executor.resilience.retry_delays == [2, 5, 15]
     assert executor.resilience.fallback_model is None
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.4 — Additional gap-filling tests (A1–A5)
+# _build_messages
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_build_prompt_with_non_empty_context() -> None:
-    """_build_prompt returns context turns followed by the new user message.
+def test_build_messages_empty_context() -> None:
+    """_build_messages with empty context returns a single user message."""
+    executor = _make_executor()
+    envelope = _make_envelope(content="first message")
+    messages = executor._build_messages(envelope, [])
 
-    Given a two-turn context (user + assistant) and a new envelope message,
-    the resulting prompt must be each turn prefixed with [role]: joined by
-    newlines, with the envelope content appended as the final [user]: line.
-    """
-    from atelier.sdk_executor import SDKExecutor
+    assert messages == [{"role": "user", "content": "first message"}]
 
-    profile = _make_profile()
-    executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
+
+@pytest.mark.unit
+def test_build_messages_with_context() -> None:
+    """_build_messages appends the envelope content after context turns."""
+    executor = _make_executor()
     context = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
     envelope = _make_envelope(content="next question")
-    result = executor._build_prompt(envelope, context)
-    assert result == "[user]: hello\n[assistant]: hi\n[user]: next question"
+    messages = executor._build_messages(envelope, context)
+
+    assert messages[0] == {"role": "user", "content": "hello"}
+    assert messages[1] == {"role": "assistant", "content": "hi"}
+    assert messages[2] == {"role": "user", "content": "next question"}
 
 
 @pytest.mark.unit
-def test_build_prompt_with_empty_context() -> None:
-    """_build_prompt with empty context returns only the new user message line.
+def test_build_messages_inserts_empty_user_when_context_starts_with_assistant() -> None:
+    """_build_messages inserts an empty user turn when context starts with assistant."""
+    executor = _make_executor()
+    context = [{"role": "assistant", "content": "hi"}]
+    envelope = _make_envelope(content="hello")
+    messages = executor._build_messages(envelope, context)
 
-    There must be no leading newlines or empty lines when context is [].
-    """
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-    executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-    envelope = _make_envelope(content="first message")
-    result = executor._build_prompt(envelope, [])
-    assert result == "[user]: first message"
+    assert messages[0] == {"role": "user", "content": ""}
+    assert messages[1] == {"role": "assistant", "content": "hi"}
+    assert messages[2] == {"role": "user", "content": "hello"}
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_with_cli_path_none_passes_none_to_options() -> None:
-    """When shutil.which returns None, ClaudeAgentOptions is called with cli_path=None.
+def test_build_messages_filters_unknown_roles() -> None:
+    """_build_messages drops turns with roles other than user/assistant."""
+    executor = _make_executor()
+    context = [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "ignored"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    messages = executor._build_messages(_make_envelope(), context)
 
-    The startup guard in Atelier.__init__ is the caller's responsibility.
-    SDKExecutor itself must faithfully pass whatever shutil.which returns —
-    including None — to ClaudeAgentOptions so the SDK can surface the error.
-    """
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
-
-    mock_which = patch("atelier.sdk_executor.shutil.which", return_value=None)
-    mock_client = patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm)
-    mock_options = patch("atelier.sdk_executor.ClaudeAgentOptions")
-    mock_am = patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage)
-    mock_rm = patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage)
-
-    with mock_which, mock_client, mock_options as options_m, mock_am, mock_rm:
-        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-        await executor.execute(envelope=_make_envelope(), context=[])
-
-    call_kwargs = options_m.call_args.kwargs
-    assert call_kwargs.get("cli_path") is None
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_with_mixed_text_and_non_text_blocks() -> None:
-    """execute() concatenates only text blocks, skipping non-text block types.
-
-    An AssistantMessage containing [TextBlock, ToolUseBlock, TextBlock] should
-    produce "hello world" (text blocks only, non-text blocks ignored).
-    """
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-
-    # Build mock blocks: two text blocks surrounding a block with no .text attribute
-    text_block_1 = MagicMock()
-    text_block_1.text = "hello"
-    tool_block = MagicMock(spec=["id"])  # only has .id, no .text
-    del tool_block.text  # ensure getattr(block, "text", None) returns None
-    text_block_2 = MagicMock()
-    text_block_2.text = " world"
-
-    mixed_message = FakeAssistantMessage([])
-    mixed_message.content = [text_block_1, tool_block, text_block_2]
-
-    cm = _make_sdk_context_manager([mixed_message, FakeResultMessage("success")])
-
-    patches = _sdk_patches(cm)
-    for p in patches:
-        p.start()
-    try:
-        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-        result = await executor.execute(envelope=_make_envelope(), context=[])
-    finally:
-        for p in reversed(patches):
-            p.stop()
-
-    assert result == "hello world"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_returns_empty_string_when_no_assistant_message() -> None:
-    """execute() returns "" when the stream contains only a ResultMessage success.
-
-    No AssistantMessage before the final ResultMessage means no text was
-    produced; execute() should return an empty string without raising.
-    """
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
-
-    patches = _sdk_patches(cm)
-    for p in patches:
-        p.start()
-    try:
-        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
-        result = await executor.execute(envelope=_make_envelope(), context=[])
-    finally:
-        for p in reversed(patches):
-            p.stop()
-
-    assert result == ""
+    roles = [m["role"] for m in messages]
+    assert "system" not in roles
+    assert len([r for r in roles if r == "user"]) == 2  # context + envelope
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Subagent support tests (T10–T12)
+# _get_anthropic_tools
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_with_subagents_passes_agents_to_options() -> None:
-    """SDKExecutor passes agents= to ClaudeAgentOptions when subagents are provided.
+def test_get_anthropic_tools_includes_internal_tools() -> None:
+    """_get_anthropic_tools returns internal tools in Anthropic format."""
+    tool = InternalTool(
+        name="my_tool",
+        description="does something",
+        input_schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        handler=lambda x: x,
+    )
+    executor = _make_executor(tools=[tool])
+    result = executor._get_anthropic_tools([])
 
-    When SDKExecutor is constructed with a non-empty subagents dict, the agents
-    kwarg forwarded to ClaudeAgentOptions must equal that dict.
-    """
-    from atelier.sdk_executor import SDKExecutor
-
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
-
-    fake_agent = MagicMock()
-    subagents = {"memory-retriever": fake_agent}
-
-    mock_which = patch("atelier.sdk_executor.shutil.which", return_value="/usr/bin/claude")
-    mock_client = patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm)
-    mock_options = patch("atelier.sdk_executor.ClaudeAgentOptions")
-    mock_am = patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage)
-    mock_rm = patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage)
-
-    with mock_which, mock_client, mock_options as options_m, mock_am, mock_rm:
-        executor = SDKExecutor(
-            profile=profile,
-            soul_prompt="soul",
-            mcp_servers={},
-            subagents=subagents,
-        )
-        await executor.execute(envelope=_make_envelope(), context=[])
-
-    call_kwargs = options_m.call_args.kwargs
-    assert call_kwargs.get("agents") == subagents
+    assert len(result) == 1
+    assert result[0]["name"] == "my_tool"
+    assert result[0]["description"] == "does something"
 
 
 @pytest.mark.unit
+def test_get_anthropic_tools_merges_mcp_tools() -> None:
+    """_get_anthropic_tools merges internal and MCP tools."""
+    tool = InternalTool(
+        name="internal_tool",
+        description="internal",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda: "x",
+    )
+    mcp_tool = {
+        "name": "server__mcp_tool",
+        "description": "from mcp",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    }
+    executor = _make_executor(tools=[tool])
+    result = executor._get_anthropic_tools([mcp_tool])
+
+    names = [t["name"] for t in result]
+    assert "internal_tool" in names
+    assert "server__mcp_tool" in names
+
+
+# ---------------------------------------------------------------------------
+# _call_tool dispatch
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_execute_with_subagents_does_not_set_allowed_tools() -> None:
-    """SDKExecutor does NOT set allowed_tools when subagents dict is non-empty.
+async def test_call_tool_dispatches_to_internal_handler() -> None:
+    """_call_tool invokes the internal handler for known tool names."""
+    from atelier.mcp_session_manager import McpSessionManager
 
-    The SDK makes the Task tool available implicitly when agents= is set.
-    No explicit allowed_tools override is needed — passing one would
-    incorrectly restrict other tools available to the principal agent.
-    The allowed_tools kwarg must be absent (or None) even when subagents are
-    present.
-    """
-    from atelier.sdk_executor import SDKExecutor
+    tool = InternalTool(
+        name="echo",
+        description="echo",
+        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}, "required": ["msg"]},
+        handler=lambda msg: f"echoed: {msg}",
+    )
+    executor = _make_executor(tools=[tool])
+    mcp_manager = McpSessionManager(_make_profile(), {})
+    result = await executor._call_tool("echo", {"msg": "hello"}, mcp_manager)
+    assert result == "echoed: hello"
 
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
 
-    fake_agent = MagicMock()
-    subagents = {"code-explorer": fake_agent}
+@pytest.mark.asyncio
+async def test_call_tool_dispatches_to_async_internal_handler() -> None:
+    """_call_tool awaits async internal handlers correctly."""
+    from atelier.mcp_session_manager import McpSessionManager
 
-    mock_which = patch("atelier.sdk_executor.shutil.which", return_value="/usr/bin/claude")
-    mock_client = patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm)
-    mock_options = patch("atelier.sdk_executor.ClaudeAgentOptions")
-    mock_am = patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage)
-    mock_rm = patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage)
+    async def async_handler(x: str) -> str:
+        return f"async: {x}"
 
-    with mock_which, mock_client, mock_options as options_m, mock_am, mock_rm:
-        executor = SDKExecutor(
-            profile=profile,
-            soul_prompt="soul",
-            mcp_servers={},
-            subagents=subagents,
-        )
-        await executor.execute(envelope=_make_envelope(), context=[])
+    tool = InternalTool(
+        name="async_tool",
+        description="async",
+        input_schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        handler=async_handler,
+    )
+    executor = _make_executor(tools=[tool])
+    mcp_manager = McpSessionManager(_make_profile(), {})
+    result = await executor._call_tool("async_tool", {"x": "val"}, mcp_manager)
+    assert result == "async: val"
 
-    call_kwargs = options_m.call_args.kwargs
-    # allowed_tools must not be set (or be None) — the SDK handles Task implicitly
-    allowed_tools = call_kwargs.get("allowed_tools")
-    assert allowed_tools is None, (
-        f"expected allowed_tools=None but got {allowed_tools!r}; "
-        "the SDK exposes Task implicitly via agents=, no override required"
+
+# ---------------------------------------------------------------------------
+# mcp_max_tools — _get_anthropic_tools caps MCP tool list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_get_anthropic_tools_caps_mcp_tools_at_mcp_max_tools() -> None:
+    """_get_anthropic_tools includes at most mcp_max_tools MCP tools."""
+    profile = ProfileConfig(
+        model="test-model",
+        temperature=0.7,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        mcp_timeout=10,
+        mcp_max_tools=2,
+    )
+    executor = _make_executor(profile=profile)
+
+    mcp_tools = [
+        {"name": f"srv__tool_{i}", "description": "", "input_schema": {}}
+        for i in range(5)
+    ]
+    result = executor._get_anthropic_tools(mcp_tools)
+
+    mcp_names = [t["name"] for t in result if t["name"].startswith("srv__")]
+    assert len(mcp_names) == 2
+
+
+@pytest.mark.unit
+def test_get_anthropic_tools_zero_mcp_max_tools_exposes_no_mcp_tools() -> None:
+    """_get_anthropic_tools exposes zero MCP tools when mcp_max_tools is 0."""
+    profile = ProfileConfig(
+        model="test-model",
+        temperature=0.7,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        mcp_timeout=5,
+        mcp_max_tools=0,
+    )
+    executor = _make_executor(profile=profile)
+
+    mcp_tools = [
+        {"name": "srv__tool_a", "description": "", "input_schema": {}},
+        {"name": "srv__tool_b", "description": "", "input_schema": {}},
+    ]
+    result = executor._get_anthropic_tools(mcp_tools)
+
+    mcp_names = [t["name"] for t in result if t["name"].startswith("srv__")]
+    assert mcp_names == []
+
+
+@pytest.mark.unit
+def test_get_anthropic_tools_internal_tools_not_counted_in_cap() -> None:
+    """Internal tools are never capped by mcp_max_tools."""
+    internal = InternalTool(
+        name="my_internal",
+        description="internal",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda: "x",
+    )
+    profile = ProfileConfig(
+        model="test-model",
+        temperature=0.7,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        mcp_timeout=10,
+        mcp_max_tools=1,
+    )
+    executor = _make_executor(profile=profile, tools=[internal])
+
+    mcp_tools = [
+        {"name": "srv__tool_a", "description": "", "input_schema": {}},
+        {"name": "srv__tool_b", "description": "", "input_schema": {}},
+    ]
+    result = executor._get_anthropic_tools(mcp_tools)
+
+    names = [t["name"] for t in result]
+    # Internal tool always present
+    assert "my_internal" in names
+    # MCP tools capped at 1
+    mcp_names = [n for n in names if n.startswith("srv__")]
+    assert len(mcp_names) == 1
+
+
+# ---------------------------------------------------------------------------
+# load_profiles — mcp_timeout and mcp_max_tools parsed from YAML
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_profiles_parses_mcp_timeout_and_max_tools(tmp_path) -> None:
+    """load_profiles() correctly parses mcp_timeout and mcp_max_tools per profile."""
+    import textwrap
+    from atelier.profile_loader import load_profiles
+
+    yaml_content = textwrap.dedent("""\
+        profiles:
+          test_profile:
+            model: test-model
+            temperature: 0.7
+            max_tokens: 1024
+            mcp_timeout: 15
+            mcp_max_tools: 25
+            memory_scope: own
+            resilience:
+              retry_attempts: 1
+              retry_delays: [1]
+    """)
+    config_file = tmp_path / "profiles.yaml"
+    config_file.write_text(yaml_content)
+
+    profiles = load_profiles(config_path=config_file)
+    p = profiles["test_profile"]
+
+    assert p.mcp_timeout == 15
+    assert p.mcp_max_tools == 25
+
+
+@pytest.mark.unit
+def test_load_profiles_defaults_mcp_timeout_and_max_tools(tmp_path) -> None:
+    """load_profiles() uses defaults (10, 20) when mcp_timeout/mcp_max_tools are absent."""
+    import textwrap
+    from atelier.profile_loader import load_profiles
+
+    yaml_content = textwrap.dedent("""\
+        profiles:
+          minimal:
+            model: test-model
+            temperature: 0.5
+            max_tokens: 512
+            memory_scope: own
+            resilience:
+              retry_attempts: 1
+              retry_delays: [1]
+    """)
+    config_file = tmp_path / "profiles.yaml"
+    config_file.write_text(yaml_content)
+
+    profiles = load_profiles(config_path=config_file)
+    p = profiles["minimal"]
+
+    assert p.mcp_timeout == 10
+    assert p.mcp_max_tools == 20
+
+
+# ---------------------------------------------------------------------------
+# max_tokens stop_reason — warning branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_logs_warning_on_max_tokens(caplog) -> None:
+    """_run_agentic_loop emits a WARNING when stop_reason is 'max_tokens'."""
+    import logging
+
+    mock_client = MagicMock()
+    mock_client.messages.stream.return_value = _make_stream_cm(
+        ["truncated reply"], stop_reason="max_tokens"
     )
 
+    profile = ProfileConfig(
+        model="test-model",
+        temperature=0.7,
+        max_tokens=256,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        max_turns=3,
+    )
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(profile=profile, soul_prompt="soul", mcp_servers={})
+        with caplog.at_level(logging.WARNING, logger="atelier.sdk_executor"):
+            result = await executor.execute(envelope=_make_envelope(), context=[])
+
+    assert result == "truncated reply"
+    assert any("max_tokens" in record.message for record in caplog.records)
+    assert any("256" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# skills_tools — path traversal rejection
+# ---------------------------------------------------------------------------
+
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_with_empty_subagents_passes_agents_none() -> None:
-    """SDKExecutor passes agents=None when subagents dict is empty.
+def test_read_skill_rejects_path_with_slash(tmp_path) -> None:
+    """read_skill returns an error string for skill names containing '/'."""
+    from atelier.skills_tools import make_skills_tools
 
-    An empty dict must be normalized to None so the SDK does not receive
-    an empty agents dict (which could differ from None in SDK behavior).
-    """
-    from atelier.sdk_executor import SDKExecutor
+    tools = make_skills_tools(tmp_path)
+    read_tool = next(t for t in tools if t.name == "read_skill")
+    result = read_tool.handler(skill_name="../secret")
+    assert "invalid" in result.lower() or "error" in result.lower()
 
-    profile = _make_profile()
-    cm = _make_sdk_context_manager([FakeResultMessage("success")])
 
-    mock_which = patch("atelier.sdk_executor.shutil.which", return_value="/usr/bin/claude")
-    mock_client = patch("atelier.sdk_executor.ClaudeSDKClient", return_value=cm)
-    mock_options = patch("atelier.sdk_executor.ClaudeAgentOptions")
-    mock_am = patch("atelier.sdk_executor.AssistantMessage", new=FakeAssistantMessage)
-    mock_rm = patch("atelier.sdk_executor.ResultMessage", new=FakeResultMessage)
+@pytest.mark.unit
+def test_read_skill_rejects_double_dot(tmp_path) -> None:
+    """read_skill returns an error string for skill names containing '..'."""
+    from atelier.skills_tools import make_skills_tools
 
-    with mock_which, mock_client, mock_options as options_m, mock_am, mock_rm:
-        executor = SDKExecutor(
-            profile=profile,
-            soul_prompt="soul",
-            mcp_servers={},
-            subagents={},
-        )
-        await executor.execute(envelope=_make_envelope(), context=[])
+    tools = make_skills_tools(tmp_path)
+    read_tool = next(t for t in tools if t.name == "read_skill")
+    result = read_tool.handler(skill_name="..")
+    assert "invalid" in result.lower() or "error" in result.lower()
 
-    call_kwargs = options_m.call_args.kwargs
-    assert call_kwargs.get("agents") is None
+
+@pytest.mark.unit
+def test_read_skill_rejects_backslash(tmp_path) -> None:
+    """read_skill returns an error string for skill names containing backslash."""
+    from atelier.skills_tools import make_skills_tools
+
+    tools = make_skills_tools(tmp_path)
+    read_tool = next(t for t in tools if t.name == "read_skill")
+    result = read_tool.handler(skill_name="foo\\..\\bar")
+    assert "invalid" in result.lower() or "error" in result.lower()
+
+
+@pytest.mark.unit
+def test_read_skill_returns_content_for_valid_skill(tmp_path) -> None:
+    """read_skill returns the SKILL.md content for a valid, existing skill."""
+    from atelier.skills_tools import make_skills_tools
+
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# My Skill\nSome content.")
+
+    tools = make_skills_tools(tmp_path)
+    read_tool = next(t for t in tools if t.name == "read_skill")
+    result = read_tool.handler(skill_name="my-skill")
+    assert "My Skill" in result
+    assert "Some content" in result

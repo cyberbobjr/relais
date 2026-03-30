@@ -98,7 +98,6 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     mock_profile = MagicMock()
     mock_profile.model = "test-model"
     mock_profile.max_turns = 20
-    mock_profile.max_agent_depth = 2
     mock_profile.name = "default"
     mock_profile.allowed_tools = None
     mock_profile.guardrails = ()
@@ -106,7 +105,6 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     with (
         patch("atelier.main.load_profiles", return_value={"default": mock_profile}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_subagents_for_sdk", return_value={}),
         patch("atelier.main.resolve_profile", return_value=mock_profile),
         patch("atelier.main.assemble_system_prompt", return_value="[SOUL MOCK]"),
         patch("atelier.main.SDKExecutor") as MockSDK,

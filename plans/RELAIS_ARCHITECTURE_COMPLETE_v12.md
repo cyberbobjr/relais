@@ -16,14 +16,12 @@
 - **Variable `RELAIS_HOME`** — override explicite du répertoire utilisateur
 - **Initialisation au premier lancement** — création automatique de `~/.relais/` avec les fichiers par défaut
 
-### Phase 5 — Subagents autonomes
+### Phase 5 — InternalTools + MCP stdio
 
-- **`SubagentConfig`** — dataclass frozen dans `atelier/mcp_loader.py` : champs `name`, `description`, `enabled`, `tools`
-- **`load_subagents_for_sdk()`** — charge les définitions depuis `mcp_servers.yaml`, vérifie le master switch `subagents.enabled` dans `config.yaml`, retourne un `dict[str, AgentDefinition]` prêt pour `ClaudeAgentOptions.agents`
-- **`AgentDefinition`** (claude-agent-sdk) — `prompt` auto-généré depuis `description`, `model=None` (hérite du parent), `mcpServers=None` (hérite tous les MCPs), `maxTurns=max_agent_depth`
-- **`max_agent_depth`** — nouveau champ de `ProfileConfig` (défaut `2`), limite la récursion des sous-agents via `maxTurns` dans chaque `AgentDefinition`
-- **Master switch** — `subagents.enabled: true/false` dans `config.yaml` désactive globalement tous les sous-agents sans toucher au YAML des profils
-- **Sous-agents par défaut** : `memory-retriever` (activé), `web-searcher` (désactivé), `code-explorer` (activé, via GitHub MCP, restriction d'outils)
+- **`InternalTool`** — frozen dataclass dans `atelier/internal_tool.py` : `name`, `description`, `input_schema`, `handler` (callable sync ou async)
+- **`make_skills_tools(skills_dir)`** — construit deux outils internes : `list_skills` (catalogue) et `read_skill` (lecture complète d'un `SKILL.md`)
+- **`load_for_sdk(profile)`** — lit `mcp_servers.yaml`, filtre par `enabled` et profil, retourne un `dict[str, {command, args, env}]` prêt pour `SDKExecutor`
+- **`SDKExecutor`** — démarre les serveurs MCP via `AsyncExitStack` + `mcp.client.stdio.stdio_client`, préfixe les outils MCP `{server}__{tool}`, gère la boucle agentique explicite (`stop_reason == "tool_use"` → injection `tool_result` → rebouclage)
 
 ---
 
@@ -381,39 +379,38 @@ MCP CONTEXTUELS — claude-agent-sdk (lancés à la demande)
 
 ### config/mcp_servers.yaml
 
+Format canonique avec clé racine `mcp_servers:` — deux transports supportés : `stdio` (sous-processus spawné par l'Atelier) et `sse` (connexion à un serveur HTTP existant).
+
 ```yaml
-# MCP servers globaux — gérés par supervisord
-global_mcp_servers:
+mcp_servers:
 
-  mcp-calendar:
-    command: "python3 mcp/calendar/server.py"
-    port: 9100
-    autostart: true
-    env:
-      GOOGLE_CREDENTIALS: ${GOOGLE_CREDENTIALS_PATH}
+  # Serveurs globaux — disponibles pour tous les profils
+  global:
+    - name: filesystem
+      enabled: true
+      type: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    - name: calendar
+      enabled: false
+      type: sse
+      url: "http://127.0.0.1:8100"
 
-  mcp-brave-search:
-    command: "node mcp/brave-search/server.js"
-    port: 9101
-    autostart: true
-    env:
-      BRAVE_API_KEY: ${BRAVE_API_KEY}
-
-# MCP servers contextuels — lancés par claude-agent-sdk
-# Définis ici pour centraliser les commandes de lancement
-contextual_mcp_servers:
-
-  mcp-jcodemunch:
-    command: "npx -y @jcodemunch/mcp-server"
-    type: stdio
-
-  mcp-gitlab:
-    command: "python3 mcp/gitlab/server.py"
-    type: stdio
-    env:
-      GITLAB_TOKEN: ${GITLAB_TOKEN}
-      GITLAB_URL: ${GITLAB_URL}
+  # Serveurs contextuels — activés selon le profil actif
+  contextual:
+    - name: code-tools
+      enabled: true
+      type: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      profiles: [coder, precise]
+      env:
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
 ```
+
+> **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
+>
+> **Timeout et nombre max d'outils** — configurés par profil dans `profiles.yaml` (`mcp_timeout`, `mcp_max_tools`), pas dans ce fichier.
 
 ```ini
 ; supervisord.conf — MCP globaux (priority 6)
@@ -891,6 +888,70 @@ async def receive_message(body: MessageRequest):
     ...
 ```
 
+### Configuration des canaux via `channels.yaml`
+
+Chaque canal est configuré et activé/désactivé via le fichier `channels.yaml` (cascade de résolution : `~/.relais/config/` → `/opt/relais/config/` → `./config/`). Cette centralisation permet de gérer les adaptateurs sans modification du code.
+
+```yaml
+channels:
+  discord:
+    enabled: true                    # Activé/désactivé
+    streaming: true                  # Streaming progressif support
+    type: native                     # "native" (Python, thread+asyncio) | "external" (subprocess)
+    class_path: null                 # Override : "aiguilleur.channels.discord.adapter.DiscordAiguilleur"
+    max_restarts: 5
+
+  telegram:
+    enabled: false
+    streaming: true
+    type: native
+    class_path: null
+    max_restarts: 5
+
+  slack:
+    enabled: false
+    streaming: false
+    type: native
+    class_path: null
+    max_restarts: 5
+
+  rest:
+    enabled: false
+    streaming: false
+    type: native
+    class_path: null
+    max_restarts: 5
+
+  tui:
+    enabled: false
+    streaming: true
+    type: native
+    class_path: null
+    max_restarts: 5
+
+  # Exemples externes (non-Python)
+  whatsapp:
+    enabled: false
+    streaming: false
+    type: external
+    command: "node"
+    args: ["aiguilleur/whatsapp/index.js"]
+    max_restarts: 3
+```
+
+**Paramètres clés :**
+- `enabled` — activé/désactivé (pas de suppression de fichiers, juste un toggle)
+- `streaming` — supporte le streaming progressif (flag utilisé par Atelier pour `STREAMING_CAPABLE_CHANNELS`)
+- `type` — `native` (thread Python + asyncio) ou `external` (subprocess via `Popen`)
+- `class_path` — override de la classe adaptateur (convention : `aiguilleur.channels.{name}.adapter.{Name}Aiguilleur`)
+- `max_restarts` — nombre max de redémarrages avant abandon (restart automatique avec backoff exponentiel `min(2^count, 30)` secondes)
+- `command`/`args` — requis pour type `external` uniquement
+
+**Découverte automatique des adaptateurs :**
+- Adaptateurs natifs : convention `aiguilleur.channels.{channel_name}.adapter` si `type: native`
+- Classe : `{ChannelName}Aiguilleur(NativeAiguilleur)` (ex. `DiscordAiguilleur`)
+- Si `class_path` fourni : utilisé à la place
+
 ### Tableau des canaux
 
 | Canal | Lib | Markdown | Auto-start | Auth |
@@ -1060,9 +1121,9 @@ channels:
 
 ---
 
-## 11. L'Atelier — exécution des agents, résilience LLM, sous-agents
+## 11. L'Atelier — exécution des agents, résilience LLM, outils internes
 
-**Updated 2026-03-28:** L'Atelier now uses `claude-agent-sdk` instead of direct HTTP calls to LiteLLM. This enables native MCP support, multi-turn conversations with memory, progressive streaming, and automatic subagent invocation.
+**Updated 2026-03-30:** L'Atelier utilise désormais le SDK Python natif `anthropic` (AsyncAnthropic) avec une boucle agentique tool-use explicite. La dépendance `claude-agent-sdk` et le binaire CLI Node.js `claude` sont supprimés. Les serveurs MCP stdio restent supportés via le SDK Python `mcp`.
 
 ### Architecture générale
 
@@ -1071,19 +1132,21 @@ L'Atelier follows this flow for each incoming task:
 ```
 Incoming envelope
   ↓
-Parse + load profile (model, max_turns, resilience, mcp_servers)
+Parse + load profile (model, max_turns, max_tokens, resilience)
   ↓
 Request context from Souvenir (relais:memory:request stream)
   ↓
-Assemble system prompt (6 layers: SOUL + role + user + channel + policy + user_facts)
+Assemble system prompt (SOUL + role + channel + policy + user_facts)
   ↓
 Load MCP servers for profile (mcp_loader.load_for_sdk)
   ↓
-Execute via claude-agent-sdk (SDKExecutor)
-  ├─ Uses system-installed `claude` CLI (workaround for bug #677)
-  ├─ Env: ANTHROPIC_BASE_URL=http://localhost:4000 (LiteLLM proxy)
-  ├─ Env: ANTHROPIC_API_KEY=litellm-master-key
-  └─ Subagents invoked automatically: memory-retriever, web-searcher, calendar-agent
+Build InternalTool list (make_skills_tools)
+  ↓
+Execute via SDKExecutor (anthropic.AsyncAnthropic + explicit tool-use loop)
+  ├─ base_url=ANTHROPIC_BASE_URL (LiteLLM proxy — direct, no CLI wrapper)
+  ├─ Start MCP stdio servers via mcp Python SDK + AsyncExitStack
+  ├─ Merge InternalTool + MCP tools → Anthropic tools list
+  └─ Loop: stream → tool calls → results → next turn, until end_turn or max_turns
   ↓
 If streaming capable (Discord/Telegram): publish chunks to relais:messages:streaming:{channel}:{correlation_id}
   ↓
@@ -1092,74 +1155,177 @@ Publish response to relais:messages:outgoing:{channel}
 Conditional XACK (success or DLQ) — never lose messages on retry
 ```
 
-### SDK integration — claude-agent-sdk
+### Stack technique — remplacement de claude-agent-sdk
 
-L'Atelier uses the `claude-agent-sdk` Python library via `atelier/sdk_executor.py`:
+| Composant | Ancienne approche | Nouvelle approche |
+|-----------|------------------|------------------|
+| Appels LLM | `claude-agent-sdk` → spawn CLI `claude` | `anthropic.AsyncAnthropic` direct |
+| `ANTHROPIC_BASE_URL` | Workaround Bug #677 (cli_path) | Supporté nativement via `base_url=` |
+| Dépendance externe | Binaire Node.js `claude` obligatoire | Python pur, aucun binaire requis |
+| Boucle tool-use | Gérée par le CLI (opaque) | Explicite dans `_run_agentic_loop()` |
+| Serveurs MCP | Via `ClaudeAgentOptions.mcp_servers` | `mcp` Python SDK + `stdio_client` |
+| Outils natifs | AgentDefinition (abandonné) | `InternalTool` avec handler Python |
+
+**Dépendances pip :** `anthropic`, `mcp` (remplacent `claude-agent-sdk`)
+
+### Modules — atelier/
+
+```
+atelier/
+├── main.py            # Brique principale — loop Redis, dispatch
+├── sdk_executor.py    # SDKExecutor : AsyncAnthropic + boucle agentique
+├── internal_tool.py   # Dataclass InternalTool (outil natif Python)
+├── skills_tools.py    # make_skills_tools() → list_skills + read_skill
+├── mcp_loader.py      # Chargement config MCP servers (inchangé)
+├── profile_loader.py  # ProfileConfig, ResilienceConfig (inchangé)
+├── soul_assembler.py  # Assemblage prompt système (inchangé)
+└── stream_publisher.py # Publication chunks Redis (inchangé)
+```
+
+### SDK integration — anthropic.AsyncAnthropic
 
 ```python
 # atelier/sdk_executor.py
-import shutil, os
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AgentDefinition
+import anthropic
+import contextlib
 
 class SDKExecutor:
-    """Executes LLM tasks via claude-agent-sdk with native MCP, subagents, and streaming."""
-
-    async def execute(
-        self,
-        envelope: Envelope,
-        context: list[dict],
-        stream_callback=None
-    ) -> str:
-        """Execute task via SDK. Returns assembled reply text."""
-        options = ClaudeAgentOptions(
-            cli_path=shutil.which("claude"),        # Workaround bug #677
-            env={
-                "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
-                "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY",
-                                     os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
-            },
-            system_prompt=self._soul_prompt,       # Assembled via soul_assembler
-            model=self._profile.model,             # e.g. "claude-opus-4-6"
-            max_turns=getattr(self._profile, "max_turns", 20),
-            mcp_servers=self._mcp_servers,         # Loaded via mcp_loader.load_for_sdk()
-            agents=self._build_subagents(),        # memory-retriever, web-searcher, calendar-agent
-            permission_mode="bypassPermissions",   # Autonomous operation
+    def __init__(self, profile, soul_prompt, mcp_servers, tools=None):
+        self._client = anthropic.AsyncAnthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY", ...),
+            base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
         )
+        self._internal_tools = {t.name: t for t in (tools or [])}
 
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(user_prompt)
-            full_reply = ""
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        text = getattr(block, "text", None)
-                        if text:
-                            full_reply += text
-                            if stream_callback:
-                                await stream_callback(text)  # Progressive streaming
-                elif isinstance(message, ResultMessage):
-                    if message.subtype != "success":
-                        raise SDKExecutionError(f"SDK non-success: {message.subtype}")
-                    break
-        return full_reply
-
-class SDKExecutionError(Exception):
-    """Non-retriable SDK failure (not transient network error)."""
-    pass
+    async def execute(self, envelope, context, stream_callback=None) -> str:
+        messages = self._build_messages(envelope, context)
+        async with contextlib.AsyncExitStack() as stack:
+            mcp_tools, mcp_sessions = await self._start_mcp_servers(stack)
+            return await self._run_agentic_loop(messages, mcp_tools, mcp_sessions, stream_callback)
 ```
 
-**Rationale for `cli_path` workaround:**
+### Boucle agentique — _run_agentic_loop()
 
-The `claude-agent-sdk` binary bundle (bug #677) ignores `ANTHROPIC_BASE_URL` environment variable, routing always to Anthropic API. By setting `cli_path=shutil.which("claude")`, we force the system-installed Claude Code CLI, which **does** respect `ANTHROPIC_BASE_URL`. This allows routing through the LiteLLM proxy at `http://localhost:4000` for model flexibility.
+```python
+async def _run_agentic_loop(self, messages, mcp_tools, mcp_sessions, stream_callback):
+    all_tools = self._get_anthropic_tools(mcp_tools)  # internal + MCP
+    full_reply = ""
 
-| Tool | `ANTHROPIC_BASE_URL` respected |
-|------|------------------------------|
-| Claude Code CLI (`claude`) | ✅ Oui, nativement |
-| SDK Python `anthropic` | ✅ Oui |
-| `claude-agent-sdk` binaire bundlé | ❌ Bug #677 — ignoré |
-| `claude-agent-sdk` + `cli_path=shutil.which("claude")` | ✅ Oui (workaround) |
+    for turn in range(self._profile.max_turns):
+        async with self._client.messages.stream(
+            model=self._profile.model,
+            max_tokens=self._profile.max_tokens,
+            system=self._soul_prompt,
+            messages=messages,
+            tools=all_tools or None,
+        ) as stream:
+            async for text in stream.text_stream:
+                full_reply += text
+                if stream_callback:
+                    await stream_callback(text)   # streaming temps réel Discord/Telegram
+            final_msg = await stream.get_final_message()
 
-### ProfileConfig — champs `max_turns` et `max_agent_depth`
+        if final_msg.stop_reason != "tool_use":
+            break  # end_turn, max_tokens, stop_sequence → fin
+
+        # Construire le tour assistant (text + tool_use blocks)
+        assistant_content = [{"type": b.type, ...} for b in final_msg.content]
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        # Exécuter les outils et injecter les résultats
+        tool_results = []
+        for block in final_msg.content:
+            if block.type == "tool_use":
+                result = await self._call_tool(block.name, block.input, mcp_sessions)
+                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+        messages.append({"role": "user", "content": tool_results})
+
+    return full_reply
+```
+
+### InternalTool — outils natifs Python
+
+`InternalTool` (dataclass frozen dans `atelier/internal_tool.py`) expose des outils Python directement dans la boucle agentique, sans serveur MCP.
+
+```python
+@dataclass(frozen=True)
+class InternalTool:
+    name: str           # identifiant envoyé à l'API Anthropic
+    description: str    # aide le modèle à choisir l'outil
+    input_schema: dict  # JSON Schema {"type": "object", "properties": {...}}
+    handler: Callable[..., str | Awaitable[str]]  # sync ou async
+```
+
+**Dispatch dans `_call_tool()` :**
+1. Si `tool_name in self._internal_tools` → appel du handler Python (sync ou async)
+2. Sinon → `_call_mcp_tool(tool_name, tool_input, mcp_sessions)` (format `server__tool`)
+
+### Skills InternalTools — make_skills_tools()
+
+`atelier/skills_tools.py` expose deux `InternalTool` pour la gestion des skills :
+
+| Outil | Description |
+|-------|-------------|
+| `list_skills` | Scanne `skills_dir` récursivement pour les `SKILL.md`, retourne un catalogue `"- {nom}: {première ligne}"` |
+| `read_skill(skill_name)` | Lit et retourne le contenu complet du `SKILL.md` correspondant |
+
+```python
+# atelier/main.py — dans _handle_message()
+tools = make_skills_tools(self._skills_dir)
+sdk_executor = SDKExecutor(profile=profile, ..., tools=tools)
+```
+
+`self._skills_dir` est chargé au démarrage depuis `Path(__file__).parent.parent / "skills"`.
+
+### Serveurs MCP — _start_mcp_servers()
+
+`SDKExecutor._start_mcp_servers()` prend en charge deux transports :
+
+```python
+async def _start_mcp_servers(self, stack: AsyncExitStack):
+    for server_name, cfg in self._mcp_servers.items():
+        transport = cfg.get("type", "stdio")
+
+        if transport == "stdio":
+            params = StdioServerParameters(
+                command=cfg["command"], args=cfg.get("args", []), env=cfg.get("env") or None
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
+
+        elif transport == "sse":
+            # mcp.client.sse est optionnel — guard _SSE_AVAILABLE
+            if not _SSE_AVAILABLE:
+                logger.warning("sse_client non disponible, serveur '%s' ignoré", server_name)
+                continue
+            read, write = await stack.enter_async_context(sse_client(cfg["url"]))
+
+        else:
+            logger.warning("Transport inconnu '%s' pour '%s', ignoré", transport, server_name)
+            continue
+
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        tool_list = await session.list_tools()
+        # Préfixe {server_name}__{tool_name} pour éviter les collisions
+        for tool in tool_list.tools:
+            tools.append({"name": f"{server_name}__{tool.name}", ...})
+        sessions[server_name] = session
+    return tools, sessions
+```
+
+**Import conditionnel :** si le package `mcp` est absent, `_start_mcp_servers()` loggue un warning et retourne `([], {})` sans crash. `_SSE_AVAILABLE` est levé à `False` si `mcp.client.sse` est absent. Les InternalTools restent fonctionnels dans les deux cas.
+
+**Format retourné par `mcp_loader.load_for_sdk()` :**
+```python
+# Serveur stdio
+{"server_name": {"type": "stdio", "command": "...", "args": [...], "env": {...}}}
+
+# Serveur SSE
+{"server_name": {"type": "sse", "url": "http://...", "env": {...}}}
+# env omis si vide
+```
+
+### ProfileConfig — champs clés
 
 ```python
 # atelier/profile_loader.py
@@ -1167,13 +1333,19 @@ The `claude-agent-sdk` binary bundle (bug #677) ignores `ANTHROPIC_BASE_URL` env
 class ProfileConfig:
     model: str
     temperature: float
-    max_tokens: int
+    max_tokens: int              # ← Passé à AsyncAnthropic.messages.stream()
     resilience: ResilienceConfig
-    max_turns: int = 20          # ← Nombre max de tours agentic (ClaudeAgentOptions)
-    max_agent_depth: int = 2     # ← Profondeur max de récursion des sous-agents
+    max_turns: int = 20          # ← Nombre max de tours de la boucle agentique
+    mcp_timeout: int = 10        # ← Timeout (s) par appel outil MCP (asyncio.wait_for)
+    mcp_max_tools: int = 20      # ← Max outils MCP exposés au modèle (0 = aucun)
+    # … autres champs : allowed_tools, allowed_mcp, guardrails, memory_scope, fallback_model
 ```
 
-`max_agent_depth` est passé comme `maxTurns` à chaque `AgentDefinition`, limitant ainsi la profondeur d'imbrication agent → sous-agent. La valeur `0` désactive les sous-agents pour ce profil.
+`max_turns` contrôle le nombre d'itérations de la boucle `_run_agentic_loop()`.
+
+`mcp_timeout` est appliqué via `asyncio.wait_for(session.call_tool(...), timeout=profile.mcp_timeout)` dans `_call_mcp_tool()`. Un `TimeoutError` retourne une chaîne d'erreur au modèle sans interrompre la boucle.
+
+`mcp_max_tools` tronque la liste des outils MCP dans `_get_anthropic_tools()` : `mcp_tools[:profile.mcp_max_tools]`. Les outils internes (`InternalTool`) ne sont pas comptés dans cette limite. La valeur `0` est utilisée par le profil `memory_extractor` pour désactiver complètement les outils MCP.
 
 ### Profil `memory_extractor` — extraction légère de faits utilisateur (Axe C)
 
@@ -1183,7 +1355,6 @@ Le Souvenir utilise ce profil pour extraire automatiquement les faits utilisateu
 - **Modèle léger** : `glm-4.7-flash` (vs gpt-3.5-turbo précédemment hardcodé)
 - **Latence minimale** : `max_tokens: 512`, `temperature: 0.1`
 - **Pas de mémoire contexte** : `short_term_messages: 0`
-- **Pas de sous-agents** : `max_agent_depth: 1`
 - **Pas de streaming** : `stream: false`
 - **Résilience légère** : 2 retries avec délai `[1, 3]`
 
@@ -1195,7 +1366,6 @@ memory_extractor:
   max_tokens: 512
   max_turns: 1
   stream: false
-  max_agent_depth: 1
   memory:
     short_term_messages: 0
   allowed_tools: null
@@ -1234,9 +1404,9 @@ class Souvenir:
 
 Ce chargement dynamique permet de changer le modèle d'extraction via configuration sans redéploiement.
 
-### Résilience LLM — fallback automatique
+### Résilience LLM — pattern XACK
 
-Si le backend LLM primaire (LiteLLM proxy) est indisponible, L'Atelier tente 3 fois avec backoff exponentiel. Après épuisement, le message est envoyé vers la DLQ `relais:tasks:failed`.
+Si le backend LLM (LiteLLM proxy) est indisponible, `SDKExecutor.execute()` lève `SDKExecutionError` (wrapping `APIStatusError` et `APIConnectionError`). L'appelant route vers la DLQ et ACK. Les erreurs transientes non catchées restent en PEL pour re-livraison.
 
 ```yaml
 # config/profiles.yaml — section résilience dans chaque profil
@@ -1247,143 +1417,21 @@ default:
   max_tokens: 2048
   resilience:
     retry_attempts: 3
-    retry_delays: [2, 5, 15]              # délais en secondes, backoff
-    fallback_model: null                  # N/A avec claude-agent-sdk
+    retry_delays: [2, 5, 15]   # délais en secondes, backoff exponentiel
+    fallback_model: null
 ```
 
-**Pattern XACK dans `atelier/main.py`** (fix pour perte silencieuse de tâches) :
+**Pattern XACK dans `atelier/main.py`** :
 
 ```python
-success = False
-try:
-    reply = await sdk_executor.execute(envelope, context, stream_callback)
-    await redis_conn.xadd("relais:messages:outgoing:{channel}", {"payload": response_envelope.to_json()})
-    success = True
-except SDKExecutionError as e:
-    # Non-retriable SDK error → Dead Letter Queue
-    await redis_conn.xadd("relais:tasks:failed", {
-        "payload": envelope.to_json(),
-        "reason": str(e),
-        "attempts": 1,
-        "failed_at": time.time()
-    })
-    success = True  # ACK — message dans DLQ, pas perdu
-except (httpx.ConnectError, httpx.TimeoutException) as e:
-    # Retriable network error — ne pas ACK, laisse en PEL
-    logger.warning(f"LLM unreachable: {e}")
-    pass
-finally:
-    if success:
-        await redis_conn.xack(self.stream_in, self.group_name, message_id)
+# SDKExecutionError → DLQ + ACK (non-retriable)
+# Exception générique → laisse en PEL (transient, re-delivery automatique)
+except SDKExecutionError as exc:
+    await redis_conn.xadd("relais:tasks:failed", {"payload": payload, "reason": str(exc), ...})
+    return True  # ACK — dans DLQ, pas perdu
+except Exception as exc:
+    return False  # pas d'ACK — reste en PEL
 ```
-
-### Subagents autonomes — architecture Phase 5
-
-L'Atelier charge les sous-agents depuis `mcp_servers.yaml` via `atelier/mcp_loader.py`. Le principal agent les invoque automatiquement via l'outil `Task` du SDK quand il juge opportun de déléguer.
-
-#### SubagentConfig — dataclass de configuration
-
-```python
-# atelier/mcp_loader.py
-@dataclass(frozen=True)
-class SubagentConfig:
-    """Immutable configuration for a single subagent entry.
-
-    Subagents are specialized sub-agents invoked by the principal agent via
-    the Task tool. They inherit the parent model and all MCP servers by default.
-    """
-    name: str
-    description: str
-    enabled: bool = True
-    tools: list[str] | None = None   # None = tous les outils disponibles
-```
-
-#### load_subagents_for_sdk() — conversion vers AgentDefinition
-
-```python
-# atelier/mcp_loader.py
-def load_subagents_for_sdk(
-    config_path: str | Path | None = None,
-    config_yaml_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Return subagent configs as an AgentDefinition dict for ClaudeAgentOptions.
-
-    Checks the master switch in config.yaml first — returns {} immediately when
-    subagents.enabled is false. Otherwise calls load_subagents() and converts
-    each SubagentConfig to an AgentDefinition instance.
-    """
-    if not _subagents_master_switch_enabled(resolved_config_yaml):
-        return {}                    # ← Master switch OFF : aucun sous-agent
-
-    subagents = load_subagents(config_path=config_path)
-    result: dict[str, Any] = {}
-    for sub in subagents:
-        prompt = f"You are a specialized subagent. Your role: {sub.description}."
-        result[sub.name] = AgentDefinition(
-            description=sub.description,
-            prompt=prompt,           # Auto-généré depuis description
-            tools=sub.tools,         # None = pas de restriction
-            model=None,              # Hérite du modèle de l'agent parent
-            mcpServers=None,         # Hérite de tous les MCPs du parent
-        )
-    return result
-```
-
-`AgentDefinition` (claude-agent-sdk v0.1.51) :
-
-| Champ | Valeur injectée | Effet |
-|-------|----------------|-------|
-| `description` | chaîne YAML | Texte décrivant le rôle pour le principal |
-| `prompt` | auto-généré depuis `description` | System prompt du sous-agent |
-| `model` | `None` | Hérite du modèle du principal agent |
-| `mcpServers` | `None` | Hérite de tous les MCPs configurés |
-| `tools` | liste ou `None` | Restreint les outils accessibles |
-| `maxTurns` | `profile.max_agent_depth` | Limite la profondeur de récursion |
-
-#### Master switch — config.yaml
-
-```yaml
-# config/config.yaml
-subagents:
-  enabled: true    # false = désactive tous les sous-agents globalement
-```
-
-Quand `enabled: false`, `load_subagents_for_sdk()` retourne `{}` immédiatement, sans lire `mcp_servers.yaml`. Le champ `agents=` de `ClaudeAgentOptions` est alors `None` : l'outil `Task` n'est pas disponible et le principal agent ne peut invoquer aucun sous-agent.
-
-#### Sous-agents par défaut — mcp_servers.yaml
-
-```yaml
-# config/mcp_servers.yaml.default
-subagents:
-  - name: memory-retriever
-    description: "Retrieve and store user memories, facts, and past interactions"
-    enabled: true             # ← Activé par défaut
-
-  - name: web-searcher
-    description: "Search the web for current information and documentation"
-    enabled: false            # ← Désactivé par défaut (nécessite BRAVE_API_KEY)
-
-  - name: code-explorer
-    description: "Explore GitHub repositories, search code and issues"
-    enabled: true             # ← Activé, limité aux outils GitHub
-    tools:
-      - "mcp__github__search_code"
-      - "mcp__github__search_repositories"
-      - "mcp__github__get_file_contents"
-```
-
-#### Intégration dans SDKExecutor
-
-```python
-# atelier/sdk_executor.py
-options = ClaudeAgentOptions(
-    # ...
-    agents=load_subagents_for_sdk(),   # dict[str, AgentDefinition] | None
-    # ...
-)
-```
-
-Quand `agents` est un dict non vide, le SDK expose l'outil `Task` au principal agent. Celui-ci l'invoque librement selon les besoins de la tâche. La profondeur de récursion est limitée par `maxTurns=profile.max_agent_depth` dans chaque `AgentDefinition`.
 
 ### Streaming progressif — édition temps réel Discord/Telegram
 
@@ -1489,56 +1537,6 @@ class ContextStore:
         })
         await self.redis_list.ltrim(session_id, 0, 19)  # Keep last 20
         await self.redis_list.expire(session_id, 86400)  # 24h TTL
-```
-
-### Limites des sous-agents
-
-```yaml
-# config/profiles.yaml — dans chaque profil humain
-ADMIN:
-  sub_agent_limits:
-    max_depth: 2           # max 2 niveaux d'imbrication (agent → sous-agent → stop)
-    max_token_budget: 50000  # budget tokens total pour la tâche parente + tous ses enfants
-
-SUPERVISOR:
-  sub_agent_limits:
-    max_depth: 1
-    max_token_budget: 20000
-
-USER:
-  sub_agent_limits:
-    max_depth: 0           # pas de sous-agents pour USER
-    max_token_budget: 0
-```
-
-```python
-# atelier/executor.py — propagation du budget
-class AgentExecutor:
-
-    async def execute(self, task: AgentTask) -> AgentResult:
-        # Enforce depth limit
-        current_depth = task.metadata.get("depth", 0)
-        max_depth = task.profile.sub_agent_limits.max_depth
-
-        if current_depth >= max_depth:
-            raise SubAgentDepthExceededError(
-                f"Max depth {max_depth} reached — sub-agent creation blocked"
-            )
-
-        # Enforce token budget across the entire task hierarchy
-        budget_key = f"relais:budget:{task.metadata.get('root_task_id', task.id)}"
-        used = await self.redis.incrby(budget_key, ESTIMATED_TOKENS)
-        await self.redis.expire(budget_key, 3600)
-
-        max_budget = task.profile.sub_agent_limits.max_token_budget
-        if max_budget and used > max_budget:
-            raise TokenBudgetExceededError(
-                f"Token budget {max_budget} exceeded for task hierarchy"
-            )
-
-        # Pass depth+1 to any sub-agent tasks spawned
-        task.metadata["depth"] = current_depth + 1
-        task.metadata["root_task_id"] = task.metadata.get("root_task_id", task.id)
 ```
 
 ### Graceful shutdown

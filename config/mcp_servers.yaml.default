@@ -8,45 +8,46 @@
 timeout: 10
 max_tools: 20
 
-# Global servers — available for every LLM profile.
-global:
-  - name: filesystem
-    enabled: true
-    type: stdio
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-  - name: web-search
-    enabled: false
-    type: stdio
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-brave-search"]
-    env:
-      BRAVE_API_KEY: "${BRAVE_API_KEY}"
+mcp_servers:
 
-# Contextual servers — loaded only when the active LLM profile is listed
-# in their 'profiles' array (or when no profile is specified).
-contextual:
-  - name: code-tools
-    enabled: true
-    type: stdio
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    profiles: [coder, precise]
-    env:
-      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+  # Global servers — available for every LLM profile.
+  #
+  # Two transports are supported:
+  #   type: stdio  — Atelier spawns the server as a subprocess (uses command/args).
+  #   type: sse    — Atelier connects to a running HTTP/SSE server (uses url).
+  global:
+    - name: filesystem
+      enabled: true
+      type: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    - name: web-search
+      enabled: false
+      type: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-brave-search"]
+      env:
+        BRAVE_API_KEY: "${BRAVE_API_KEY}"
+    # SSE server example (server must be running independently before Atelier starts):
+    # - name: calendar
+    #   enabled: false
+    #   type: sse
+    #   url: "http://127.0.0.1:8100"
 
-# Subagents — specialized sub-agents invoked by the principal agent via the Task tool.
-# Each subagent inherits the parent model (model: null) and all MCP servers.
-subagents:
-  - name: memory-retriever
-    description: "Retrieve and store user memories, facts, and past interactions"
-    enabled: true
-
-  - name: web-searcher
-    description: "Search the web for current information and documentation"
-    enabled: false
-
-  - name: code-explorer
-    description: "Explore GitHub repositories, search code and issues"
-    enabled: true
-    tools: ["mcp__github__search_code", "mcp__github__search_repositories", "mcp__github__get_file_contents"]
+  # Contextual servers — loaded only when the active LLM profile is listed
+  # in their 'profiles' array (or when no profile is specified).
+  contextual:
+    - name: code-tools
+      enabled: true
+      type: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      profiles: [coder, precise]
+      env:
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+    # SSE contextual example:
+    # - name: my-sse-server
+    #   enabled: false
+    #   type: sse
+    #   url: "http://127.0.0.1:8200"
+    #   profiles: [precise]

@@ -38,32 +38,57 @@ def resolve_config_path(filename: str) -> Path:
             candidate = base / fname
             if candidate.exists():
                 return candidate
-            
+
     raise FileNotFoundError(
         f"Config file '{filename}' not found.\n"
         f"Searched: {[str(p / filename) for p in CONFIG_SEARCH_PATH]}"
     )
 
+def resolve_prompts_dir() -> Path:
+    """Prompt templates directory.
+
+    Searches the config cascade so users can override prompts in
+    ``~/.relais/prompts/``.  Falls back to ``./prompts`` in dev mode.
+    The directory is NOT auto-created here — it is initialised by
+    ``initialize_user_dir`` on first run.
+    """
+    for base in CONFIG_SEARCH_PATH:
+        candidate = base / "prompts"
+        if candidate.is_dir():
+            return candidate
+    # No existing directory found — return the user-home path so callers
+    # get a stable (even if empty) path rather than raising.
+    return get_relais_home() / "prompts"
+
+
 def resolve_skills_dir() -> Path:
-    """Skills directory is ALWAYS in user home."""
-    path = get_relais_home() / "skills"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Skills directory is ALWAYS in user home.
+
+    The directory is NOT auto-created here — it is initialised by
+    ``initialize_user_dir`` on first run.
+    """
+    return get_relais_home() / "skills"
 
 def resolve_logs_dir() -> Path:
-    """L'Archiviste always writes to user home logs."""
-    path = get_relais_home() / "logs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """L'Archiviste always writes to user home logs.
+
+    The directory is NOT auto-created here — it is initialised by
+    ``initialize_user_dir`` on first run.
+    """
+    return get_relais_home() / "logs"
 
 def resolve_media_dir() -> Path:
-    """Temporary media files — always in user home."""
-    path = get_relais_home() / "media"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Temporary media files — always in user home.
+
+    The directory is NOT auto-created here — it is initialised by
+    ``initialize_user_dir`` on first run.
+    """
+    return get_relais_home() / "media"
 
 def resolve_storage_dir() -> Path:
-    """Persistent storage (SQLite databases) — always in user home."""
-    path = get_relais_home() / "storage"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Persistent storage (SQLite databases) — always in user home.
+
+    The directory is NOT auto-created here — it is initialised by
+    ``initialize_user_dir`` on first run.
+    """
+    return get_relais_home() / "storage"

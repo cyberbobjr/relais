@@ -6,7 +6,7 @@ config cascade: ~/.relais/config/ > /opt/relais/config/ > ./config/.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -47,16 +47,25 @@ class ProfileConfig:
         model: LiteLLM model identifier (e.g. "mistral-small-2603").
         temperature: Sampling temperature controlling response randomness.
         max_tokens: Maximum number of tokens the LLM may generate.
-        max_turns: Maximum number of agentic turns passed to ClaudeAgentOptions.
+        max_turns: Maximum number of agentic turns in the tool-use loop.
         resilience: Retry and fallback configuration for transient failures.
-        max_agent_depth: Maximum subagent recursion depth (Phase 5).
+            Loaded and exposed on SDKExecutor; retry logic is not yet
+            enforced — see TODO in sdk_executor.py (Phase 5).
         allowed_tools: Tuple of allowed MCP tool names; None means unrestricted.
+            Loaded for forward-compatibility; not yet enforced.
         allowed_mcp: Tuple of allowed MCP server names; None means unrestricted.
+            Loaded for forward-compatibility; not yet enforced (Phase 5).
         guardrails: Content guardrail rules (e.g. "no_bash", "no_code_exec").
+            Loaded for forward-compatibility; not yet enforced (Phase 5).
         memory_scope: Memory visibility scope — one of "global", "own", "sender",
             or "task".
         fallback_model: Model identifier to use when the primary model fails;
             None means no fallback at the profile level.
+        mcp_timeout: Seconds to wait for a single MCP tool call before raising
+            asyncio.TimeoutError. Default 10.
+        mcp_max_tools: Maximum number of MCP tool definitions passed to the model.
+            0 means no MCP tools are exposed. Internal tools are not counted.
+            Default 20.
     """
 
     model: str
@@ -64,12 +73,13 @@ class ProfileConfig:
     max_tokens: int
     resilience: ResilienceConfig
     max_turns: int = 20
-    max_agent_depth: int = 2
     allowed_tools: tuple[str, ...] | None = None
     allowed_mcp: tuple[str, ...] | None = None
     guardrails: tuple[str, ...] = ()
     memory_scope: str = "own"
     fallback_model: str | None = None
+    mcp_timeout: int = 10
+    mcp_max_tools: int = 20
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +162,13 @@ def load_profiles(
             max_tokens=int(cfg["max_tokens"]),
             resilience=resilience,
             max_turns=int(cfg["max_turns"]) if "max_turns" in cfg else 20,
-            max_agent_depth=int(cfg["max_agent_depth"]) if "max_agent_depth" in cfg else 2,
             allowed_tools=allowed_tools,
             allowed_mcp=allowed_mcp,
             guardrails=guardrails,
             memory_scope=memory_scope,
             fallback_model=fallback_model,
+            mcp_timeout=int(cfg.get("mcp_timeout", 10)),
+            mcp_max_tools=int(cfg.get("mcp_max_tools", 20)),
         )
 
     return result

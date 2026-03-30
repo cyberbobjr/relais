@@ -1,3 +1,3 @@
-from aiguilleur.base import AiguilleurBase
+from aiguilleur.core.base import BaseAiguilleur
 
-__all__ = ["AiguilleurBase"]
+__all__ = ["BaseAiguilleur"]

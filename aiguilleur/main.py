@@ -1,0 +1,29 @@
+"""AIGUILLEUR entry point — unified channel adapter supervisor.
+
+Loads channel configurations from channels.yaml and starts one adapter
+per enabled channel.  Handles SIGTERM/SIGINT for graceful shutdown.
+"""
+
+import logging
+import sys
+from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
+    stream=sys.stdout,
+)
+
+from aiguilleur.core.manager import AiguilleurManager
+
+
+def main() -> None:
+    manager = AiguilleurManager()
+    manager.run()
+
+
+if __name__ == "__main__":
+    from common.init import initialize_user_dir
+
+    initialize_user_dir(Path(__file__).parent.parent)
+    main()

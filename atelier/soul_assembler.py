@@ -67,20 +67,20 @@ def assemble_system_prompt(
 
     # Layer 2 — role
     if user_role is not None:
-        _append_file(layers, base / "roles" / f"{user_role}.md")
+        _append_safe(layers, base / "roles", f"{user_role}.md", base)
 
-    # Layer 3 — per-user overrides (sanitize sender_id)
+    # Layer 3 — per-user overrides (sanitize sender_id: `:` → `_`)
     if sender_id is not None:
         safe_id = sender_id.replace(":", "_")
-        _append_file(layers, base / "users" / f"{safe_id}.md")
+        _append_safe(layers, base / "users", f"{safe_id}.md", base)
 
     # Layer 4 — channel formatting
     if channel is not None:
-        _append_file(layers, base / "channels" / f"{channel}_default.md")
+        _append_safe(layers, base / "channels", f"{channel}_default.md", base)
 
     # Layer 5 — reply policy overlay
     if reply_policy is not None:
-        _append_file(layers, base / "policies" / f"{reply_policy}.md")
+        _append_safe(layers, base / "policies", f"{reply_policy}.md", base)
 
     # Layer 6 — user facts from long-term memory
     if user_facts:
@@ -93,6 +93,26 @@ def assemble_system_prompt(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _append_safe(layers: list[str], subdir: Path, filename: str, base: Path) -> None:
+    """Resolve *subdir/filename* and append only if it stays inside *base*.
+
+    Prevents path traversal: a crafted ``sender_id`` such as
+    ``"discord:../../../etc/passwd"`` would resolve outside *base* and be
+    silently dropped.
+
+    Args:
+        layers: Accumulator list.
+        subdir: Parent directory (e.g. ``base / "users"``).
+        filename: Filename to append (already sanitized of `:` → `_`).
+        base: Trusted root directory — resolved path must start with this.
+    """
+    candidate = (subdir / filename).resolve()
+    if not str(candidate).startswith(str(base.resolve())):
+        logger.warning("Prompt path escapes prompts_dir, skipping: %s", candidate)
+        return
+    _append_file(layers, candidate)
 
 
 def _append_file(layers: list[str], path: Path, *, warn_if_missing: bool = False) -> None:
@@ -117,4 +137,5 @@ def _append_file(layers: list[str], path: Path, *, warn_if_missing: bool = False
         logger.debug("Prompt file is empty, skipping: %s", path)
         return
 
+    logger.info("Loaded prompt layer: %s", path)
     layers.append(content)

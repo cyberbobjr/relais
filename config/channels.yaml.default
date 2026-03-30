@@ -1,0 +1,55 @@
+# RELAIS channel configuration.
+#
+# Each entry configures one Aiguilleur adapter.
+# Copy to ~/.relais/config/channels.yaml to override defaults.
+#
+# Fields per channel:
+#   enabled     (bool)   — Whether the adapter is started by the Aiguilleur process.
+#                          A disabled channel exits cleanly at startup (exit 0).
+#   streaming   (bool)   — Whether the channel supports real-time chunk rendering.
+#                          Atelier reads this flag to decide whether to publish
+#                          incremental chunks on relais:messages:streaming:{channel}:{cid}.
+#   type        (str)    — "native" (Python, runs in a thread) or
+#                          "external" (subprocess, e.g. Node.js / Java).
+#                          Defaults to "native" if omitted.
+#   command     (str)    — For type=external: the executable to spawn.
+#   args        (list)   — For type=external: command-line arguments.
+#   class       (str)    — Optional fully-qualified Python class path to override
+#                          the auto-discovery convention
+#                          (aiguilleur.channels.{name}.adapter.*Aiguilleur).
+#                          Example: mycompany.adapters.custom.CustomAiguilleur
+#   max_restarts (int)   — Max automatic restart attempts on crash. Defaults to 5.
+#                          After exhaustion the adapter thread dies and a CRITICAL
+#                          log is emitted — the Aiguilleur process stays alive for
+#                          other channels.
+
+channels:
+
+  discord:
+    enabled: true
+    streaming: true
+
+  telegram:
+    enabled: false
+    streaming: true
+
+  slack:
+    enabled: false
+    streaming: false
+
+  rest:
+    enabled: false
+    streaming: false
+
+  tui:
+    enabled: false
+    streaming: true
+
+  # Example external adapter (Node.js / WhatsApp):
+  # whatsapp:
+  #   enabled: false
+  #   streaming: false
+  #   type: external
+  #   command: node
+  #   args:
+  #     - adapters/whatsapp/index.js

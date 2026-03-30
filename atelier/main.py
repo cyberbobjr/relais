@@ -1,73 +1,85 @@
 """Atelier brick — SDK-based LLM execution pipeline.
 
-Consumes validated tasks from ``relais:tasks``, fetches conversation context
-from Souvenir, runs the request through the claude-agent-sdk, and publishes
-the response envelope to the channel's outgoing stream.
+Message flow (one task at a time):
 
-For streaming-capable channels (discord, telegram, tui) each chunk is also
-published to a Redis Stream via StreamPublisher so clients can render
-progressive responses.
+  relais:tasks
+    │  (1) deserialise Envelope, resolve profile
+    │  (2) request context from Souvenir  ──► relais:memory:request
+    │                                     ◄── relais:memory:response
+    │  (3) assemble soul system prompt
+    │  (4) load MCP servers + InternalTools
+    │  (5) SDKExecutor.execute() — agentic loop
+    │      ├── streaming chunks ──► relais:messages:streaming:{channel}:{corr_id}
+    │      └── full reply
+    │  (6) publish response Envelope
+    └──► relais:messages:outgoing:{channel}
+
+XACK contract:
+  - Return True  → ACK (success or final error routed to DLQ)
+  - Return False → no ACK (transient error; message stays in PEL for re-delivery)
+
+For streaming-capable channels (discord, telegram, tui) each text chunk is
+also published via StreamPublisher for real-time rendering before the full
+reply is ready.
 """
 
 import asyncio
 import json
 import logging
 import os
-import shutil
 import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+import anthropic
+
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 from atelier.profile_loader import load_profiles, resolve_profile
-from atelier.mcp_loader import load_for_sdk, load_subagents_for_sdk
+from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
 from atelier.sdk_executor import SDKExecutor, SDKExecutionError
 from atelier.stream_publisher import StreamPublisher
+from atelier.skills_tools import make_skills_tools
+from common.config_loader import resolve_prompts_dir, resolve_skills_dir
+from aiguilleur.channel_config import load_channels_config
 
-# Configure logging to standard output
+# Configure logging to standard output.
+# LOG_LEVEL env var controls verbosity (default: INFO).
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=_log_level,
     format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
     stream=sys.stdout,
 )
 logger = logging.getLogger("atelier")
 
-# Channels that support incremental chunk streaming
-STREAMING_CAPABLE_CHANNELS: frozenset[str] = frozenset({"discord", "telegram", "tui"})
-
-# Timeout (seconds) waiting for Souvenir memory response
+# Timeout (seconds) waiting for Souvenir memory response.
+# Kept deliberately short (3 s) — a slow or unavailable Souvenir should
+# degrade gracefully (empty context) rather than delay every message.
 _MEMORY_TIMEOUT_SECONDS: float = 3.0
 
-# Directory containing soul/channels/roles/policies prompts
-_PROMPTS_DIR: Path = Path(__file__).parent.parent / "prompts"
+# Directory containing soul/channels/roles/policies prompts.
+# Resolved via the config cascade so users can override in ~/.relais/prompts/.
+_PROMPTS_DIR: Path = resolve_prompts_dir()
 
 
 class Atelier:
     """The Atelier brick — orchestrates SDK-based LLM generation.
 
     Consumes tasks from ``relais:tasks``, fetches context from Souvenir,
-    calls the claude-agent-sdk, and publishes response envelopes.
+    calls the anthropic SDK (AsyncAnthropic), and publishes response envelopes.
     """
 
     def __init__(self) -> None:
         """Initialise Atelier with Redis stream and consumer group config.
 
-        Loads LLM profiles, MCP server configs, and subagent definitions once
-        at startup to avoid repeated filesystem I/O on every message.
-
-        Raises:
-            RuntimeError: If the ``claude`` CLI binary is not found on PATH.
+        Loads LLM profiles, MCP server configs, and skills tools once at
+        startup to avoid repeated filesystem I/O on every message.
         """
-        if shutil.which("claude") is None:
-            raise RuntimeError(
-                "claude CLI not found on PATH. "
-                "Install it with: npm install -g @anthropic-ai/claude-code"
-            )
         self.client: RedisClient = RedisClient("atelier")
         self.stream_in: str = "relais:tasks"
         self.group_name: str = "atelier_group"
@@ -77,12 +89,29 @@ class Atelier:
         # per message for resources that do not change during the process lifetime.
         self._profiles = load_profiles()
         self._mcp_servers_default = load_for_sdk()
-        # max_agent_depth from the 'default' profile; per-profile overrides are
-        # applied lazily in _handle_message when a non-default profile is needed.
-        _default_profile = resolve_profile(self._profiles, "default")
-        self._subagents = load_subagents_for_sdk(
-            max_turns=_default_profile.max_agent_depth
+
+        # Channels that support incremental chunk streaming — loaded here
+        # (not at module level) so tests can import atelier.main without
+        # triggering filesystem I/O before any fixture is in place.
+        self._streaming_capable_channels: frozenset[str] = frozenset(
+            name for name, cfg in load_channels_config().items() if cfg.streaming
         )
+
+        # Build InternalTool list once — no need to re-scan the skills
+        # directory on every message.
+        self._internal_tools = make_skills_tools(resolve_skills_dir())
+
+        # Shared AsyncAnthropic client — reuses the underlying httpx
+        # connection pool across all messages rather than recreating it
+        # per SDKExecutor instantiation.
+        self._anthropic_client = anthropic.AsyncAnthropic(
+            api_key=os.environ.get(
+                "ANTHROPIC_API_KEY",
+                os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+            ),
+            base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
+        )
+
 
     async def _handle_message(
         self,
@@ -105,6 +134,7 @@ class Atelier:
             False when a transient error occurred and the message should
             remain in the PEL for re-delivery.
         """
+        logger.debug("_handle_message payload: %s", payload)
         envelope: Envelope | None = None
         try:
             envelope = Envelope.from_json(payload)
@@ -136,23 +166,20 @@ class Atelier:
             else:
                 mcp_servers = load_for_sdk(profile=profile_name)
 
-            # 4b. Subagents already loaded at startup; the master switch and
-            # max_agent_depth were applied then.
-            subagents = self._subagents
-
-            # 5. Create SDK executor
+            # 5. Create SDK executor (re-uses the shared AsyncAnthropic client)
             sdk_executor = SDKExecutor(
                 profile=profile,
                 soul_prompt=soul_prompt,
                 mcp_servers=mcp_servers,
-                subagents=subagents,
+                tools=self._internal_tools,
+                client=self._anthropic_client,
             )
 
             # 6. Execute — with optional streaming for capable channels
             stream_pub: StreamPublisher | None = None
             stream_callback = None
 
-            if envelope.channel in STREAMING_CAPABLE_CHANNELS:
+            if envelope.channel in self._streaming_capable_channels:
                 stream_pub = StreamPublisher(
                     redis_conn,
                     channel=envelope.channel,
@@ -160,7 +187,7 @@ class Atelier:
                 )
                 await redis_conn.publish(
                     f"relais:streaming:start:{envelope.channel}",
-                    envelope.correlation_id,
+                    envelope.to_json(),
                 )
                 stream_callback = stream_pub.push_chunk
 
@@ -176,6 +203,8 @@ class Atelier:
             # 7. Build and publish response envelope
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.metadata["user_message"] = envelope.content
+            if stream_pub is not None:
+                response_env.metadata["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
             out_stream = f"relais:messages:outgoing:{envelope.channel}"
@@ -259,21 +288,22 @@ class Atelier:
             "relais:memory:request", {"payload": json.dumps(get_req)}
         )
 
-        # Derive the XREAD starting point from the XADD return value so that
-        # a Souvenir response arriving between XADD and XREAD is never missed.
-        # Using "$" would skip messages published before the first XREAD call.
+        # Derive the XREAD start ID from the XADD return value so that any
+        # Souvenir response arriving between XADD and the first XREAD is
+        # never missed.  Using "$" would skip messages published in that gap.
         if isinstance(xadd_id, bytes):
             xadd_id = xadd_id.decode()
-        try:
-            ts_ms, seq = xadd_id.split("-")
-            last_id = f"{int(ts_ms) - 1}-0"
-        except (ValueError, AttributeError):
-            last_id = "0"
+        last_id = _xadd_id_to_xread_start(xadd_id)
 
-        deadline = asyncio.get_event_loop().time() + _MEMORY_TIMEOUT_SECONDS
+        # Poll loop: read entries from the response stream, filter by our
+        # correlation_id, and stop as soon as the matching reply arrives or
+        # the deadline is reached.  block_ms shrinks on each iteration so the
+        # total wait never exceeds _MEMORY_TIMEOUT_SECONDS.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _MEMORY_TIMEOUT_SECONDS
 
-        while asyncio.get_event_loop().time() < deadline:
-            remaining = deadline - asyncio.get_event_loop().time()
+        while loop.time() < deadline:
+            remaining = deadline - loop.time()
             block_ms = max(1, int(remaining * 1000))
             try:
                 results = await redis_conn.xread(
@@ -370,6 +400,32 @@ class Atelier:
         finally:
             await self.client.close()
             logger.info("Atelier stopped gracefully")
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _xadd_id_to_xread_start(xadd_id: str) -> str:
+    """Convert an XADD return ID to a safe XREAD start ID.
+
+    Returns a stream ID that is 1 millisecond before ``xadd_id``.  This
+    ensures that a message published to the response stream *between* our
+    XADD call and the first XREAD is never skipped — using the XADD timestamp
+    verbatim (or "$") would miss it.
+
+    Args:
+        xadd_id: The ID string returned by redis XADD, e.g. "1711234567890-0".
+
+    Returns:
+        Start ID for XREAD, e.g. "1711234567889-0", or "0" on parse failure.
+    """
+    try:
+        ts_ms, _ = xadd_id.split("-")
+        return f"{int(ts_ms) - 1}-0"
+    except (ValueError, AttributeError):
+        return "0"
 
 
 if __name__ == "__main__":
