@@ -6,6 +6,12 @@ to MemoryExtractor instead of the former hard-coded 'gpt-3.5-turbo' default.
 
 They also verify the fallback path: when load_profiles() raises, Souvenir
 must not crash and must fall back to the constant _FALLBACK_EXTRACTION_MODEL.
+
+Test 3 verifies the cascade delegation contract: load_profiles() (used by
+Souvenir) must delegate to resolve_config_path() from common.config_loader,
+not to any hardcoded Path.home() / '.relais' cascade. This guards against
+regression of the bug where atelier/profile_loader.py had its own _CASCADE_DIRS
+that bypassed get_relais_home() / RELAIS_HOME env var support.
 """
 
 from unittest.mock import MagicMock, patch
@@ -87,3 +93,94 @@ def test_souvenir_falls_back_to_glm_on_profile_load_failure() -> None:
 
     assert souvenir._extractor._model == _FALLBACK_EXTRACTION_MODEL
     assert _FALLBACK_EXTRACTION_MODEL == "glm-4.7-flash"
+
+
+# ---------------------------------------------------------------------------
+# 3. load_profiles() delegates to resolve_config_path — no private cascade
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_profiles_delegates_to_resolve_config_path(tmp_path: "pytest.TempPathFactory") -> None:
+    """load_profiles() must delegate file lookup to resolve_config_path().
+
+    This verifies that atelier.profile_loader does NOT contain its own private
+    _CASCADE_DIRS / _find_config_file() cascade that bypasses the RELAIS_HOME
+    environment variable.  The contract is: when resolve_config_path raises
+    FileNotFoundError, load_profiles() (without an explicit config_path) must
+    propagate that same error — proving that it called resolve_config_path
+    rather than its own lookup logic.
+    """
+    from atelier.profile_loader import load_profiles
+
+    with patch(
+        "atelier.profile_loader.resolve_config_path",
+        side_effect=FileNotFoundError("mocked cascade — no profiles.yaml found"),
+    ) as mock_resolve:
+        with pytest.raises(FileNotFoundError, match="mocked cascade"):
+            load_profiles()
+
+    mock_resolve.assert_called_once_with("profiles.yaml")
+
+
+@pytest.mark.unit
+def test_souvenir_init_load_profiles_respects_relais_home(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Souvenir.__init__ must honour RELAIS_HOME when loading profiles.yaml.
+
+    This is an end-to-end cascade test: when RELAIS_HOME is set to a
+    temp directory containing a valid profiles.yaml, Souvenir must read
+    that file without falling back to ~/.relais/ or ./config/.
+
+    The test writes a minimal profiles.yaml to RELAIS_HOME/config/,
+    then constructs Souvenir and asserts it found the memory_extractor
+    profile from that custom home directory.
+    """
+    import yaml
+
+    custom_home = tmp_path / "custom_relais"
+    config_dir = custom_home / "config"
+    config_dir.mkdir(parents=True)
+
+    minimal_yaml = {
+        "profiles": {
+            "default": {
+                "model": "default-model",
+                "temperature": 0.7,
+                "max_tokens": 1024,
+                "max_turns": 10,
+                "resilience": {"retry_attempts": 3, "retry_delays": [1, 2, 4]},
+            },
+            "memory_extractor": {
+                "model": "custom-home-model",
+                "temperature": 0.1,
+                "max_tokens": 512,
+                "max_turns": 5,
+                "resilience": {"retry_attempts": 2, "retry_delays": [1, 3]},
+            },
+        }
+    }
+    (config_dir / "profiles.yaml").write_text(yaml.safe_dump(minimal_yaml))
+
+    monkeypatch.setenv("RELAIS_HOME", str(custom_home))
+
+    # Reload config_loader so CONFIG_SEARCH_PATH is rebuilt with the new env var.
+    import importlib
+    import common.config_loader as ccl
+    importlib.reload(ccl)
+
+    # Also reload profile_loader so it uses the freshly reloaded resolve_config_path.
+    import atelier.profile_loader as pl
+    importlib.reload(pl)
+
+    with (
+        patch("souvenir.main.RedisClient"),
+        patch("souvenir.main.LongTermStore"),
+    ):
+        import souvenir.main as sm
+        importlib.reload(sm)
+        souvenir = sm.Souvenir()
+
+    assert souvenir._extractor._model == "custom-home-model"

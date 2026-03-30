@@ -1175,6 +1175,65 @@ class ProfileConfig:
 
 `max_agent_depth` est passé comme `maxTurns` à chaque `AgentDefinition`, limitant ainsi la profondeur d'imbrication agent → sous-agent. La valeur `0` désactive les sous-agents pour ce profil.
 
+### Profil `memory_extractor` — extraction légère de faits utilisateur (Axe C)
+
+**New in 2026-03-29:** A dedicated profile `memory_extractor` is used by Souvenir for identifying user facts.
+
+Le Souvenir utilise ce profil pour extraire automatiquement les faits utilisateur des conversations. Ce profil est optimisé pour :
+- **Modèle léger** : `glm-4.7-flash` (vs gpt-3.5-turbo précédemment hardcodé)
+- **Latence minimale** : `max_tokens: 512`, `temperature: 0.1`
+- **Pas de mémoire contexte** : `short_term_messages: 0`
+- **Pas de sous-agents** : `max_agent_depth: 1`
+- **Pas de streaming** : `stream: false`
+- **Résilience légère** : 2 retries avec délai `[1, 3]`
+
+```yaml
+# config/profiles.yaml.default
+memory_extractor:
+  model: glm-4.7-flash
+  temperature: 0.1
+  max_tokens: 512
+  max_turns: 1
+  stream: false
+  max_agent_depth: 1
+  memory:
+    short_term_messages: 0
+  allowed_tools: null
+  allowed_mcp: null
+  guardrails: []
+  memory_scope: own
+  fallback_model: null
+  resilience:
+    retry_attempts: 2
+    retry_delays: [1, 3]
+    fallback_model: null
+```
+
+**Chargement dynamique dans Souvenir** :
+
+```python
+# souvenir/main.py
+from common.config_loader import load_profiles, resolve_profile
+
+_FALLBACK_EXTRACTION_MODEL = "glm-4.7-flash"
+try:
+    _profiles = load_profiles()
+    _extraction_profile = resolve_profile(_profiles, "memory_extractor")
+    extraction_model = _extraction_profile.model
+except Exception as exc:
+    logger.warning("Could not load memory_extractor profile: %s", exc)
+    extraction_model = _FALLBACK_EXTRACTION_MODEL
+
+class Souvenir:
+    def __init__(self, litellm_url: str, ...):
+        self._extractor = MemoryExtractor(
+            litellm_url=litellm_url,
+            model=extraction_model  # Dynamic, not hardcoded
+        )
+```
+
+Ce chargement dynamique permet de changer le modèle d'extraction via configuration sans redéploiement.
+
 ### Résilience LLM — fallback automatique
 
 Si le backend LLM primaire (LiteLLM proxy) est indisponible, L'Atelier tente 3 fois avec backoff exponentiel. Après épuisement, le message est envoyé vers la DLQ `relais:tasks:failed`.
@@ -1576,14 +1635,43 @@ while not shutdown.is_set():
    e. memory_extractor.extract(envelope) ← NEW (identify user facts)
 ```
 
-### Memory extraction — identification automatique de faits utilisateur
+### Memory extraction — identification automatique de faits utilisateur (Axe B & C)
+
+**Updated 2026-03-29:** Memory extraction now uses a dedicated `memory_extractor` profile for dynamic model selection.
 
 Nouvelle étape dans `_handle_outgoing` :
 
 ```python
+# souvenir/main.py — initialization with dynamic profile loading
+from common.config_loader import load_profiles, resolve_profile
+
+_FALLBACK_EXTRACTION_MODEL = "glm-4.7-flash"
+try:
+    _profiles = load_profiles()
+    _extraction_profile = resolve_profile(_profiles, "memory_extractor")
+    extraction_model = _extraction_profile.model
+except Exception as exc:
+    logger.warning("Could not load memory_extractor profile, using fallback: %s", exc)
+    extraction_model = _FALLBACK_EXTRACTION_MODEL
+
+class Souvenir:
+    def __init__(self, ...):
+        self._extractor = MemoryExtractor(litellm_url=litellm_url, model=extraction_model)
+```
+
+```python
 # souvenir/memory_extractor.py — NOUVEAU
 class MemoryExtractor:
-    """Fast LLM call to extract durable user facts from conversation."""
+    """Fast LLM call to extract durable user facts from conversation.
+
+    Model selection from memory_extractor profile (config/profiles.yaml).
+    Fallback: glm-4.7-flash (previously hardcoded as gpt-3.5-turbo).
+    """
+
+    def __init__(self, litellm_url: str, model: str):
+        self.litellm_url = litellm_url
+        self.model = model  # Dynamically loaded from profile
+        self.http_client = httpx.AsyncClient(base_url=litellm_url)
 
     async def extract(self, envelope: Envelope) -> list[UserFact]:
         """Analyze user message + assistant reply, extract structured facts."""
@@ -1600,21 +1688,27 @@ class MemoryExtractor:
         Réponds en JSON strict: [{{"fact": "...", "category": "preference|constraint|goal|context", "confidence": 0.0-1.0}}]
         """
 
-        # Fast LLM call via LiteLLM proxy (profil "fast", Haiku)
-        response = await self.llm_fast.complete(
-            model="claude-haiku-4-5",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=500
+        # Fast LLM call via LiteLLM proxy (profil "memory_extractor" model + settings)
+        response = await self.http_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 512,
+                "top_p": 1.0
+            },
+            timeout=10
         )
 
         try:
-            facts = json.loads(response)
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            facts = json.loads(content)
             # Filter confidence > 0.7
             return [f for f in facts if f.get("confidence", 0) > 0.7]
-        except json.JSONDecodeError:
-            logger.warning(f"Memory extraction parse error: {response}")
-            return []
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Memory extraction parse error: {response.text}")
 
     async def store(self, sender_id: str, facts: list[UserFact]):
         """Upsert facts into SQLite user_facts table (fire-and-forget)."""
@@ -1908,32 +2002,125 @@ CLAUDE.md — registre des skills actifs
 
 ---
 
-## 15. L'Archiviste — pure observer
+## 15. L'Archiviste — pure observer avec pipeline observation (Axe A)
+
+**Updated 2026-03-29:** Archiviste now runs two parallel consumer groups for comprehensive pipeline visibility:
+1. `archiviste_logs_group` — observes critical logs from `relais:logs` (existing)
+2. `archiviste_pipeline_group` — observes all pipeline streams (NEW)
 
 ```python
 # archiviste/main.py
 class Archiviste:
     """
-    Pure observer — consumes relais:logs Stream + relais:events:* Pub/Sub.
+    Pure observer — consumes relais:logs Stream + pipeline streams + relais:events:* Pub/Sub.
     Writes to JSONL + SQLite.
     Never publishes to Redis.
     Handles retention cleanup on SYSTEM:cleanup_logs command.
     """
 
     async def run(self):
+        # Consumer group 1: Critical logs
         log_consumer = StreamConsumer(
             redis=self.redis, stream="relais:logs",
-            group="archiviste", consumer="archiviste-1"
+            group="archiviste_logs_group", consumer="archiviste-logs-1"
         )
         await log_consumer.ensure_group()
+
+        # Consumer group 2: Pipeline observation (NEW)
+        pipeline_consumer = StreamConsumer(
+            redis=self.redis,
+            group="archiviste_pipeline_group", consumer="archiviste-pipeline-1"
+        )
+        await pipeline_consumer.ensure_group()
 
         pubsub = self.redis.pubsub()
         await pubsub.psubscribe("relais:events:*")
 
         await asyncio.gather(
             self._consume_log_stream(log_consumer),
+            self._process_pipeline_streams(pipeline_consumer),  # NEW
             self._consume_events(pubsub),
         )
+
+    async def _process_pipeline_streams(self, pipeline_consumer):
+        """
+        Observes all pipeline streams (Axe A):
+        - relais:messages:incoming:* (per channel)
+        - relais:security
+        - relais:tasks
+        - relais:tasks:failed (DLQ)
+        - relais:messages:outgoing:* (per channel)
+
+        For each message, logs: [{cid[:8]}] {sender_id} → {stream} | traces={traces} | "{content_preview}..."
+        """
+        pipeline_streams = [
+            "relais:messages:incoming:discord",
+            "relais:messages:incoming:telegram",
+            "relais:security",
+            "relais:tasks",
+            "relais:tasks:failed",
+            "relais:messages:outgoing:discord",
+            "relais:messages:outgoing:telegram",
+        ]
+
+        while not self.shutdown.is_set():
+            for stream in pipeline_streams:
+                try:
+                    messages = await pipeline_consumer.read(
+                        stream=stream, count=1, block_ms=100
+                    )
+                    for msg_id, payload in messages:
+                        envelope = Envelope.from_json(payload.get("envelope", "{}"))
+                        cid = envelope.correlation_id[:8]
+                        sender = envelope.sender_id or "system"
+                        content_preview = envelope.content[:60].replace("\n", " ")
+                        traces = envelope.metadata.get("traces", [])
+
+                        self.logger.info(
+                            f"[{cid}] {sender} → {stream} | traces={traces} | \"{content_preview}...\"",
+                            extra={"stream": stream, "correlation_id": envelope.correlation_id}
+                        )
+                        await pipeline_consumer.ack(msg_id)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    self.logger.warning(f"Pipeline stream read error ({stream}): {e}")
+
+### Enriched Brick Logs (Axe B)
+
+**New in 2026-03-29:** All core bricks (Portail, Sentinelle, Atelier, Souvenir) now enrich their `relais:logs` entries with three fields:
+
+```python
+# All bricks now enrich logs with:
+enriched_log = {
+    "timestamp": time.time(),
+    "level": "info|warning|error",
+    "message": "...",
+    # NEW Axe B fields:
+    "correlation_id": envelope.correlation_id,  # UUID tracking across pipeline
+    "sender_id": envelope.sender_id,            # e.g. "discord:805123..."
+    "content_preview": envelope.content[:60].replace("\n", " "),  # first 60 chars
+}
+
+# Each brick publishes to relais:logs:
+await redis.xadd("relais:logs", enriched_log)
+```
+
+Archiviste re-emits these enriched entries with correlation_id prefix:
+
+```python
+# archiviste/main.py — in _consume_log_stream()
+cid = payload.get("correlation_id", "unknown")[:8]
+sender = payload.get("sender_id", "system")
+message = payload.get("message", "")
+# Log line: [a1b2c3d4] discord:805123... | message text
+self.logger.info(f"[{cid}] {sender} | {message}")
+```
+
+This enables:
+- End-to-end request tracking via correlation_id
+- Quick identification of message origin (sender_id)
+- Content preview for debugging without reading full messages
 
     async def cleanup_retention(self, config: RetentionConfig):
         """Triggered by SYSTEM:cleanup_logs from Le Veilleur."""

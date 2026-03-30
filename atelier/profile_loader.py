@@ -12,6 +12,8 @@ from typing import Final
 
 import yaml
 
+from common.config_loader import resolve_config_path
+
 _VALID_MEMORY_SCOPES: Final[frozenset[str]] = frozenset(
     {"global", "own", "sender", "task"}
 )
@@ -71,39 +73,6 @@ class ProfileConfig:
 
 
 # ---------------------------------------------------------------------------
-# Config cascade paths
-# ---------------------------------------------------------------------------
-
-_CASCADE_DIRS: list[Path] = [
-    Path.home() / ".relais" / "config",
-    Path("/opt/relais/config"),
-    Path("./config"),
-]
-
-_FILENAME = "profiles.yaml"
-
-
-def _find_config_file() -> Path:
-    """Locate the first profiles.yaml in the config cascade.
-
-    Returns:
-        Path to the first existing profiles.yaml found in the cascade.
-
-    Raises:
-        FileNotFoundError: No profiles.yaml found in any cascade directory.
-    """
-    for directory in _CASCADE_DIRS:
-        candidate = directory / _FILENAME
-        if candidate.exists():
-            return candidate
-
-    searched = ", ".join(str(d / _FILENAME) for d in _CASCADE_DIRS)
-    raise FileNotFoundError(
-        f"profiles.yaml not found in config cascade. Searched: {searched}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -133,7 +102,7 @@ def load_profiles(
     if config_path is not None:
         resolved = Path(config_path)
     else:
-        resolved = _find_config_file()
+        resolved = resolve_config_path("profiles.yaml")
 
     raw_text = resolved.read_text(encoding="utf-8")
     data = yaml.safe_load(raw_text)

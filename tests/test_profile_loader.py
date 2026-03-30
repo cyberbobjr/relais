@@ -281,21 +281,78 @@ def test_resilience_config_is_frozen(profiles_yaml: Path) -> None:
 
 @pytest.mark.unit
 def test_load_profiles_raises_when_cascade_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """load_profiles() raises FileNotFoundError when no profiles.yaml exists in the cascade.
+    """load_profiles() raises FileNotFoundError when resolve_config_path finds nothing.
 
-    The cascade directories are monkeypatched to empty tmp paths that contain no
-    profiles.yaml so the FileNotFoundError branch is exercised without touching
-    real filesystem locations.
+    resolve_config_path (from common.config_loader) is monkeypatched to raise
+    FileNotFoundError, verifying that load_profiles() propagates the error
+    without swallowing it.
 
     Args:
         monkeypatch: Pytest fixture for safe attribute patching.
     """
     import atelier.profile_loader as _mod
 
-    monkeypatch.setattr(_mod, "_CASCADE_DIRS", [Path("/nonexistent/__cascade_test__")])
+    monkeypatch.setattr(
+        _mod,
+        "resolve_config_path",
+        lambda _filename: (_ for _ in ()).throw(
+            FileNotFoundError("profiles.yaml not found in config cascade")
+        ),
+    )
 
     with pytest.raises(FileNotFoundError, match="profiles.yaml not found"):
         load_profiles()
+
+
+# ---------------------------------------------------------------------------
+# 11b. load_profiles without config_path delegates to resolve_config_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_profiles_delegates_to_resolve_config_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """load_profiles() calls resolve_config_path('profiles.yaml') when no config_path given.
+
+    After the fix, profile_loader must use resolve_config_path from
+    common.config_loader rather than its own _find_config_file / _CASCADE_DIRS.
+    This test monkeypatches atelier.profile_loader.resolve_config_path to return
+    a controlled temp file, confirming the delegation without touching the real
+    filesystem cascade.
+
+    Args:
+        monkeypatch: Pytest fixture for safe attribute patching.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    import atelier.profile_loader as _mod
+
+    controlled_yaml = tmp_path / "profiles.yaml"
+    controlled_yaml.write_text(
+        "profiles:\n"
+        "  default:\n"
+        "    model: cascade-delegated-model\n"
+        "    temperature: 0.5\n"
+        "    max_tokens: 512\n"
+        "    resilience:\n"
+        "      retry_attempts: 1\n"
+        "      retry_delays: [1]\n"
+    )
+
+    calls: list[str] = []
+
+    def _fake_resolve(filename: str) -> Path:
+        calls.append(filename)
+        return controlled_yaml
+
+    monkeypatch.setattr(_mod, "resolve_config_path", _fake_resolve)
+
+    profiles = load_profiles()
+
+    assert calls == ["profiles.yaml"], (
+        "load_profiles() must call resolve_config_path('profiles.yaml') exactly once"
+    )
+    assert profiles["default"].model == "cascade-delegated-model"
 
 
 # ---------------------------------------------------------------------------

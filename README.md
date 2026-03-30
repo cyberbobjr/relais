@@ -6,40 +6,187 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 
 ## Architecture
 
+### Diagramme ASCII
+
 ```
-[Canaux externes]
-      │
-      ├──► Discord / Telegram / Slack (Aiguilleur entrant)
-      │
-      ▼
+[Utilisateurs externes]
+        │
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│ AIGUILLEUR — Relais entrants                                  │
+│  ┌────────────┐   ┌────────────┐   ┌────────────┐            │
+│  │  discord   │   │  telegram  │   │  rest-api  │   ...      │
+│  └─────┬──────┘   └─────┬──────┘   └─────┬──────┘            │
+└────────┼────────────────┼────────────────┼────────────────────┘
+         └────────────────┴────────────────┘
+                          │ relais:messages:incoming
+                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ PORTAIL — Validation des messages entrants                  │
+│  Consomme : relais:messages:incoming                        │
 │  Valide le format, applique reply_policy (DND, hors-heures) │
+│  Produit  : relais:security                                 │
 └─────────────────────────────────────────────────────────────┘
+                          │
+                    relais:security
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ SENTINELLE — Sécurité                                       │
+│  Consomme : relais:security                                 │
 │  Vérifie les ACL (users.yaml), filtre le contenu            │
+│  Produit  : relais:tasks                                    │
 └─────────────────────────────────────────────────────────────┘
                           │
+                     relais:tasks
+                          │
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ATELIER — Cerveau LLM                                       │
-│  Assemble le contexte (SOUL + mémoire), appelle le LLM,     │
-│  gère les retries et le Dead Letter Queue                   │
-└─────────────────────────────────────────────────────────────┘
-          │                   │                   │
-          ▼                   ▼                   ▼
-  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-  │   SOUVENIR   │   │  AIGUILLEUR  │   │  ARCHIVISTE  │
-  │  Mémoire     │   │  Relay       │   │  Logs        │
-  │  court/long  │   │  Discord     │   │  JSONL +     │
-  │  terme       │   │  Telegram    │   │  SQLite       │
-  └──────────────┘   └──────────────┘   └──────────────┘
-                            │
-                            ▼
-                    [Utilisateurs externes]
+┌─────────────────────────────────────────────────────────────────┐
+│ ATELIER — Cerveau LLM  (moteur : claude-agent-sdk)              │
+│  Consomme : relais:tasks                                        │
+│  · Personnalité SOUL + historique Souvenir → system prompt      │
+│  · ClaudeSDKClient — session bidirectionnelle, streaming live   │
+│  · Routing LLM via proxy LiteLLM (ANTHROPIC_BASE_URL)           │
+│  · Serveurs MCP : outils externes (stdio · SSE · HTTP)          │
+│  · Sous-agents autonomes via AgentDefinition + outil Task       │
+│    (profondeur contrôlée : max_agent_depth)                     │
+│  · Raisonnement étendu, outils natifs, JSON structuré           │
+│    (options SDK : thinking, output_format, effort…)             │
+│  · Retries avec backoff configurable                            │
+│  Produit  : relais:messages:outgoing:{channel}  (réponse)       │
+│             relais:streaming:{channel}:{cid}    (chunks live)   │
+│             relais:tasks:failed                 (DLQ)           │
+└─────────────────────────────────────────────────────────────────┘
+          │                        │                   │
+   relais:messages:outgoing:{ch}   │            relais:logs /
+          │                   relais:memory:*   relais:events:*
+          ▼                        ▼                   ▼
+┌───────────────────────┐  ┌──────────────┐   ┌──────────────┐
+│ AIGUILLEUR            │  │   SOUVENIR   │   │  ARCHIVISTE  │
+│  Relais sortants      │  │  Mémoire     │   │  Logs        │
+│  ┌──────┐ ┌────────┐  │  │  court/long  │   │  JSONL +     │
+│  │disco.│ │telegr. │  │  │  terme       │   │  SQLite      │
+│  └──────┘ └────────┘  │  └──────────────┘   └──────────────┘
+└──────────┬────────────┘
+           │
+           ▼
+  [Utilisateurs externes]
+```
+
+> **Note :** les relais entrants et sortants sont le **même processus** par canal —
+> `aiguilleur/discord/main.py` gère à la fois la réception (→ Redis) et l'envoi (Redis →).
+
+---
+
+### Diagramme Mermaid
+
+```mermaid
+flowchart TD
+    USERS(["Utilisateurs externes"])
+
+    USERS --> D_IN & T_IN & R_IN
+
+    subgraph AIG_IN["AIGUILLEUR — Relais entrants (même processus que sortants)"]
+        direction LR
+        D_IN([discord])
+        T_IN([telegram])
+        R_IN([rest-api / ...])
+    end
+
+    AIG_IN -->|"relais:messages:incoming"| PORTAIL
+
+    subgraph PORTAIL["PORTAIL — Validation"]
+        P["Valide le format\nApplique reply_policy\n(DND, hors-heures)"]
+    end
+
+    PORTAIL -->|"relais:security"| SENTINELLE
+
+    subgraph SENTINELLE["SENTINELLE — Sécurité"]
+        S["ACL users.yaml\nGuardrails contenu"]
+    end
+
+    SENTINELLE -->|"relais:tasks"| ATELIER
+
+    subgraph ATELIER["ATELIER — Cerveau LLM  (moteur : claude-agent-sdk)"]
+        A["ClaudeSDKClient — session bidirectionnelle · streaming live\nSOUL system prompt + historique mémoire (Souvenir)\nServeurs MCP : outils externes (stdio · SSE · HTTP)\nSous-agents autonomes — AgentDefinition + outil Task\nRaisonnement étendu · JSON structuré · permission control\nRetries backoff configurable · DLQ"]
+    end
+
+    ATELIER -->|"relais:messages:outgoing:{channel}"| AIG_OUT
+    ATELIER -->|"relais:memory:request\n+ observe outgoing"| SOUVENIR
+    ATELIER -->|"relais:tasks:failed"| DLQ[("DLQ")]
+    ATELIER -->|"relais:logs\nrelais:events:*"| ARCHIVISTE
+
+    subgraph AIG_OUT["AIGUILLEUR — Relais sortants (même processus que entrants)"]
+        direction LR
+        D_OUT([discord])
+        T_OUT([telegram])
+        R_OUT([rest-api / ...])
+    end
+
+    subgraph SOUVENIR["SOUVENIR — Mémoire"]
+        SV["Court terme : Redis List\nLong terme : SQLite"]
+    end
+
+    subgraph ARCHIVISTE["ARCHIVISTE — Logs"]
+        AR["JSONL + SQLite audit\n(observer, ne bloque pas)"]
+    end
+
+    AIG_OUT --> USERS
+```
+
+---
+
+## ATELIER — Moteur claude-agent-sdk
+
+L'Atelier est la brique qui exécute l'intelligence. Il utilise **[claude-agent-sdk](https://github.com/anthropics/claude-code)** (`ClaudeSDKClient`) comme moteur d'exécution, ce qui lui donne accès à toute la puissance du modèle Claude au-delà d'un simple appel API.
+
+### Capacités actives
+
+| Capacité | Implémentation |
+|----------|---------------|
+| **Session bidirectionnelle** | `ClaudeSDKClient` — connexion streaming persistante, réponses chunk par chunk |
+| **Personnalité SOUL** | System prompt multi-couche : `SOUL.md` + variantes canal/contexte, assemblé par `soul_assembler` |
+| **Mémoire conversationnelle** | Historique court-terme injecté depuis Souvenir avant chaque appel |
+| **Serveurs MCP** | Outils externes via stdio, SSE ou HTTP — déclarés dans `mcp_servers.yaml`, filtrés par profil |
+| **Sous-agents autonomes** | `AgentDefinition` + outil `Task` (implicite) — agents spécialisés avec modèle et MCP hérités, profondeur limitée par `max_agent_depth` |
+| **Streaming live** | Chunks publiés en temps réel sur `relais:messages:streaming:{channel}:{cid}` → rendu progressif Discord / Telegram |
+| **Profils LLM** | Modèle, température, max_turns, retries configurables par profil (`profiles.yaml`) |
+| **Routing LiteLLM** | `ANTHROPIC_BASE_URL` → proxy LiteLLM → n'importe quel backend (Anthropic, OpenRouter, local) |
+| **Resilience** | Retry avec backoff configurable ; messages non-récupérables → DLQ (`relais:tasks:failed`) |
+
+### Options SDK disponibles (configurables)
+
+Ces capacités sont exposées par `claude-agent-sdk` et peuvent être activées via `ClaudeAgentOptions` sans modifier l'architecture :
+
+| Option SDK | Effet |
+|------------|-------|
+| `thinking` | Raisonnement étendu adaptatif (`"adaptive"`) ou budgeté (`budget_tokens`) — le modèle réfléchit avant de répondre |
+| `effort` | Niveau de raisonnement global : `"low"` / `"medium"` / `"high"` / `"max"` |
+| `output_format` | Réponse JSON structurée selon un schéma défini |
+| `task_budget` | Budget tokens côté API — le modèle gère lui-même son économie de tokens |
+| `max_budget_usd` | Plafond de coût par appel |
+| `can_use_tool` | Callback async de permission fine par outil (requiert mode streaming) |
+| `hooks` | Lifecycle hooks : `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`… |
+| `sandbox` | Isolation système de fichiers et réseau pour les outils d'exécution |
+| `enable_file_checkpointing` | Rewind des modifications fichiers jusqu'à un checkpoint |
+| `fork_session` / `resume` | Reprendre ou bifurquer une session existante par ID |
+
+### Flux d'exécution simplifié
+
+```
+relais:tasks
+    │
+    ▼
+[1] Résoudre le profil LLM  (profiles.yaml → modèle, max_turns, retries)
+[2] Récupérer le contexte   (relais:memory:request → Souvenir → historique)
+[3] Assembler le system prompt  (SOUL.md + variante canal)
+[4] Charger les MCP servers  (mcp_servers.yaml, filtre profil)
+[5] Charger les sous-agents  (AgentDefinition, max_agent_depth)
+[6] Ouvrir ClaudeSDKClient  → query(prompt) → receive_response()
+    │  AssistantMessage → chunks → stream_callback → relais:streaming:…
+    │  ResultMessage (success) → continuer
+    │  ResultMessage (échec)   → SDKExecutionError → DLQ
+[7] Publier la réponse  → relais:messages:outgoing:{channel}
 ```
 
 ---
@@ -159,7 +306,10 @@ model_list:
   # Modèle local (LM Studio, Ollama, vLLM...)
   - model_name: mon-modele-local        # ← doit matcher profiles.yaml:model
     litellm_params:
-      model: mon-modele-local
+      model: openai/mon-modele-local    # ⚠️ OBLIGATOIRE : préfixe "openai/" requis pour tout
+                                        # endpoint compatible OpenAI (LM Studio, Ollama, vLLM).
+                                        # Sans ce préfixe, LiteLLM ne peut pas identifier le
+                                        # provider et rejette le déploiement au démarrage.
       api_base: http://192.168.1.x:1234/v1
       api_key: lm-studio                # Clé factice requise mais ignorée en local
 
@@ -177,6 +327,10 @@ model_list:
 
 general_settings:
   master_key: sk-changeme        # = LITELLM_MASTER_KEY dans .env
+                                 # ⚠️  Cette valeur DOIT être identique à ANTHROPIC_API_KEY dans .env
+                                 # et dans supervisord.conf (ANTHROPIC_API_KEY de la brique atelier).
+                                 # Le CLI claude envoie ANTHROPIC_API_KEY comme clé d'authentification
+                                 # au proxy LiteLLM. Si les deux ne correspondent pas → 400 Bad Request.
   store_model_usage: false
   disable_on_error_types:
     - "RateLimitError"
@@ -376,10 +530,10 @@ Pour désactiver sans supprimer : `enabled: false`.
 | Variable | Description | Exemple |
 |----------|-------------|---------|
 | `ANTHROPIC_BASE_URL` | URL proxy LiteLLM | `http://localhost:4000` |
-| `ANTHROPIC_API_KEY` | LiteLLM master key | `sk-changeme` |
-| `LITELLM_MASTER_KEY` | Même valeur que `general_settings.master_key` dans `litellm.yaml` | `sk-changeme` |
+| `ANTHROPIC_API_KEY` | LiteLLM master key — **doit être identique à `LITELLM_MASTER_KEY`** | `sk-changeme` |
+| `LITELLM_MASTER_KEY` | Même valeur que `general_settings.master_key` dans `litellm.yaml` — **doit être identique à `ANTHROPIC_API_KEY`** | `sk-changeme` |
 | `REDIS_SOCKET_PATH` | Path socket Unix Redis | `~/.relais/redis.sock` |
-| `REDIS_PASSWORD` | Mot de passe Redis admin | |
+| `REDIS_PASSWORD` | Mot de passe Redis admin — doit correspondre à `requirepass` dans `config/redis.conf` | |
 | `REDIS_PASS_PORTAIL` | Mot de passe brique Portail | |
 | `REDIS_PASS_SENTINELLE` | Mot de passe brique Sentinelle | |
 | `REDIS_PASS_ATELIER` | Mot de passe brique Atelier | |
@@ -438,10 +592,18 @@ uv run python archiviste/main.py
 ### Vérifier le pipeline
 
 ```bash
-# Inspecter un stream Redis
-redis-cli -s ~/.relais/redis.sock XLEN relais:messages:incoming:discord
+# Inspecter les streams Redis
+redis-cli -s ~/.relais/redis.sock XLEN relais:messages:incoming
+redis-cli -s ~/.relais/redis.sock XLEN relais:security
+redis-cli -s ~/.relais/redis.sock XLEN relais:tasks
+
+# Messages en attente (PEL) par brique
+redis-cli -s ~/.relais/redis.sock XPENDING relais:messages:incoming portail_group
+redis-cli -s ~/.relais/redis.sock XPENDING relais:security sentinelle_group
+redis-cli -s ~/.relais/redis.sock XPENDING relais:tasks atelier_group
+
+# Voir le contenu d'un stream
 redis-cli -s ~/.relais/redis.sock XRANGE relais:tasks - +
-redis-cli -s ~/.relais/redis.sock XPENDING relais:tasks sentinelle_group
 
 # Suivre les logs JSON
 tail -f ~/.relais/logs/events.jsonl

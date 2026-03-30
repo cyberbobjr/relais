@@ -17,12 +17,12 @@ The main pipeline flows through these bricks in order:
    - Bridges external APIs to Redis Streams
 
 2. **Portail** (`portail/`) - Consumer validating message format
-   - Consumes: `relais:messages:incoming:{channel}`
+   - Consumes: `relais:messages:incoming`
    - Validates Envelope format, applies reply_policy (DND/vacation/in_meeting)
-   - Produces: `relais:tasks`
+   - Produces: `relais:security`
 
 3. **Sentinelle** (`sentinelle/`) - Consumer performing security checks
-   - Consumes: `relais:tasks`
+   - Consumes: `relais:security`
    - ACL validation (users.yaml), content guardrails pre/post-LLM filtering
    - Produces: `relais:tasks` (or refuses if ACL fails)
 
@@ -80,7 +80,7 @@ The main pipeline flows through these bricks in order:
 ### Redis Streams & Consumer Groups
 
 - **At-least-once delivery**: Consumer groups with PEL (Pending Entry List) and XACK acknowledgment
-- **Stream naming**: `relais:messages:incoming:{channel}`, `relais:tasks`, `relais:memory:*`
+- **Stream naming**: `relais:messages:incoming`, `relais:security`, `relais:tasks`, `relais:messages:outgoing:{channel}`, `relais:memory:*`
 - **Initialization**: Each brick creates its consumer group on startup (idempotent)
 - **Resilience**: Failed messages left in PEL are automatically re-delivered; poison pills sent to DLQ
 

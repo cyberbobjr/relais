@@ -920,4 +920,102 @@ Aiguilleur Discord (`aiguilleur/discord/main.py`) — streaming progressif, 21 t
 - Tests : `tests/test_aiguilleur_discord.py` (21 tests, 100% GREEN)
 - Coverage : 82% `aiguilleur/discord/main.py` (uncovered : main() entry point, setup_hook, on_ready)
 
-*Plan mis à jour le 2026-03-29 — Phase 6 : complétion briques déployées (ProfileConfig, Portail sessions, Archiviste coverage 89%, Souvenir pagination+compaction, Sentinelle policy+guardrails, GracefulShutdown) + Validation Discord E2E. Couverture globale ≥81%.*
+---
+
+## Phase 6.1 — Enrichissement Observabilité (Axes A, B, C) ✅ FAIT — 2026-03-29
+
+Améliorations d'observabilité et d'extraction mémoire pour meilleure traçabilité et analyse.
+
+### ✅ Axe A — Archiviste Pipeline Stream Observation (FAIT — 2026-03-29)
+
+Archiviste exécute maintenant deux consumer groups en parallèle pour vision complète du pipeline.
+
+**Changements :**
+- `archiviste/main.py::run()` → `asyncio.gather(_consume_log_stream, _process_pipeline_streams, _consume_events)`
+- Nouveau consumer group `archiviste_pipeline_group` observant tous les streams du pipeline
+- Streams observés : `relais:messages:incoming:*`, `relais:security`, `relais:tasks`, `relais:tasks:failed`, `relais:messages:outgoing:*`
+- Logs de format : `[{cid[:8]}] {sender_id} → {stream} | traces={traces} | "{content_preview}..."`
+
+**Critères de succès :**
+- ✅ Deux consumer groups en parallèle
+- ✅ Pipeline streams lus avec payload parsing
+- ✅ Correlation ID, sender_id, traces extraits
+- ✅ Logs structurés avec context Archiviste
+
+### ✅ Axe B — Enriched Brick Logs avec Métadonnées (FAIT — 2026-03-29)
+
+Toutes les briques core (Portail, Sentinelle, Atelier, Souvenir) enrichissent `relais:logs` avec trois champs.
+
+**Champs ajoutés à chaque entrée `relais:logs` :**
+- `correlation_id` — UUID tracking end-to-end
+- `sender_id` — origine du message (ex: `discord:805123...`)
+- `content_preview` — premiers 60 chars du contenu
+
+**Implémentation :**
+```python
+# Tous les bricks
+enriched_log = {
+    "timestamp": time.time(),
+    "level": "info|warning|error",
+    "message": "...",
+    "correlation_id": envelope.correlation_id,
+    "sender_id": envelope.sender_id,
+    "content_preview": envelope.content[:60].replace("\n", " "),
+}
+await redis.xadd("relais:logs", enriched_log)
+```
+
+**Archiviste re-emit pattern :**
+```python
+# archiviste/main.py
+cid = payload.get("correlation_id", "unknown")[:8]
+sender = payload.get("sender_id", "system")
+# Log : [a1b2c3d4] discord:805123... | message text
+self.logger.info(f"[{cid}] {sender} | message")
+```
+
+**Critères de succès :**
+- ✅ Tous les bricks enrichissent correlation_id, sender_id, content_preview
+- ✅ Archiviste re-emit avec préfixe `[{cid[:8]}] {sender}`
+- ✅ Logs structurés habilitant l'observabilité correlée
+- ✅ Pas de régression sur latence
+
+### ✅ Axe C — Memory Extractor Profile + Dynamic Loading (FAIT — 2026-03-29)
+
+Nouveau profil `memory_extractor` dans `config/profiles.yaml` pour extraction légère de faits.
+
+**Profil `memory_extractor` :**
+- Modèle : `glm-4.7-flash` (vs gpt-3.5-turbo hardcodé précédemment)
+- Température : `0.1` (déterministe)
+- Max tokens : `512`
+- Max agent depth : `1` (pas de sous-agents)
+- Résilience : 2 retries avec délai `[1, 3]`
+
+**Chargement dynamique dans Souvenir :**
+```python
+# souvenir/main.py::__init__()
+_FALLBACK_EXTRACTION_MODEL = "glm-4.7-flash"
+try:
+    _profiles = load_profiles()
+    _extraction_profile = resolve_profile(_profiles, "memory_extractor")
+    extraction_model = _extraction_profile.model
+except Exception as exc:
+    logger.warning("Could not load memory_extractor profile: %s", exc)
+    extraction_model = _FALLBACK_EXTRACTION_MODEL
+
+self._extractor = MemoryExtractor(litellm_url=litellm_url, model=extraction_model)
+```
+
+**Bénéfices :**
+- Modèle configurable sans redéploiement
+- Profil dédié = settings optimisés pour extraction
+- Fallback sûr si config invalide
+
+**Critères de succès :**
+- ✅ Profil `memory_extractor` présent dans `config/profiles.yaml.default`
+- ✅ Souvenir charge dynamiquement via `load_profiles()` + `resolve_profile()`
+- ✅ Fallback sur `glm-4.7-flash` si load échoue
+- ✅ MemoryExtractor accepte `model` parameter
+- ✅ Tests : chargement réussi, fallback sur erreur
+
+*Plan mis à jour le 2026-03-29 — Phase 6.1 complétée (Axes A/B/C : observabilité, enriched logs, memory_extractor profile). Couverture globale ≥81%. Prochaine phase : validation bout-à-bout.*
