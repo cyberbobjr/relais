@@ -731,12 +731,14 @@ class SDKExecutor:
         mcp_manager = McpSessionManager(self._profile, self._mcp_servers)
         async with contextlib.AsyncExitStack() as stack:
             mcp_tools = await mcp_manager.start_all(stack)
+            # Point d'assemblage unique : schémas internes + MCP capés
+            all_tools = self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
             return await self._run_agentic_loop(
-                messages, mcp_tools, mcp_manager, stream_callback
+                messages, all_tools, mcp_manager, stream_callback
             )
 
-    async def _run_agentic_loop(self, messages, mcp_tools, mcp_manager, stream_callback):
-        all_tools = self._internal_tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
+    async def _run_agentic_loop(self, messages, all_tools, mcp_manager, stream_callback):
+        # all_tools est déjà assemblé par execute() — la boucle le reçoit prêt à l'emploi
         full_reply = ""
         for turn in range(self._profile.max_turns):
             async with self._client.messages.stream(
@@ -762,7 +764,8 @@ Le client est initialisé avec `base_url=os.environ.get("ANTHROPIC_BASE_URL", "h
 
 - **`InternalTool`** — dataclass `(name, description, input_schema, handler)` ; handler sync ou async
 - **`make_skills_tools(skills_dir)`** — expose `list_skills` et `read_skill` pour découverte des SKILL.md
-- Les schémas internes (`_internal_tool_schemas`) sont calculés une seule fois dans `__init__` et réutilisés
+- Les schémas Anthropic (`_tool_schemas`) sont calculés une seule fois dans `__init__` et réutilisés
+- La fusion internal + MCP est faite dans `execute()` avant d'entrer dans `_run_agentic_loop`
 - Les outils internes sont prioritaires sur les outils MCP en cas de nom identique
 
 ### Streaming Progressif
@@ -804,7 +807,11 @@ Atelier → SDKExecutor.execute(envelope, context)
   ↓
 McpSessionManager.start_all(stack) → mcp_tools (schémas Anthropic)
   ↓
-anthropic.AsyncAnthropic.messages.stream(model, system, messages, tools)
+all_tools = _tool_schemas + mcp_tools[:mcp_max_tools]   ← assemblage unique ici
+  ↓
+_run_agentic_loop(messages, all_tools, mcp_manager, ...)
+  ↓
+anthropic.AsyncAnthropic.messages.stream(model, system, messages, tools=all_tools)
   ↓
 stop_reason == "tool_use" → _call_tool()
   → InternalTool.handler()  (outils Python natifs)
