@@ -90,7 +90,7 @@ class SDKExecutor:
             t.name: t for t in (tools or [])
         }
         # Pre-compute Anthropic-format schemas once — reused every agentic turn.
-        self._internal_tool_schemas: list[dict] = [
+        self._tool_schemas: list[dict] = [
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in (tools or [])
         ]
@@ -142,8 +142,9 @@ class SDKExecutor:
         try:
             async with contextlib.AsyncExitStack() as stack:
                 mcp_tools = await mcp_manager.start_all(stack)
+                all_tools = self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
                 return await self._run_agentic_loop(
-                    messages, mcp_tools, mcp_manager, stream_callback
+                    messages, all_tools, mcp_manager, stream_callback
                 )
         except (anthropic.RateLimitError, anthropic.InternalServerError):
             # Transient errors — propagate unwrapped so Atelier returns False,
@@ -165,7 +166,7 @@ class SDKExecutor:
     async def _run_agentic_loop(
         self,
         messages: list[dict],
-        mcp_tools: list[dict],
+        all_tools: list[dict],
         mcp_manager: McpSessionManager,
         stream_callback: Callable[[str], Awaitable[None]] | None,
     ) -> str:
@@ -173,14 +174,14 @@ class SDKExecutor:
 
         Args:
             messages: Structured message list to start from.
-            mcp_tools: Tool definitions from active MCP servers (Anthropic format).
+            all_tools: Merged tool definitions (internal + MCP) in Anthropic format,
+                already assembled by the caller.
             mcp_manager: Active MCP session manager for tool dispatch.
             stream_callback: Optional chunk callback for streaming-capable channels.
 
         Returns:
             Accumulated text reply across all turns.
         """
-        all_tools = self._get_anthropic_tools(mcp_tools)
         full_reply = ""
 
         for turn in range(self._profile.max_turns):
@@ -273,24 +274,6 @@ class SDKExecutor:
                 result = await result
             return str(result)
         return await mcp_manager.call_tool(tool_name, tool_input)
-
-    # ------------------------------------------------------------------
-    # Tool schema helpers
-    # ------------------------------------------------------------------
-
-    def _get_anthropic_tools(self, mcp_tools: list[dict]) -> list[dict]:
-        """Merge internal and MCP tools into the Anthropic API format.
-
-        Internal tool schemas are pre-computed at construction time.
-        MCP tools are capped at ``profile.mcp_max_tools``.
-
-        Args:
-            mcp_tools: Tool defs already in Anthropic format from MCP servers.
-
-        Returns:
-            Combined list: all internal tools + up to mcp_max_tools MCP tools.
-        """
-        return self._internal_tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
 
     # ------------------------------------------------------------------
     # Message construction
