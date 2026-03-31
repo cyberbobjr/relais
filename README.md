@@ -42,15 +42,13 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ ATELIER — Cerveau LLM  (moteur : anthropic.AsyncAnthropic)      │
+│ ATELIER — Cerveau LLM  (moteur : AgentExecutor DeepAgents/LangGraph) │
 │  Consomme : relais:tasks                                        │
 │  · Personnalité SOUL + historique Souvenir → system prompt      │
-│  · SDKExecutor — boucle agentique multi-tours, streaming live   │
-│  · Routing LLM via proxy LiteLLM (ANTHROPIC_BASE_URL)           │
+│  · AgentExecutor (DeepAgents/LangGraph) — boucle agentique, streaming live │
+│  · Appel direct au provider LLM (ANTHROPIC_API_KEY)             │
 │  · Serveurs MCP : outils externes (stdio · SSE · HTTP)          │
-│  · Outils internes (InternalTool) : list_skills, read_skill     │
-│  · Raisonnement étendu, outils natifs, JSON structuré           │
-│    (options SDK : thinking, output_format, effort…)             │
+│  · Outils internes (@tool) : list_skills, read_skill            │
 │  · Retries avec backoff configurable                            │
 │  Produit  : relais:messages:outgoing:{channel}  (réponse)       │
 │             relais:streaming:{channel}:{cid}    (chunks live)   │
@@ -106,8 +104,8 @@ flowchart TD
 
     SENTINELLE -->|"relais:tasks"| ATELIER
 
-    subgraph ATELIER["ATELIER — Cerveau LLM  (moteur : anthropic.AsyncAnthropic)"]
-        A["SDKExecutor — boucle agentique multi-tours · streaming live\nSOUL system prompt + historique mémoire (Souvenir)\nServeurs MCP : outils externes (stdio · SSE)\nOutils internes : InternalTool (list_skills, read_skill)\nRetries backoff configurable · DLQ"]
+    subgraph ATELIER["ATELIER — Cerveau LLM  (moteur : AgentExecutor DeepAgents/LangGraph)"]
+        A["AgentExecutor (DeepAgents/LangGraph) — boucle agentique · streaming live\nSOUL system prompt + historique mémoire (Souvenir)\nServeurs MCP : outils externes (stdio · SSE)\nOutils internes : @tool (list_skills, read_skill)\nRetries backoff configurable · DLQ"]
     end
 
     ATELIER -->|"relais:messages:outgoing:{channel}"| AIG_OUT
@@ -137,7 +135,7 @@ flowchart TD
 
 ## ATELIER — Moteur LLM
 
-L'Atelier est la brique qui exécute l'intelligence. Il utilise le **SDK Python Anthropic** (`anthropic.AsyncAnthropic`) avec une boucle agentique multi-tours explicite, routée via le proxy LiteLLM (`ANTHROPIC_BASE_URL`).
+L'Atelier est la brique qui exécute l'intelligence. Il utilise **DeepAgents/LangGraph** (`AgentExecutor`) avec une boucle agentique multi-tours, en appelant directement le provider LLM via `ANTHROPIC_API_KEY`.
 
 ### Capacités actives
 
@@ -146,10 +144,10 @@ L'Atelier est la brique qui exécute l'intelligence. Il utilise le **SDK Python 
 | **Personnalité SOUL** | System prompt multi-couche : `SOUL.md` + variantes canal/contexte, assemblé par `soul_assembler` |
 | **Mémoire conversationnelle** | Historique court-terme injecté depuis Souvenir avant chaque appel |
 | **Serveurs MCP** | Outils externes via stdio ou SSE — déclarés dans `mcp_servers.yaml`, filtrés par profil |
-| **Outils internes** | `InternalTool` — callables Python exposés à la boucle agentique (`list_skills`, `read_skill`) |
+| **Outils internes** | Fonctions `@tool` LangChain exposées à la boucle agentique (`list_skills`, `read_skill`) |
 | **Streaming live** | Chunks publiés en temps réel sur `relais:messages:streaming:{channel}:{cid}` → rendu progressif Discord / Telegram |
-| **Profils LLM** | Modèle, température, max_turns, mcp_timeout, mcp_max_tools configurables par profil (`profiles.yaml`) |
-| **Routing LiteLLM** | `ANTHROPIC_BASE_URL` → proxy LiteLLM → n'importe quel backend (Anthropic, OpenRouter, local) |
+| **Profils LLM** | Modèle, température, max_turns configurables par profil (`profiles.yaml`) |
+| **Provider direct** | `ANTHROPIC_API_KEY` → appel direct Anthropic via DeepAgents/LangChain |
 | **Résilience** | Retry avec backoff configurable ; messages non-récupérables → DLQ (`relais:tasks:failed`) |
 
 ### Flux d'exécution simplifié
@@ -158,15 +156,15 @@ L'Atelier est la brique qui exécute l'intelligence. Il utilise le **SDK Python 
 relais:tasks
     │
     ▼
-[1] Résoudre le profil LLM  (profiles.yaml → modèle, max_turns, mcp_timeout, …)
+[1] Résoudre le profil LLM  (profiles.yaml → modèle, max_turns, …)
 [2] Récupérer le contexte   (relais:memory:request → Souvenir → historique)
 [3] Assembler le system prompt  (SOUL.md + variante canal)
 [4] Charger les MCP servers  (mcp_servers.yaml, filtre profil)
-[5] SDKExecutor._run_agentic_loop() → messages.stream() → chunks
+[5] AgentExecutor.execute() → agent.astream() → buffer chunks (~80 chars)
 [6] Publier les chunks  → relais:messages:streaming:{channel}:{cid}
-    │  stop_reason == "tool_use" → exécuter les outils → reboucler
-    │  stop_reason == "end_turn" → sortie de boucle
-    │  SDKExecutionError (4xx/5xx) → DLQ
+    │  tool_use → exécuté par DeepAgents/LangGraph automatiquement
+    │  end_turn → sortie de boucle
+    │  AgentExecutionError (4xx/5xx) → DLQ
 [7] Publier la réponse  → relais:messages:outgoing:{channel}
 ```
 
@@ -580,9 +578,7 @@ Pour désactiver sans supprimer : `enabled: false`.
 
 | Variable | Description | Exemple |
 |----------|-------------|---------|
-| `ANTHROPIC_BASE_URL` | URL proxy LiteLLM | `http://localhost:4000` |
-| `ANTHROPIC_API_KEY` | LiteLLM master key — **doit être identique à `LITELLM_MASTER_KEY`** | `sk-changeme` |
-| `LITELLM_MASTER_KEY` | Même valeur que `general_settings.master_key` dans `litellm.yaml` — **doit être identique à `ANTHROPIC_API_KEY`** | `sk-changeme` |
+| `ANTHROPIC_API_KEY` | Clé API directe vers Anthropic (utilisée par DeepAgents/LangChain) | `sk-ant-xxx` |
 | `REDIS_SOCKET_PATH` | Path socket Unix Redis | `~/.relais/redis.sock` |
 | `REDIS_PASSWORD` | Mot de passe Redis admin — doit correspondre à `requirepass` dans `config/redis.conf` | |
 | `REDIS_PASS_PORTAIL` | Mot de passe brique Portail | |
@@ -628,10 +624,7 @@ Wrapper local :
 # Terminal 1 — Redis
 redis-server config/redis.conf
 
-# Terminal 2 — Proxy LiteLLM
-uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --port 4000
-
-# Terminal 3+ — Briques (dans l'ordre)
+# Terminal 2+ — Briques (dans l'ordre)
 uv run python portail/main.py
 uv run python sentinelle/main.py
 uv run python atelier/main.py

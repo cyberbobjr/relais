@@ -6,12 +6,10 @@ profiles:
 
   # Profil par défaut — bon équilibre vitesse/qualité
   default:
-    model: mistral-small-2603
+    model: anthropic:claude-haiku-4-5
     temperature: 0.7
     max_tokens: 1024
     stream: false
-    mcp_timeout: 10
-    mcp_max_tools: 20
     memory:
       short_term_messages: 20
     # Wave-1A fields
@@ -27,12 +25,10 @@ profiles:
 
   # Profil rapide — réponses courtes, latence minimale
   fast:
-    model: mistral-small-2603
+    model: anthropic:claude-haiku-4-5
     temperature: 0.5
     max_tokens: 256
     stream: false
-    mcp_timeout: 5
-    mcp_max_tools: 10
     memory:
       short_term_messages: 10
     # Wave-1A fields — narrow tool set matches low-latency intent
@@ -48,12 +44,10 @@ profiles:
 
   # Profil précis — raisonnement approfondi, réponses longues
   precise:
-    model: claude-sonnet-4-5
+    model: anthropic:claude-sonnet-4-5
     temperature: 0.3
     max_tokens: 4096
     stream: false
-    mcp_timeout: 30
-    mcp_max_tools: 30
     memory:
       short_term_messages: 30
     # Wave-1A fields — haiku as fallback to reduce cost on retry
@@ -69,12 +63,10 @@ profiles:
 
   # Profil codeur — génération et révision de code
   coder:
-    model: qwen3-coder-30b
+    model: anthropic:claude-sonnet-4-5
     temperature: 0.2
     max_tokens: 8192
     stream: false
-    mcp_timeout: 20
-    mcp_max_tools: 40
     memory:
       short_term_messages: 20
     # Wave-1A fields — broader tool access for code tasks
@@ -90,13 +82,11 @@ profiles:
 
   # Profil extracteur mémoire — léger, rapide, JSON uniquement
   memory_extractor:
-    model: glm-4.7-flash
+    model: anthropic:claude-haiku-4-5
     temperature: 0.1
     max_tokens: 512
     max_turns: 1
     stream: false
-    mcp_timeout: 5
-    mcp_max_tools: 0
     memory:
       short_term_messages: 0
     allowed_tools: null

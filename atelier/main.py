@@ -1,4 +1,4 @@
-"""Atelier brick — SDK-based LLM execution pipeline.
+"""Atelier brick — DeepAgents-based LLM execution pipeline.
 
 Message flow (one task at a time):
 
@@ -7,8 +7,8 @@ Message flow (one task at a time):
     │  (2) request context from Souvenir  ──► relais:memory:request
     │                                     ◄── relais:memory:response
     │  (3) assemble soul system prompt
-    │  (4) load MCP servers + InternalTools
-    │  (5) SDKExecutor.execute() — agentic loop
+    │  (4) start MCP sessions + build LangChain tools
+    │  (5) AgentExecutor.execute() — DeepAgents agentic loop
     │      ├── streaming chunks ──► relais:messages:streaming:{channel}:{corr_id}
     │      └── full reply
     │  (6) publish response Envelope
@@ -24,6 +24,7 @@ reply is ready.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -33,17 +34,17 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import anthropic
-
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 from atelier.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
-from atelier.sdk_executor import SDKExecutor, SDKExecutionError
+from atelier.agent_executor import AgentExecutor, AgentExecutionError
+from atelier.mcp_session_manager import McpSessionManager
+from atelier.mcp_adapter import make_mcp_tools
 from atelier.stream_publisher import StreamPublisher
-from atelier.skills_tools import make_skills_tools
+from atelier.tools import make_skills_tools
 from common.config_loader import resolve_prompts_dir, resolve_skills_dir
 from aiguilleur.channel_config import load_channels_config
 
@@ -68,10 +69,11 @@ _PROMPTS_DIR: Path = resolve_prompts_dir()
 
 
 class Atelier:
-    """The Atelier brick — orchestrates SDK-based LLM generation.
+    """The Atelier brick — orchestrates DeepAgents-based LLM generation.
 
     Consumes tasks from ``relais:tasks``, fetches context from Souvenir,
-    calls the anthropic SDK (AsyncAnthropic), and publishes response envelopes.
+    calls the LLM via DeepAgents/LangChain (AgentExecutor), and publishes
+    response envelopes.
     """
 
     def __init__(self) -> None:
@@ -97,20 +99,9 @@ class Atelier:
             name for name, cfg in load_channels_config().items() if cfg.streaming
         )
 
-        # Build InternalTool list once — no need to re-scan the skills
-        # directory on every message.
-        self._internal_tools = make_skills_tools(resolve_skills_dir())
-
-        # Shared AsyncAnthropic client — reuses the underlying httpx
-        # connection pool across all messages rather than recreating it
-        # per SDKExecutor instantiation.
-        self._anthropic_client = anthropic.AsyncAnthropic(
-            api_key=os.environ.get(
-                "ANTHROPIC_API_KEY",
-                os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
-            ),
-            base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
-        )
+        # Build skills tools once — no need to re-scan the skills directory
+        # on every message.  MCP tools are built per-message (session-bound).
+        self._skills_tools = make_skills_tools(resolve_skills_dir())
 
 
     async def _handle_message(
@@ -166,41 +157,49 @@ class Atelier:
             else:
                 mcp_servers = load_for_sdk(profile=profile_name)
 
-            # 5. Create SDK executor (re-uses the shared AsyncAnthropic client)
-            sdk_executor = SDKExecutor(
-                profile=profile,
-                soul_prompt=soul_prompt,
-                mcp_servers=mcp_servers,
-                tools=self._internal_tools,
-                client=self._anthropic_client,
-            )
-
-            # 6. Execute — with optional streaming for capable channels
+            # 5. Start MCP sessions and assemble tools for this request.
+            # McpSessionManager is bound to the AsyncExitStack so all MCP
+            # sub-processes are terminated when the stack exits.
             stream_pub: StreamPublisher | None = None
             stream_callback = None
 
-            if envelope.channel in self._streaming_capable_channels:
-                stream_pub = StreamPublisher(
-                    redis_conn,
-                    channel=envelope.channel,
-                    correlation_id=envelope.correlation_id,
-                )
-                await redis_conn.publish(
-                    f"relais:streaming:start:{envelope.channel}",
-                    envelope.to_json(),
-                )
-                stream_callback = stream_pub.push_chunk
+            session_manager = McpSessionManager(profile, mcp_servers)
+            async with contextlib.AsyncExitStack() as stack:
+                await session_manager.start_all(stack)
+                mcp_tools = await make_mcp_tools(session_manager)
+                tools = [*self._skills_tools, *mcp_tools]
 
-            reply_text = await sdk_executor.execute(
-                envelope=envelope,
-                context=context,
-                stream_callback=stream_callback,
-            )
+                # 6. Create AgentExecutor with the assembled tools.
+                agent_executor = AgentExecutor(
+                    profile=profile,
+                    soul_prompt=soul_prompt,
+                    tools=tools,
+                )
+
+                # 7. Execute — with optional streaming for capable channels.
+                if envelope.channel in self._streaming_capable_channels:
+                    stream_pub = StreamPublisher(
+                        redis_conn,
+                        channel=envelope.channel,
+                        correlation_id=envelope.correlation_id,
+                    )
+                    await redis_conn.publish(
+                        f"relais:streaming:start:{envelope.channel}",
+                        envelope.to_json(),
+                    )
+                    stream_callback = stream_pub.push_chunk
+
+                reply_text = await agent_executor.execute(
+                    envelope=envelope,
+                    context=context,
+                    stream_callback=stream_callback,
+                )
+            # MCP sessions closed; finalize stream and publish response.
 
             if stream_pub is not None:
                 await stream_pub.finalize()
 
-            # 7. Build and publish response envelope
+            # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.metadata["user_message"] = envelope.content
             if stream_pub is not None:
@@ -224,11 +223,11 @@ class Atelier:
             )
             return True
 
-        except SDKExecutionError as exc:
-            # Non-recoverable SDK failure — route to DLQ and ACK
+        except AgentExecutionError as exc:
+            # Non-recoverable agent failure — route to DLQ and ACK
             cid = envelope.correlation_id if envelope else message_id
             sid = envelope.sender_id if envelope else ""
-            logger.error("[%s] SDK execution error, routing to DLQ: %s", cid, exc)
+            logger.error("[%s] Agent execution error, routing to DLQ: %s", cid, exc)
             dlq_entry: dict = {
                 "payload": payload,
                 "reason": str(exc),
@@ -242,28 +241,18 @@ class Atelier:
                 "brick": "atelier",
                 "correlation_id": cid,
                 "sender_id": sid,
-                "message": f"SDK execution error for {cid}: {exc}",
+                "message": f"Agent execution error for {cid}: {exc}",
                 "error": str(exc),
             })
             return True
 
         except Exception as exc:
-            # Unknown transient or permanent error — leave in PEL for re-delivery
+            # Transient or unknown error — leave in PEL for re-delivery
             cid = envelope.correlation_id if envelope else message_id
             sid = envelope.sender_id if envelope else ""
-            if isinstance(exc, anthropic.APIStatusError):
-                body_text = (
-                    str(getattr(exc, "body", None) or "")
-                    or getattr(getattr(exc, "response", None), "text", "")
-                )[:2000]
-                logger.error(
-                    "[%s] Unhandled API error %d, leaving in PEL: %s | body: %s",
-                    cid, exc.status_code, exc, body_text, exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[%s] Unhandled exception, leaving in PEL: %s", cid, exc, exc_info=True
-                )
+            logger.error(
+                "[%s] Unhandled exception, leaving in PEL: %s", cid, exc, exc_info=True
+            )
             await redis_conn.xadd("relais:logs", {
                 "level": "ERROR",
                 "brick": "atelier",

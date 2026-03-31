@@ -863,19 +863,19 @@ def test_load_profiles_includes_memory_extractor() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 29. memory_extractor profile uses glm-4.7-flash
+# 29. memory_extractor profile uses anthropic:claude-haiku-4-5 (DeepAgents format)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_memory_extractor_profile_model_is_glm() -> None:
-    """The memory_extractor profile must declare model='glm-4.7-flash'.
+def test_memory_extractor_profile_model_is_haiku() -> None:
+    """The memory_extractor profile must declare model='anthropic:claude-haiku-4-5'.
 
     Args: none (reads the shipped default config file).
     """
     profiles = load_profiles(config_path=_DEFAULT_PROFILES_PATH)
 
-    assert profiles["memory_extractor"].model == "glm-4.7-flash"
+    assert profiles["memory_extractor"].model == "anthropic:claude-haiku-4-5"
 
 
 # ---------------------------------------------------------------------------
@@ -892,3 +892,27 @@ def test_memory_extractor_profile_temperature_is_low() -> None:
     profiles = load_profiles(config_path=_DEFAULT_PROFILES_PATH)
 
     assert profiles["memory_extractor"].temperature == 0.1
+
+
+# ---------------------------------------------------------------------------
+# 31. All profiles in profiles.yaml.default use provider:model format (DeepAgents)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_default_profiles_model_format_uses_provider_prefix() -> None:
+    """All models in profiles.yaml.default must use the 'provider:model' format.
+
+    DeepAgents requires a provider prefix to route calls correctly without
+    the LiteLLM proxy. Format: 'provider:model-name'
+    (e.g., 'anthropic:claude-haiku-4-5').
+
+    Args: none (reads the shipped default config file).
+    """
+    profiles = load_profiles(config_path=_DEFAULT_PROFILES_PATH)
+
+    for name, profile in profiles.items():
+        assert ":" in profile.model, (
+            f"Profile '{name}': model '{profile.model}' must use 'provider:model' format "
+            f"(e.g., 'anthropic:claude-haiku-4-5'). LiteLLM proxy has been removed."
+        )

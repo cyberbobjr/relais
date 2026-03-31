@@ -44,19 +44,21 @@ class ProfileConfig:
     """Configuration for a single named LLM profile.
 
     Attributes:
-        model: LiteLLM model identifier (e.g. "mistral-small-2603").
+        model: DeepAgents model identifier in 'provider:model' format
+            (e.g. "anthropic:claude-haiku-4-5", "openai:gpt-4o-mini").
+            The provider prefix is required — LiteLLM proxy has been removed.
         temperature: Sampling temperature controlling response randomness.
         max_tokens: Maximum number of tokens the LLM may generate.
         max_turns: Maximum number of agentic turns in the tool-use loop.
         resilience: Retry and fallback configuration for transient failures.
-            Loaded and exposed on SDKExecutor; retry logic is not yet
-            enforced — see TODO in sdk_executor.py (Phase 5).
+            Loaded and exposed on AgentExecutor; retry logic is not yet
+            enforced — see TODO in agent_executor.py (Phase 5).
         allowed_tools: Tuple of allowed MCP tool names; None means unrestricted.
             Loaded for forward-compatibility; not yet enforced.
         allowed_mcp: Tuple of allowed MCP server names; None means unrestricted.
-            Loaded for forward-compatibility; not yet enforced (Phase 5).
+            Loaded for forward-compatibility; not yet enforced.
         guardrails: Content guardrail rules (e.g. "no_bash", "no_code_exec").
-            Loaded for forward-compatibility; not yet enforced (Phase 5).
+            Loaded for forward-compatibility; not yet enforced.
         memory_scope: Memory visibility scope — one of "global", "own", "sender",
             or "task".
         fallback_model: Model identifier to use when the primary model fails;

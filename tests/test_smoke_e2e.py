@@ -107,16 +107,22 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.resolve_profile", return_value=mock_profile),
         patch("atelier.main.assemble_system_prompt", return_value="[SOUL MOCK]"),
-        patch("atelier.main.SDKExecutor") as MockSDK,
+        patch("atelier.main.AgentExecutor") as MockAgent,
+        patch("atelier.main.McpSessionManager") as MockMcpMgr,
+        patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch(
             "atelier.main.Atelier._fetch_context",
             new_callable=AsyncMock,
             return_value=[],
         ),
     ):
+        mock_mgr = AsyncMock()
+        mock_mgr.start_all = AsyncMock()
+        MockMcpMgr.return_value = mock_mgr
+
         mock_executor = AsyncMock()
         mock_executor.execute.return_value = "Je suis RELAIS, comment puis-je t'aider ?"
-        MockSDK.return_value = mock_executor
+        MockAgent.return_value = mock_executor
 
         atelier = Atelier()
         await atelier._process_stream(redis_conn, shutdown=_one_shot())

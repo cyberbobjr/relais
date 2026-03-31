@@ -1,7 +1,7 @@
 # RELAIS — Architecture Technique
 
 **Dernière mise à jour:** 2026-03-30
-**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (InternalTools + MCP stdio), 5c (déduplication streaming Discord)
+**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (Outils internes + MCP stdio/SSE), 5c (déduplication streaming Discord)
 
 ---
 
@@ -147,8 +147,8 @@ PIPELINE CORE
 │   ▼
 │ ATELIER (transformer)
 │ ├─ Charge SOUL + contexte long-term
-│ ├─ Appelle LLM via anthropic.AsyncAnthropic (SDKExecutor)
-│ ├─ Streams output → relais:messages:streaming:{channel}:{correlation_id}
+│ ├─ Exécute boucle agentique via AgentExecutor (deepagents.create_deep_agent)
+│ ├─ Streams output token-by-token → relais:messages:streaming:{channel}:{correlation_id}
 │ ├─ Publie réponse si succès
 │ └─ Publie en DLQ si échec après retries
 │   ├─ relais:messages:outgoing:*
@@ -226,7 +226,7 @@ Aiguilleur: consume_outgoing_stream()
 |--------|----------|-----------|---------|
 | `relais:tasks` | Sentinelle/Atelier | Portail | Tâche validée |
 | `relais:context:{session_id}` | (Redis List) | Souvenir | Historique court-terme (max 20 msgs, TTL 24h) |
-| `relais:memory:request` | Souvenir | Atelier | Requêtes mémoire (`get`) avant appel SDK |
+| `relais:memory:request` | Souvenir | Atelier | Requêtes mémoire (`get`) avant exécution agentique |
 | `relais:memory:response` | Atelier | Souvenir | Réponses mémoire (contexte court-terme) |
 | `relais:messages:streaming:{channel}:{correlation_id}` | Aiguilleur/{channel} | Atelier | Chunks streaming progressif (Discord edit mode) |
 | `relais:streamed_msg:{correlation_id}` | (Redis String, TTL 300s) | Aiguilleur/discord | Discord message ID du placeholder streaming (déduplication) |
@@ -268,9 +268,6 @@ Aucune coordination requise: appels concurrents sont sûrs (idempotent, basé su
 Priority 1 (infra basique)
   └─ courier (Redis)
 
-Priority 5 (LLM)
-  └─ litellm (LiteLLM proxy)
-
 Priority 8 (observers — pas de dépendance)
   └─ archiviste
 
@@ -292,11 +289,10 @@ Priority 30 (admin optionnel — autostart=false)
 **Rationale:**
 1. initialize_user_dir() se lance dans chaque __main__, avant Redis (asynchrone)
 2. Redis doit être disponible avant tout (async)
-3. LiteLLM proxy doit être prêt avant Atelier
-4. Observers peuvent démarrer indépendamment (pas de dépendance ordonnée)
-5. Core pipeline en ordre logique (Portail → Sentinelle → Atelier → Souvenir)
-6. Relays attendent que core soit prêt
-7. Admin/TUI optionnel, démarrage manuel
+3. Observers peuvent démarrer indépendamment (pas de dépendance ordonnée)
+4. Core pipeline en ordre logique (Portail → Sentinelle → Atelier → Souvenir)
+5. Relays attendent que core soit prêt
+6. Admin/TUI optionnel, démarrage manuel
 
 ---
 
@@ -321,26 +317,13 @@ Chaque message est livré ≥ 1 fois:
 
 ### Retry avec backoff (Atelier)
 
-Atelier utilise `execute_with_resilience()`:
+Atelier utilise la configuration de résilience définie dans `profiles.yaml` (champs `retry_attempts`, `retry_delays`). Sur erreur transiente, l'exécution reste en PEL pour re-livraison automatique. Les erreurs non-retriable (`AgentExecutionError`) sont routées vers la DLQ.
 
-```python
-for attempt, delay in enumerate(RETRY_DELAYS, 1):
-    try:
-        response = await http_client.post(...)  # LiteLLM
-        return response.json()[...]
-    except (ConnectError, TimeoutException):
-        if attempt < len(RETRY_DELAYS):
-            await asyncio.sleep(delay)  # Backoff exponentiel
-        else:
-            raise ExhaustedRetriesError(...)  # → DLQ
-```
-
-**Délais:** 2s → 5s → 15s (total max 22s)
+**Délais typiques:** 2s → 5s → 15s (total max 22s, configurable par profil)
 
 **Comportement:**
-- Erreur transiente → retry
-- Erreur 4xx/401 → rejette immédiatement
-- Après retries épuisés → Dead Letter Queue `relais:tasks:failed`
+- Erreur transiente (connexion, timeout) → pas d'ACK → reste en PEL pour re-livraison
+- `AgentExecutionError` → route vers DLQ `relais:tasks:failed` + ACK
 - Message en DLQ = **XACK appliqué** (pas perdu, mais marqué comme failed)
 
 ### Dead Letter Queue (DLQ)
@@ -350,7 +333,7 @@ for attempt, delay in enumerate(RETRY_DELAYS, 1):
 ```json
 {
   "payload": "{envelope_json}",
-  "reason": "ExhaustedRetriesError: LiteLLM down after 3 retries",
+  "reason": "AgentExecutionError: agent failed after 3 retries",
   "attempts": 3,
   "failed_at": "2026-03-27T14:23:45.123Z"
 }
@@ -721,72 +704,55 @@ alembic current
 
 ## Atelier — Exécution LLM et Streaming Progressif
 
-### Architecture SDKExecutor + McpSessionManager
+### Architecture AgentExecutor + McpSessionManager
 
 L'Atelier utilise deux classes complémentaires :
 
-- **`SDKExecutor`** (`atelier/sdk_executor.py`) — boucle agentique, appels LLM via `anthropic.AsyncAnthropic` (PyPI: `anthropic >=0.40.0`), dispatch des outils internes et MCP.
+- **`AgentExecutor`** (`atelier/agent_executor.py`) — boucle agentique via `deepagents.create_deep_agent()`, gestion des outils LangChain (`list[BaseTool]`) et streaming token-by-token.
 - **`McpSessionManager`** (`atelier/mcp_session_manager.py`) — cycle de vie des serveurs MCP (démarrage, sessions, dispatch avec timeout). Séparé de l'exécuteur pour que la logique MCP soit isolée et testable indépendamment.
 
 ```python
-class SDKExecutor:
+class AgentExecutor:
     async def execute(self, envelope, context, stream_callback=None) -> str:
-        messages = self._build_messages(envelope, context)
-        mcp_manager = McpSessionManager(self._profile, self._mcp_servers)
-        async with contextlib.AsyncExitStack() as stack:
-            mcp_tools = await mcp_manager.start_all(stack)
-            all_tools = self._get_anthropic_tools(mcp_tools)
-            return await self._run_agentic_loop(
-                messages, all_tools, mcp_manager, stream_callback
-            )
+        """Execute the agentic loop for an incoming envelope.
 
-    def _get_anthropic_tools(self, mcp_tools: list[dict]) -> list[dict]:
-        # Outils internes (jamais capés) + outils MCP limités à mcp_max_tools
-        return self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
+        Args:
+            envelope: Incoming message envelope.
+            context: Short-term conversation context.
+            stream_callback: Optional async callable receiving each token chunk.
 
-    async def _run_agentic_loop(self, messages, all_tools, mcp_manager, stream_callback):
+        Returns:
+            Aggregated reply string.
+        """
+        mcp_tools = await make_mcp_tools(self._mcp_servers)
+        all_tools = self._tools + mcp_tools  # BaseTool list
+        agent = create_deep_agent(
+            model=self._profile.model,   # provider:model-id format
+            tools=all_tools,
+            system_prompt=self._soul_prompt,
+        )
         full_reply = ""
-        for turn in range(self._profile.max_turns):
-            # messages.create() (non-streaming) — block.input toujours complet
-            response = await self._client.messages.create(
-                model=self._profile.model, max_tokens=self._profile.max_tokens,
-                system=self._soul_prompt, messages=messages, tools=all_tools
-            )
-            for block in response.content:
-                if block.type == "text":
-                    full_reply += block.text
-                    if stream_callback:
-                        await stream_callback(block.text)   # par bloc, pas par token
-            if response.stop_reason != "tool_use":
-                break
-            # Inject tool results and continue loop...
+        async for chunk in agent.astream(
+            {"messages": self._build_messages(envelope, context)},
+            stream_mode="messages",
+        ):
+            if stream_callback and chunk.content:
+                await stream_callback(chunk.content)
+            full_reply += chunk.content or ""
         return full_reply
 ```
 
-> **Pourquoi `messages.create()` et non `messages.stream()` ?**
-> Le proxy LiteLLM ne relaie pas fidèlement les événements SSE `input_json_delta`
-> lors d'un appel streaming. En conséquence, `get_final_message()` reconstruit des
-> blocs `tool_use` avec `block.input == {}` — les arguments de l'outil (ex. `skill_name`
-> pour `read_skill`) n'arrivent jamais. `messages.create()` retourne le JSON complet
-> d'un coup ; `block.input` est toujours intégralement populé. Le `stream_callback`
-> est préservé : chaque bloc `text` est émis au callback après l'appel — par bloc
-> plutôt que par token, ce qui est suffisant pour le rendu Discord/Telegram en temps réel.
+### Outils (LangChain `BaseTool`)
 
-Le client est initialisé avec `base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000")` pour le routage via le proxy LiteLLM.
+`AgentExecutor` accepte une liste de `BaseTool` (LangChain). Les outils internes et MCP sont unifiés sous ce type :
 
-### Outils internes (InternalTool)
-
-`SDKExecutor` accepte une liste d'`InternalTool` (Python natif) dont les schémas sont pré-calculés à la construction et fusionnés avec les outils MCP à chaque tour :
-
-- **`InternalTool`** — dataclass `(name, description, input_schema, handler)` ; handler sync ou async
-- **`make_skills_tools(skills_dir)`** — expose `list_skills` et `read_skill` pour découverte des SKILL.md
-- Les schémas Anthropic (`_tool_schemas`) sont calculés une seule fois dans `__init__` et réutilisés
-- La fusion internal + MCP est déléguée à `_get_anthropic_tools(mcp_tools)` appelé dans `execute()`
-- Les outils internes sont prioritaires sur les outils MCP en cas de nom identique
+- **`make_skills_tools(skills_dir)`** (`atelier/skills_tools.py`) — retourne des `BaseTool` pour `list_skills` et `read_skill` (découverte des SKILL.md)
+- **`make_mcp_tools(mcp_servers)`** (`atelier/mcp_adapter.py`) — charge les outils MCP via `langchain-mcp-adapters` et retourne des `BaseTool`
+- Les outils internes et MCP sont concaténés avant la construction de l'agent ; pas de plafonnement différencié
 
 ### Streaming Progressif
 
-Atelier publie les chunks d'une réponse au fur et à mesure via `StreamPublisher`:
+Atelier publie les tokens d'une réponse au fur et à mesure via `StreamPublisher` (token-by-token grâce à `agent.astream(stream_mode="messages")`) :
 
 ```
 relais:messages:streaming:{channel}:{correlation_id}
@@ -800,41 +766,38 @@ relais:messages:streaming:{channel}:{correlation_id}
 
 ### Serveurs MCP — McpSessionManager
 
-`McpSessionManager` isole toute l'infrastructure MCP. Les serveurs configurés dans `config/mcp_servers.yaml` sont démarrés comme sous-processus (stdio) ou connexions HTTP (SSE) pour chaque message traité :
+`McpSessionManager` isole toute l'infrastructure MCP. Les serveurs configurés dans `config/mcp_servers.yaml` sont démarrés comme sous-processus (stdio) ou connexions HTTP (SSE). Les outils MCP sont ensuite chargés via `langchain-mcp-adapters` :
 
 ```
-McpSessionManager.start_all(stack: AsyncExitStack)
+McpSessionManager (lifecycle)
   ↓
-  stdio → StdioServerParameters(command, args, env) → stdio_client
-  sse   → sse_client(url)
+  stdio → subprocess (command, args, env)
+  sse   → HTTP connection (url)
+
+make_mcp_tools(mcp_servers)  [atelier/mcp_adapter.py]
   ↓
-ClientSession.initialize() → session.list_tools()
+langchain-mcp-adapters → list[BaseTool]
   ↓
-noms préfixés {server}__{tool} → retournés comme list[dict] Anthropic
+Outils injectés dans create_deep_agent(tools=all_tools)
   ↓
-McpSessionManager.call_tool("{server}__{tool}", input)
+McpSessionManager.call_tool(...)
   → asyncio.wait_for(session.call_tool(...), timeout=mcp_timeout)
   → résultat injecté dans la boucle (erreur retournée en string, pas levée)
 ```
 
-**Flux d'exécution avec tool use:**
+**Flux d'exécution avec tools:**
 ```
-Atelier → SDKExecutor.execute(envelope, context)
+Atelier → AgentExecutor.execute(envelope, context)
   ↓
-McpSessionManager.start_all(stack) → mcp_tools (schémas Anthropic)
+make_mcp_tools(mcp_servers) → list[BaseTool] MCP
   ↓
-all_tools = _get_anthropic_tools(mcp_tools)   ← assemblage unique ici
+all_tools = internal_tools + mcp_tools
   ↓
-_run_agentic_loop(messages, all_tools, mcp_manager, ...)
+create_deep_agent(model, tools=all_tools, system_prompt)
   ↓
-anthropic.AsyncAnthropic.messages.create(model, system, messages, tools=all_tools)
-  (non-streaming — block.input toujours complet, pas affecté par le bug LiteLLM input_json_delta)
-  ↓
-stop_reason == "tool_use" → _call_tool()
-  → InternalTool.handler()  (outils Python natifs)
-  → McpSessionManager.call_tool()  (outils MCP externes)
-  ↓
-tool_result injecté → tour suivant → jusqu'à end_turn ou max_turns
+agent.astream({"messages": ...}, stream_mode="messages")
+  → chunks token-by-token → stream_callback → relais:messages:streaming
+  → tool calls gérés automatiquement par DeepAgents
   ↓
 Résultat agrégé → relais:messages:outgoing:{channel}
 ```
@@ -843,12 +806,12 @@ Résultat agrégé → relais:messages:outgoing:{channel}
 
 Souvenir consomme deux streams:
 
-1. **`relais:memory:request`** (Atelier demande contexte avant appel SDK)
+1. **`relais:memory:request`** (Atelier demande contexte avant exécution agentique)
    - Action `get` → retourne historique court-terme (Redis) ou fallback SQLite
    - Action `append_turn` → ajoute un tour conversation
 
 2. **`relais:messages:outgoing:*`** (observer les réponses finales)
-   - MemoryExtractor parse la réponse LLM
+   - `MemoryExtractor` appelle le LLM directement via `langchain.chat_models.init_chat_model` (format `provider:model-id`)
    - Extrait user_facts (faits sur l'utilisateur) avec threshold confiance 0.7
    - Stocke dans SQLite `user_facts` table
 
@@ -866,11 +829,10 @@ Souvenir consomme deux streams:
 3. Vérifier logs Portail — reply_policy rejection?
 4. Vérifier Redis PEL: `XINFO STREAM relais:tasks` — messages pending?
 
-### LiteLLM timeout?
+### LLM timeout (Atelier)?
 
-1. Vérifier status proxy: `curl http://localhost:4000/health`
-2. Logs LiteLLM: `supervisorctl logs litellm -f`
-3. Atelier devrait retry 3× avec backoff 2s/5s/15s
+1. Vérifier les logs Atelier: `supervisorctl tail atelier -f`
+2. Atelier devrait retry 3× avec backoff 2s/5s/15s
 
 ### ACL denied?
 

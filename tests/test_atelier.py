@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.envelope import Envelope
-from atelier.sdk_executor import SDKExecutionError
+from atelier.agent_executor import AgentExecutionError
 
 
 # ---------------------------------------------------------------------------
@@ -154,18 +154,24 @@ async def test_xack_sent_after_successful_sdk_call() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="Response from SDK")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     redis_conn.xack.assert_awaited_once()
 
@@ -182,20 +188,26 @@ async def test_xack_sent_and_dlq_on_sdk_execution_error() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(
-            side_effect=SDKExecutionError("SDK failed")
+            side_effect=AgentExecutionError("Agent failed")
         )
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     redis_conn.xack.assert_awaited_once()
 
@@ -218,20 +230,26 @@ async def test_xack_not_sent_on_generic_exception() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(
             side_effect=RuntimeError("unexpected failure")
         )
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     redis_conn.xack.assert_not_awaited()
 
@@ -259,18 +277,24 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=fast_profile) as mock_resolve:
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=fast_profile) as mock_resolve:
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     mock_resolve.assert_called_once_with(profiles, "fast")
 
@@ -287,18 +311,24 @@ async def test_handle_message_requests_memory_from_souvenir() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     memory_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -330,18 +360,24 @@ async def test_handle_message_injects_user_message_in_response_metadata() -> Non
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="Sunny and warm.")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     # Find the outgoing stream XADD
     outgoing_calls = [
@@ -367,18 +403,24 @@ async def test_handle_message_acks_on_success() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     redis_conn.xack.assert_awaited_once()
 
@@ -428,10 +470,10 @@ async def test_fetch_context_returns_empty_on_timeout() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_fetch_context_returns_parsed_messages_on_success() -> None:
-    """_fetch_context returns the history list when a matching response arrives.
+    """_fetch_context returns the messages list when a matching response arrives.
 
     When xread returns a message whose correlation_id matches the request and
-    whose payload contains a 'history' list, _fetch_context must return that
+    whose payload contains a 'messages' list, _fetch_context must return that
     list unchanged.
     """
     atelier = _make_atelier_with_patches()
@@ -460,7 +502,7 @@ async def test_fetch_context_returns_parsed_messages_on_success() -> None:
         if xread_call_count == 1 and captured_correlation_id:
             response_payload = json.dumps({
                 "correlation_id": captured_correlation_id[0],
-                "history": expected_history,
+                "messages": expected_history,
             })
             return [
                 ("relais:memory:response", [("1000001-0", {"payload": response_payload})])
@@ -493,24 +535,30 @@ async def test_streaming_signal_published_for_discord_channel() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
-            mock_pub = AsyncMock()
-            mock_pub.push_chunk = AsyncMock()
-            mock_pub.finalize = AsyncMock()
-            MockStreamPublisher.return_value = mock_pub
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
 
-            with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                    with patch("atelier.main.load_for_sdk", return_value={}):
-                        try:
-                            await atelier._process_stream(redis_conn)
-                        except asyncio.CancelledError:
-                            pass
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._process_stream(redis_conn)
+                                except asyncio.CancelledError:
+                                    pass
 
     # Verify redis.publish was called with the streaming-start signal
     publish_calls = [
@@ -537,18 +585,24 @@ async def test_streaming_signal_not_published_for_non_streaming_channel() -> Non
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     # redis.publish must not have been called with any streaming-start pattern
     streaming_publish_calls = [
@@ -575,24 +629,30 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="final reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
-            mock_pub = AsyncMock()
-            mock_pub.push_chunk = AsyncMock()
-            mock_pub.finalize = AsyncMock()
-            MockStreamPublisher.return_value = mock_pub
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
 
-            with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                    with patch("atelier.main.load_for_sdk", return_value={}):
-                        try:
-                            await atelier._process_stream(redis_conn)
-                        except asyncio.CancelledError:
-                            pass
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._process_stream(redis_conn)
+                                except asyncio.CancelledError:
+                                    pass
 
     mock_pub.finalize.assert_awaited_once()
 
@@ -664,24 +724,30 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
-            mock_pub = AsyncMock()
-            mock_pub.push_chunk = AsyncMock()
-            mock_pub.finalize = AsyncMock()
-            MockStreamPublisher.return_value = mock_pub
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
 
-            with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                    with patch("atelier.main.load_for_sdk", return_value={}):
-                        try:
-                            await atelier._process_stream(redis_conn)
-                        except asyncio.CancelledError:
-                            pass
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._process_stream(redis_conn)
+                                except asyncio.CancelledError:
+                                    pass
 
     publish_calls = [
         c for c in redis_conn.publish.await_args_list
@@ -721,24 +787,30 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="Streamed reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
-            mock_pub = AsyncMock()
-            mock_pub.push_chunk = AsyncMock()
-            mock_pub.finalize = AsyncMock()
-            MockStreamPublisher.return_value = mock_pub
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
 
-            with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                    with patch("atelier.main.load_for_sdk", return_value={}):
-                        try:
-                            await atelier._process_stream(redis_conn)
-                        except asyncio.CancelledError:
-                            pass
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._process_stream(redis_conn)
+                                except asyncio.CancelledError:
+                                    pass
 
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -767,18 +839,24 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
         asyncio.CancelledError(),
     ])
 
-    with patch("atelier.main.SDKExecutor") as MockExecutor:
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(return_value="Non-streamed reply")
         MockExecutor.return_value = mock_instance
 
-        with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-            with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                with patch("atelier.main.load_for_sdk", return_value={}):
-                    try:
-                        await atelier._process_stream(redis_conn)
-                    except asyncio.CancelledError:
-                        pass
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
 
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list

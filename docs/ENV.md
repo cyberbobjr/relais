@@ -55,13 +55,11 @@ Chaque brique a un mot de passe Redis séparé pour l'isolation de sécurité :
 | `REDIS_PASS_INSPECTOR` | Inspector (futur) |
 | `REDIS_PASS_WEAVER` | Weaver (futur) |
 
-## LiteLLM Proxy
+## LLM Provider (Anthropic direct)
 
 | Variable | Requis | Description | Exemple |
 |----------|--------|-------------|---------|
-| `LITELLM_BASE_URL` | Non | URL du proxy LiteLLM (défaut: `http://localhost:4000/v1`) | `http://localhost:4000/v1` |
-| `LITELLM_MASTER_KEY` | Non | Clé maître LiteLLM | `sk-changeme` |
-| `LITELLM_MODEL` | Non | Modèle par défaut | `mistral-small-2603` |
+| `ANTHROPIC_API_KEY` | Oui | Clé API directe vers Anthropic (utilisée par DeepAgents/LangChain) | `sk-ant-xxx` |
 
 ## Chemins optionnels
 

@@ -32,21 +32,20 @@ The main pipeline flows through these bricks in order:
    - ACL validation (users.yaml), content guardrails pre/post-LLM filtering
    - Produces: `relais:tasks` (or refuses if ACL fails)
 
-4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `anthropic.AsyncAnthropic`
+4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `deepagents.create_deep_agent()`
    - Consumes: `relais:tasks`
-   - Loads SOUL personality + context, calls LLM via `anthropic.AsyncAnthropic` (LiteLLM proxy via `ANTHROPIC_BASE_URL`)
-   - Agentic loop: explicit multi-turn tool-use handling (`stop_reason == "tool_use"` → inject `tool_result` → rebuckle)
-   - Internal tools: `InternalTool` frozen dataclass, `make_skills_tools()` exposes `list_skills`/`read_skill`
-   - MCP servers: stdio servers managed via `contextlib.AsyncExitStack` + `mcp.client.stdio.stdio_client`
-   - Handles SDKExecutionError → DLQ (`relais:tasks:failed`)
-   - Streams output to `relais:messages:streaming:{channel}:{correlation_id}` for real-time Discord/Telegram rendering
+   - Loads SOUL personality + context, executes agentic loop via `AgentExecutor` (`atelier/agent_executor.py`)
+   - Tools are `list[BaseTool]` (LangChain); `make_skills_tools()` in `atelier/skills_tools.py` exposes `list_skills`/`read_skill`
+   - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by `McpSessionManager`
+   - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
+   - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - Produces: `relais:messages:outgoing:{channel}`
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
    - Dual-stream consumer: `relais:memory:request` (Atelier requests) + `relais:messages:outgoing:*` (response observer)
    - Short-term: Redis List `relais:context:{user_id}` (20 msgs, TTL 24h)
    - Long-term: SQLite `~/.relais/storage/messages.db` with user_facts table
-   - Memory extractor: parses LLM responses to extract and store user facts (confidence threshold 0.7)
+   - Memory extractor: `MemoryExtractor` uses `langchain.chat_models.init_chat_model` (provider:model-id format) to call the LLM directly — no LiteLLM proxy required; confidence threshold 0.7
 
 ### Observer & Support Services
 
@@ -119,13 +118,13 @@ Bricks use:
 ```
 On exception:
   - RETRIABLE (ConnectError, TimeoutException): Do NOT ACK → stays in PEL, re-delivered
-  - SDKExecutionError or success: Route to output/DLQ, then ACK only on success or final error
+  - AgentExecutionError or success: Route to output/DLQ, then ACK only on success or final error
   - ExhaustedRetriesError: Route to DLQ relais:tasks:failed, then ACK (avoid poisoning PEL)
 
 XACK pattern (critical):
   - Only ACK after successful publish to output stream OR final error to DLQ
   - Never ACK on transient errors (no ACK = message stays in PEL for re-delivery)
-  - This prevents silent message loss if LiteLLM restarts during processing
+  - This prevents silent message loss if the LLM backend restarts during processing
 ```
 
 ### Configuration Cascade
@@ -141,7 +140,6 @@ Environment variables override YAML configs (e.g., `REDIS_SOCKET_PATH`, `REDIS_P
 
 Priority-based startup (`supervisord.conf`):
 - **Priority 1**: `courier` (Redis server)
-- **Priority 5**: `litellm` (LLM proxy, `uv run`)
 - **Priority 8**: `archiviste` (observer, non-blocking)
 - **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir) + **aiguilleur** (unified channel manager)
 - ~~Priority 20~~: Aiguilleur relays (DEPRECATED — single `aiguilleur/main.py` process now manages all channels via `channels.yaml`)
@@ -161,10 +159,10 @@ poetry install
 uv sync
 ```
 
-Core dependencies: `redis >=5.0`, `anthropic >=0.40.0`, `mcp >=1.0.0`, `supervisor >=4.2`, `httpx >=0.27`, `pydantic >=2.9`
+Core dependencies: `redis >=5.0`, `deepagents`, `langchain-mcp-adapters`, `mcp >=1.0.0`, `supervisor >=4.2`, `pydantic >=2.9`
 Dev: `pytest >=9.0`, `pytest-asyncio >=1.3`
 
-Note: `litellm` is no longer a direct dependency (Atelier calls `anthropic.AsyncAnthropic` with `base_url=ANTHROPIC_BASE_URL` to route through the LiteLLM proxy)
+Note: Atelier uses `deepagents.create_deep_agent()` for the agentic loop; the `profiles.yaml` model field uses `provider:model-id` format (e.g., `anthropic:claude-sonnet-4-6`).
 
 ### Running Services
 
@@ -239,28 +237,16 @@ cp .env.example .env
 ```
 
 Set required keys:
-- `ANTHROPIC_BASE_URL` - LiteLLM proxy address (e.g., http://localhost:4000)
-- `ANTHROPIC_API_KEY` - LiteLLM master key (or `ANTHROPIC_AUTH_TOKEN`)
+- `ANTHROPIC_API_KEY` - Anthropic API key (used directly by LangChain `init_chat_model`)
 - `REDIS_SOCKET_PATH` - Redis Unix socket path
 - Channel bot tokens: `DISCORD_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, etc.
 - Per-brick Redis passwords: `REDIS_PASS_PORTAIL`, `REDIS_PASS_ATELIER`, etc.
 
-## Atelier — Outils internes & Serveurs MCP
+## Atelier — Outils & Serveurs MCP
 
-### Internal Tools (`InternalTool`)
+### Tools (LangChain `BaseTool`)
 
-Internal tools are Python callables exposed to the agentic loop via the `InternalTool` frozen dataclass (in `atelier/internal_tool.py`):
-
-```python
-@dataclass(frozen=True)
-class InternalTool:
-    name: str
-    description: str
-    input_schema: dict      # JSON Schema for the tool's arguments
-    handler: Callable       # sync or async callable
-```
-
-`make_skills_tools(skills_dir)` (in `atelier/skills_tools.py`) scans the `skills/` directory and returns two built-in tools: `list_skills` and `read_skill`.
+All tools exposed to the agentic loop are `langchain_core.tools.BaseTool` instances. `make_skills_tools(skills_dir)` (in `atelier/skills_tools.py`) scans the `skills/` directory and returns two built-in LangChain tools: `list_skills` and `read_skill`.
 
 ### MCP Servers (`mcp_servers.yaml`)
 
@@ -281,33 +267,29 @@ mcp_servers:
   contextual: []
 ```
 
-`load_for_sdk(profile=None)` (in `atelier/mcp_loader.py`) reads the config cascade and returns a dict keyed by server name. For stdio servers: `{type: "stdio", command, args, env?}`; for SSE servers: `{type: "sse", url, env?}`.
+MCP tools are loaded via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`). The MCP server lifecycle is managed by `McpSessionManager` (`atelier/mcp_session_manager.py`).
 
-`mcp_timeout` and `mcp_max_tools` are **not** in `mcp_servers.yaml` — they are per-profile fields in `profiles.yaml` (see Agentic Loop section below).
+`mcp_timeout` and `mcp_max_tools` are **not** in `mcp_servers.yaml` — they are per-profile fields in `profiles.yaml`.
 
 ### Agentic Loop
 
-`SDKExecutor` (`atelier/sdk_executor.py`) manages the full lifecycle:
+`AgentExecutor` (`atelier/agent_executor.py`) manages the full lifecycle using `deepagents.create_deep_agent()`:
 
 ```python
-executor = SDKExecutor(
-    profile=profile,            # ProfileConfig (model, max_turns, max_tokens, mcp_timeout, mcp_max_tools, …)
+executor = AgentExecutor(
+    profile=profile,            # ProfileConfig (model in provider:model-id format, max_turns, …)
     soul_prompt=soul_prompt,    # assembled system prompt string
     mcp_servers=mcp_servers,    # dict from load_for_sdk()
-    tools=tools,                # list[InternalTool] from make_skills_tools()
+    tools=tools,                # list[BaseTool] from make_skills_tools()
 )
 reply = await executor.execute(envelope, context, stream_callback=...)
 ```
 
-Per-profile MCP constraints (fields in `ProfileConfig`):
-- `mcp_timeout` — seconds before `asyncio.wait_for` cancels a single MCP tool call (returns an error string to the model; loop continues)
-- `mcp_max_tools` — max MCP tool definitions passed to the model (`0` = no MCP tools; internal tools are never capped)
+Streaming is token-by-token via `agent.astream(stream_mode="messages")`.
 
-Internally:
-- MCP servers are started via `contextlib.AsyncExitStack` + `mcp.client.stdio.stdio_client`
-- Tool names from MCP servers are prefixed `{server_name}__{tool_name}` to avoid collisions
-- The loop runs until `stop_reason == "end_turn"` or `max_turns` is exhausted
-- `anthropic.AsyncAnthropic(base_url=ANTHROPIC_BASE_URL)` routes calls through the LiteLLM proxy
+Per-profile MCP constraints (fields in `ProfileConfig`):
+- `mcp_timeout` — seconds before a single MCP tool call is cancelled (returns an error string to the model; loop continues)
+- `mcp_max_tools` — max MCP tool definitions passed to the model (`0` = no MCP tools; internal tools are never capped)
 
 ## Common Development Tasks
 

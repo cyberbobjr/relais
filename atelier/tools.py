@@ -1,19 +1,22 @@
-"""Skills InternalTool factory for the Atelier brick.
+"""LangChain @tool replacements for the Atelier brick's internal tools.
+
+Replaces ``atelier/internal_tool.py`` + ``atelier/skills_tools.py``.
+Tool schemas are derived automatically from type hints and docstrings
+via LangChain's ``@tool`` decorator (no manual JSON Schema required).
 
 A "skill" is a knowledge document stored on disk that the LLM can query at
 runtime.  Each skill lives in its own subdirectory under ``skills/`` and
-contains a ``SKILL.md`` file with structured guidance (prompts, patterns,
-code examples, etc.).
+contains a ``SKILL.md`` file with structured guidance.
 
 Example layout::
 
     skills/
       python-patterns/
-        SKILL.md          ← the skill content
+        SKILL.md
       api-design/
         SKILL.md
 
-Exposes two InternalTools to the agentic loop:
+Exposes two tools to the agentic loop:
 - ``list_skills`` — catalogue of available skills (name + first non-empty line)
 - ``read_skill``  — full content of a named SKILL.md file
 """
@@ -23,15 +26,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from atelier.internal_tool import InternalTool
+from langchain_core.tools import StructuredTool
 
 logger = logging.getLogger(__name__)
 
 
-def make_skills_tools(skills_dir: Path) -> list[InternalTool]:
-    """Return InternalTool instances for listing and reading skills.
+def make_skills_tools(skills_dir: Path) -> list[StructuredTool]:
+    """Return LangChain StructuredTool instances for listing and reading skills.
 
-    Both tools operate on ``skills_dir`` (resolved at call time via closure).
+    Both tools operate on ``skills_dir`` (captured at call time via closure).
     If ``skills_dir`` does not exist the tools still work — ``list_skills``
     returns an empty catalogue and ``read_skill`` returns an error string.
 
@@ -39,10 +42,18 @@ def make_skills_tools(skills_dir: Path) -> list[InternalTool]:
         skills_dir: Directory to scan for ``SKILL.md`` files recursively.
 
     Returns:
-        List of two InternalTool instances: ``list_skills`` and ``read_skill``.
+        List of two StructuredTool instances: ``list_skills`` and ``read_skill``.
     """
 
     def _list_skills() -> str:
+        """List all available skills with a one-line summary of each.
+
+        Call this first to discover what skills exist before reading one.
+
+        Returns:
+            Newline-separated list of skill names with a one-line summary,
+            or a message indicating no skills are available.
+        """
         if not skills_dir.exists():
             return "No skills directory found."
         entries: list[str] = []
@@ -55,6 +66,17 @@ def make_skills_tools(skills_dir: Path) -> list[InternalTool]:
         return "\n".join(entries)
 
     def _read_skill(skill_name: str) -> str:
+        """Read the full content of a skill by its name.
+
+        Use list_skills first to find the exact skill name.
+
+        Args:
+            skill_name: Exact name of the skill directory (e.g. 'python-patterns').
+
+        Returns:
+            Full text content of the SKILL.md file, or an error string when
+            the skill is not found or the name is invalid.
+        """
         # Guard against path traversal: model-supplied skill_name must be a
         # plain directory name with no separators or parent-dir references.
         if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
@@ -72,37 +94,22 @@ def make_skills_tools(skills_dir: Path) -> list[InternalTool]:
                 return skill_file.read_text(encoding="utf-8")
         return f"Error: skill '{skill_name}' not found in {skills_dir}."
 
-    list_tool = InternalTool(
+    list_tool = StructuredTool.from_function(
+        func=_list_skills,
         name="list_skills",
         description=(
             "List all available skills with a one-line summary of each. "
             "Call this first to discover what skills exist before reading one."
         ),
-        input_schema={
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-        handler=_list_skills,
     )
 
-    read_tool = InternalTool(
+    read_tool = StructuredTool.from_function(
+        func=_read_skill,
         name="read_skill",
         description=(
             "Read the full content of a skill by its name. "
             "Use list_skills first to find the exact skill name."
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "skill_name": {
-                    "type": "string",
-                    "description": "Exact name of the skill directory (e.g. 'python-patterns').",
-                }
-            },
-            "required": ["skill_name"],
-        },
-        handler=_read_skill,
     )
 
     return [list_tool, read_tool]
@@ -115,9 +122,6 @@ def make_skills_tools(skills_dir: Path) -> list[InternalTool]:
 
 def _first_nonempty_line(path: Path) -> str:
     """Return the first non-empty, non-whitespace line of a file.
-
-    Reads line-by-line so that large SKILL.md files are not loaded into
-    memory just to get the title.
 
     Args:
         path: Path to the text file to read.
