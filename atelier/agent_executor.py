@@ -118,7 +118,14 @@ class AgentExecutor:
         try:
             if stream_callback is None:
                 result = await self._agent.ainvoke({"messages": messages})
-                return result["messages"][-1].content
+                last_content = result["messages"][-1].content
+                if isinstance(last_content, list):
+                    last_content = "".join(
+                        block["text"]
+                        for block in last_content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+                return last_content
             return await self._stream({"messages": messages}, stream_callback)
         except AgentExecutionError:
             raise

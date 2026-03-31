@@ -27,7 +27,7 @@ channels:
 
   discord:
     enabled: true
-    streaming: true
+    streaming: false
 
   telegram:
     enabled: false

@@ -55,7 +55,7 @@ class McpSessionManager:
             result = await manager.call_tool("server__tool_name", tool_input)
     """
 
-    def __init__(self, profile: ProfileConfig, mcp_servers: dict) -> None:
+    def __init__(self, profile: ProfileConfig, mcp_servers: dict[str, dict[str, object]]) -> None:
         """Initialise the manager.
 
         Args:
@@ -65,7 +65,12 @@ class McpSessionManager:
         """
         self._profile = profile
         self._mcp_servers = mcp_servers
-        self._sessions: dict = {}
+        self._sessions: dict[str, ClientSession] = {}
+
+    @property
+    def sessions(self) -> dict[str, ClientSession]:
+        """Active MCP sessions keyed by server name."""
+        return self._sessions
 
     async def start_all(self, stack: contextlib.AsyncExitStack) -> list[dict]:
         """Start all configured MCP servers and return their tool schemas.
@@ -164,7 +169,7 @@ class McpSessionManager:
 
         return tools
 
-    async def call_tool(self, tool_name: str, tool_input: dict) -> str:
+    async def call_tool(self, tool_name: str, tool_input: dict[str, object]) -> str:
         """Dispatch a tool call to the appropriate MCP session.
 
         Args:

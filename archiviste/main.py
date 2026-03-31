@@ -1,19 +1,22 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from datetime import datetime
+
+# Configure local simple logging for the archivist itself
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format='%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s',
+    stream=sys.stdout
+)
+
 from common.redis_client import RedisClient
 from common.config_loader import get_relais_home
 from common.shutdown import GracefulShutdown
 from common.envelope import Envelope
-
-# Configure local simple logging for the archivist itself
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s',
-    stream=sys.stdout
-)
 logger = logging.getLogger("archiviste")
 
 # Pipeline streams observed by archiviste_pipeline_group.

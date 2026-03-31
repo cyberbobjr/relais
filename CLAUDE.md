@@ -73,13 +73,13 @@ The main pipeline flows through these bricks in order:
   - `users.yaml.default`: User registry with display_name, role, channels, llm_profile
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 
-- **soul/** - RELAIS personality & context
-  - `SOUL.md.default`: System prompt defining JARVIS-like assistant behavior
-
-- **prompts/** - Channel-specific formatting
-  - `telegram_default.md`: MarkdownV2 formatting, 1000 char limit
-  - `whatsapp_default.md`: Plain text with bold/italic, 500 char limit
-  - Context-aware variations: `in_meeting.md`, `out_of_hours.md`, `vacation.md`
+- **prompts/** - Multi-layer system prompt (assembled by `atelier/soul_assembler.py`)
+  - `soul/SOUL.md.default`: Core personality — Layer 1, always loaded
+  - `soul/variants/`: Personality variants (manual swap, not auto-loaded)
+  - `channels/{channel}_default.md`: Channel formatting overlay — Layer 4 (e.g. `telegram_default.md`)
+  - `policies/{policy}.md`: Reply-policy overlay — Layer 5 (e.g. `in_meeting.md`, `vacation.md`)
+  - `roles/{role}.md`: Role overlay — Layer 2 (create as needed, not shipped)
+  - `users/{channel}_{id}.md`: Per-user override — Layer 3 (create as needed, not shipped)
 
 ## Key Architecture Concepts
 

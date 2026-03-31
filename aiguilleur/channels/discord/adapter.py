@@ -1,15 +1,17 @@
 """Discord channel adapter — NativeAiguilleur implementation.
 
 Bridges the Discord API and the RELAIS Redis bus:
-- Produces:   relais:messages:incoming          (new user messages)
-- Consumes:   relais:messages:outgoing:discord  (bot replies)
-- Subscribes: relais:streaming:start:discord    (streaming sessions)
+- Produces:   relais:messages:incoming         (new user messages)
+- Consumes:   relais:messages:outgoing:discord (bot replies)
+
+Note: streaming progressif désactivé sur ce canal — Atelier publie la réponse
+complète sur relais:messages:outgoing:discord et le bot l'envoie en un seul
+message.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 
@@ -28,18 +30,11 @@ from aiguilleur.core.native import NativeAiguilleur
 
 logger = logging.getLogger("aiguilleur.discord")
 
-# ---------------------------------------------------------------------------
-# Streaming constants
-# ---------------------------------------------------------------------------
-
-STREAM_EDIT_THROTTLE_CHARS = 80   # Edit Discord message every N chars
-STREAM_READ_BLOCK_MS = 150        # XREAD block timeout in ms
-
 
 class DiscordAiguilleur(NativeAiguilleur):
     """Discord channel adapter.
 
-    Wraps RelaisDiscordClient in a NativeAiguilleur lifecycle.
+    Wraps ``_RelaisDiscordClient`` in a NativeAiguilleur lifecycle.
     The Discord client runs inside the adapter thread's event loop.
     """
 
@@ -71,7 +66,16 @@ class DiscordAiguilleur(NativeAiguilleur):
 
 
 class _RelaisDiscordClient(discord.Client):
-    """Internal Discord client — not exposed outside this module."""
+    """Internal Discord client — not exposed outside this module.
+
+    Manages two concerns:
+    - Receiving Discord messages and publishing them to ``relais:messages:incoming``.
+    - Consuming ``relais:messages:outgoing:discord`` and sending the final reply.
+
+    Streaming is intentionally disabled on this adapter: responses are sent as
+    a single message once Atelier finishes. Set ``streaming: false`` in
+    ``channels.yaml`` to prevent Atelier from publishing partial chunks.
+    """
 
     def __init__(self, stop_event: asyncio.Event | None = None) -> None:
         intents = discord.Intents.default()
@@ -88,8 +92,13 @@ class _RelaisDiscordClient(discord.Client):
         self._stop_event = stop_event
 
     async def setup_hook(self) -> None:
+        """Initialise the Redis connection and launch background tasks.
+
+        Called by discord.py once the client is ready to connect.
+        Creates the Redis connection, logs the startup event, and launches
+        the outgoing-stream consumer task.
+        """
         self._redis_conn = await self._redis_client.get_connection()
-        self._redis = self._redis_conn
         await self._redis_conn.xadd(
             "relais:logs",
             {
@@ -99,12 +108,20 @@ class _RelaisDiscordClient(discord.Client):
             },
         )
         self.loop.create_task(self._consume_outgoing_stream())
-        self.loop.create_task(self._subscribe_streaming_start())
 
     async def on_ready(self) -> None:
+        """Log successful Discord login."""
         logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
 
     async def on_message(self, message: discord.Message) -> None:
+        """Handle incoming Discord messages and publish them to the Redis bus.
+
+        Only processes messages that mention the bot or are sent in a DM.
+        Publishes an ``Envelope`` to ``relais:messages:incoming``.
+
+        Args:
+            message: The incoming Discord message event.
+        """
         if message.author.id == self.user.id:
             return
 
@@ -117,6 +134,14 @@ class _RelaisDiscordClient(discord.Client):
         content = message.content.replace(f"<@{self.user.id}>", "").strip()
         if not content:
             content = "Coucou!"
+
+        preview = content[:80] + "…" if len(content) > 80 else content
+        logger.debug(
+            "RECV discord | author=%s | channel=%s | content=%r",
+            message.author.name,
+            message.channel,
+            preview,
+        )
 
         envelope = Envelope(
             channel="discord",
@@ -135,16 +160,104 @@ class _RelaisDiscordClient(discord.Client):
         except Exception as exc:
             logger.error("Failed to queue message: %s", exc)
 
-    async def _consume_outgoing_stream(self) -> None:
-        """Background task reading answers from Atelier."""
+    # ------------------------------------------------------------------
+    # Outgoing stream helpers
+    # ------------------------------------------------------------------
+
+    async def _ensure_consumer_group(self, stream: str, group: str) -> None:
+        """Create a Redis consumer group idempotently.
+
+        Silently ignores the ``BUSYGROUP`` error raised when the group already
+        exists. Other errors are logged as warnings.
+
+        Args:
+            stream: Redis stream key (e.g. ``relais:messages:outgoing:discord``).
+            group: Consumer group name to create.
+        """
         try:
-            await self._redis_conn.xgroup_create(
-                self.stream_out, self.group_name, mkstream=True
-            )
+            await self._redis_conn.xgroup_create(stream, group, mkstream=True)
         except Exception as exc:
             if "BUSYGROUP" not in str(exc):
                 logger.warning("Consumer group error: %s", exc)
 
+    async def _resolve_discord_channel(
+        self, envelope: Envelope
+    ) -> discord.abc.Messageable | None:
+        """Resolve the Discord channel or DM to send a reply to.
+
+        Tries ``get_channel()`` first (in-process cache), then falls back to
+        fetching the user and opening a DM. This fallback is needed when the
+        target is a DM channel that isn't cached (e.g. after a bot restart).
+
+        Args:
+            envelope: The outgoing message envelope. Must contain ``reply_to``
+                (channel ID) in ``metadata`` and a ``sender_id`` of the form
+                ``discord:{user_id}``.
+
+        Returns:
+            A Discord messageable (``TextChannel``, ``DMChannel``) or ``None``
+            if resolution fails.
+        """
+        try:
+            channel_id = int(envelope.metadata.get("reply_to", 0))
+            channel = self.get_channel(channel_id)
+            if channel:
+                return channel
+            user_id = int(envelope.sender_id.split(":")[1])
+            user = await self.fetch_user(user_id)
+            return await user.create_dm()
+        except Exception as exc:
+            logger.error(
+                "Cannot resolve Discord channel for envelope %s: %s",
+                envelope.correlation_id,
+                exc,
+            )
+            return None
+
+    async def _deliver_outgoing_message(self, data: dict) -> None:
+        """Parse and deliver a single outgoing envelope to Discord.
+
+        Deserialises the ``payload`` field, resolves the target channel, then
+        sends the message content. Deserialization errors (malformed JSON,
+        missing fields) are logged separately from Discord API errors.
+
+        Args:
+            data: Raw Redis stream entry fields. Must contain a ``"payload"``
+                key with a JSON-serialised ``Envelope``.
+        """
+        try:
+            envelope = Envelope.from_json(data.get("payload", "{}"))
+        except (ValueError, KeyError) as exc:
+            logger.error("Malformed envelope payload, skipping: %s", exc)
+            return
+
+        channel = await self._resolve_discord_channel(envelope)
+        if not channel:
+            return
+
+        preview = envelope.content[:80] + "…" if len(envelope.content) > 80 else envelope.content
+        logger.debug(
+            "SEND discord | corr=%s | channel=%s | content=%r",
+            envelope.correlation_id[:8],
+            channel,
+            preview,
+        )
+
+        await channel.send(envelope.content)
+
+    async def _consume_outgoing_stream(self) -> None:
+        """Background task: consume final answers from Atelier and send to Discord.
+
+        Reads from ``relais:messages:outgoing:discord`` via a Redis consumer
+        group (at-least-once delivery). Each message is ACKed in a ``finally``
+        block after ``_deliver_outgoing_message`` runs, whether delivery
+        succeeded or not. This prevents undeliverable messages (e.g. deleted
+        Discord channels) from poisoning the PEL indefinitely.
+
+        On outer Redis errors (connection loss, stream errors) the loop sleeps
+        1 second before retrying.
+        """
+        await self._ensure_consumer_group(self.stream_out, self.group_name)
         logger.info("Listening for outgoing messages targeted to Discord...")
 
         while not self.is_closed():
@@ -159,28 +272,22 @@ class _RelaisDiscordClient(discord.Client):
                 for _, messages in results:
                     for message_id, data in messages:
                         try:
-                            envelope = Envelope.from_json(data.get("payload", "{}"))
-                            channel_id = int(envelope.metadata.get("reply_to"))
-                            channel = self.get_channel(channel_id)
-                            if not channel:
-                                user_id = int(envelope.sender_id.split(":")[1])
-                                user = await self.fetch_user(user_id)
-                                channel = await user.create_dm()
-
-                            if channel:
-                                if envelope.metadata.get("streamed"):
-                                    redis_key = f"relais:streamed_msg:{envelope.correlation_id}"
-                                    discord_msg_id = await self._redis_conn.get(redis_key)
-                                    if discord_msg_id:
-                                        partial = channel.get_partial_message(int(discord_msg_id))
-                                        await partial.edit(content=envelope.content)
-                                        await self._redis_conn.delete(redis_key)
-                                    else:
-                                        await channel.send(envelope.content)
-                                else:
-                                    await channel.send(envelope.content)
+                            await self._deliver_outgoing_message(data)
                         except Exception as exc:
-                            logger.error("Failed to send Discord message: %s", exc)
+                            logger.error(
+                                "Undeliverable Discord message %s, routing to DLQ: %s",
+                                message_id,
+                                exc,
+                            )
+                            await self._redis_conn.xadd(
+                                "relais:messages:outgoing:failed",
+                                {
+                                    "source": self.stream_out,
+                                    "message_id": message_id,
+                                    "payload": data.get("payload", ""),
+                                    "reason": str(exc),
+                                },
+                            )
                         finally:
                             await self._redis_conn.xack(
                                 self.stream_out, self.group_name, message_id
@@ -188,88 +295,3 @@ class _RelaisDiscordClient(discord.Client):
             except Exception as exc:
                 logger.error("Background stream error: %s", exc)
                 await asyncio.sleep(1)
-
-    async def _subscribe_streaming_start(self) -> None:
-        """Listen on relais:streaming:start:discord and dispatch streaming tasks."""
-        pubsub = self._redis.pubsub()
-        await pubsub.subscribe("relais:streaming:start:discord")
-        async for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
-            try:
-                data = json.loads(message["data"])
-                envelope = Envelope.from_json(json.dumps(data))
-                asyncio.create_task(self._handle_streaming_message(envelope))
-            except Exception as exc:
-                logger.warning("Streaming start parse error: %s", exc)
-
-    async def _handle_streaming_message(self, envelope: Envelope) -> None:
-        """Stream LLM chunks into a Discord message via live edits."""
-        channel_id = int(
-            envelope.metadata.get("discord_channel_id")
-            or envelope.metadata.get("reply_to", 0)
-        )
-
-        channel = self.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.fetch_channel(channel_id)
-            except Exception as exc:
-                logger.error("Cannot find Discord channel %s: %s", channel_id, exc)
-                return
-
-        stream_key = f"relais:messages:streaming:discord:{envelope.correlation_id}"
-
-        try:
-            msg = await channel.send("▌")
-        except Exception as exc:
-            logger.error("Failed to send streaming placeholder: %s", exc)
-            return
-
-        await self._redis.setex(
-            f"relais:streamed_msg:{envelope.correlation_id}", 300, str(msg.id)
-        )
-
-        accumulated = ""
-        buffer = ""
-        last_id = "0"
-
-        while True:
-            try:
-                results = await self._redis.xread(
-                    {stream_key: last_id},
-                    block=STREAM_READ_BLOCK_MS,
-                    count=10,
-                )
-            except Exception as exc:
-                logger.warning("xread streaming error: %s", exc)
-                break
-
-            if not results:
-                continue
-
-            for _, entries in results:
-                for entry_id, fields in entries:
-                    last_id = entry_id
-
-                    if isinstance(fields, dict):
-                        chunk = fields.get("chunk", "")
-                        is_final = fields.get("is_final", "0") == "1"
-                    else:
-                        chunk = fields.get(b"chunk", b"").decode()
-                        is_final = fields.get(b"is_final", b"0").decode() == "1"
-
-                    buffer += chunk
-                    accumulated += chunk
-
-                    should_edit = len(buffer) >= STREAM_EDIT_THROTTLE_CHARS or is_final
-                    if should_edit:
-                        display = accumulated if is_final else accumulated + "▌"
-                        try:
-                            await msg.edit(content=display)
-                        except Exception as edit_exc:
-                            logger.debug("Discord edit error (non-fatal): %s", edit_exc)
-                        buffer = ""
-
-                    if is_final:
-                        return

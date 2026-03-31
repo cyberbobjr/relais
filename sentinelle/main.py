@@ -1,18 +1,21 @@
 import asyncio
 import logging
+import os
 import sys
 from typing import Any
+
+# Configure logging
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
+    stream=sys.stdout
+)
 
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout
-)
 logger = logging.getLogger("sentinelle")
 
 

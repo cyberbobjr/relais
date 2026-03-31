@@ -49,6 +49,7 @@ def _make_redis_conn() -> AsyncMock:
     conn.xadd = AsyncMock(return_value=b"1234-0")
     conn.hset = AsyncMock(return_value=1)
     conn.expire = AsyncMock(return_value=True)
+    conn.get = AsyncMock(return_value=None)  # DND inactive by default
     return conn
 
 

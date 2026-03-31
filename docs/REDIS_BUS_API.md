@@ -71,8 +71,8 @@ Every pipeline stream message wraps its content in an **Envelope**.
 
 ### `relais:messages:incoming`
 
-**Direction**: Aiguilleur → Portail
-**Consumer group**: `portail_group`
+**Direction**: Aiguilleur → Portail, Commandant
+**Consumer groups**: `portail_group`, `commandant_group`
 
 Carries raw inbound messages from external channel adapters before any validation.
 
@@ -161,40 +161,6 @@ XADD relais:messages:outgoing:discord * payload <Envelope JSON>
 |-----|------|-------------|
 | `user_message` | `string` | Original user message content (copied from incoming envelope) |
 | `traces` | `array` | Pipeline trace list appended with `{"brick": "atelier", "action": "Generated via {model}"}` |
-| `streamed` | `boolean` (optional) | `True` when the response was already progressively rendered via streaming. Signals Aiguilleur to edit the existing Discord message instead of sending a new one. Only present for channels in `STREAMING_CAPABLE_CHANNELS`. |
-
-**Streaming deduplication flow (Discord)**:
-
-When `metadata["streamed"]` is `True`, Aiguilleur Discord performs an edit instead of a new send:
-
-1. At streaming start, `_handle_streaming_message` stores the Discord placeholder message ID in Redis:
-   `SETEX relais:streamed_msg:{correlation_id} 300 {discord_message_id}`
-2. `consume_outgoing_stream` reads `metadata["streamed"]`, fetches the key from Redis.
-3. If found: edits the existing message via `channel.get_partial_message(id).edit(content=...)` and deletes the key.
-4. If key is missing (TTL expired): falls back to `channel.send()`.
-
----
-
-### `relais:streamed_msg:{correlation_id}` (String, not Stream)
-
-**Type**: Redis String
-**TTL**: 300 seconds
-**Direction**: Aiguilleur Discord writes, Aiguilleur Discord reads
-**Set at**: Placeholder `▌` send time (start of streaming session)
-**Consumed at**: Final envelope processing in `consume_outgoing_stream`
-
-Stores the Discord message ID of the streaming placeholder so `consume_outgoing_stream` can edit it instead of sending a duplicate message.
-
-```
-SETEX relais:streamed_msg:550e8400-e29b-41d4-a716-446655440000 300 "1234567890123456789"
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| key | `string` | `relais:streamed_msg:{correlation_id}` |
-| value | `string` | Discord message ID (integer as string) |
-| TTL | `int` | 300 seconds — covers the full streaming + final publish round-trip |
-
 ---
 
 ### `relais:messages:streaming:{channel}:{correlation_id}`
@@ -205,12 +171,12 @@ SETEX relais:streamed_msg:550e8400-e29b-41d4-a716-446655440000 300 "123456789012
 **Max entries**: ~500 (APPROX trimming)
 
 Carries incremental LLM text chunks for real-time progressive rendering.
-Only produced for channels in `STREAMING_CAPABLE_CHANNELS`: `discord`, `telegram`, `tui`.
+Only produced for channels in `STREAMING_CAPABLE_CHANNELS`: `telegram`, `tui`.
 
 ```
-XADD relais:messages:streaming:discord:550e8400-... * chunk "Hello, "
-                                                       seq   "0"
-                                                       is_final "0"
+XADD relais:messages:streaming:telegram:550e8400-... * chunk "Hello, "
+                                                        seq   "0"
+                                                        is_final "0"
 ```
 
 | Field | Type | Description |
@@ -381,6 +347,24 @@ Each list element is a JSON string:
 
 ---
 
+### `relais:state:dnd` (String, not Stream)
+
+**Writers**: Commandant (`SET` on `/dnd`, `DEL` on `/brb`)
+**Readers**: Portail (checked before forwarding each message)
+**Primitive**: Redis String
+
+Global Do-Not-Disturb flag. When set, Portail drops all incoming messages silently (ACKs the stream entry without forwarding to `relais:security`).
+
+```
+SET relais:state:dnd 1    # /dnd — activate DND (no TTL)
+DEL relais:state:dnd      # /brb — deactivate DND
+GET relais:state:dnd      # → "1" or nil
+```
+
+No TTL is set — the flag persists until explicitly removed by `/brb`.
+
+---
+
 ## Pub/Sub Channels
 
 ### `relais:streaming:start:{channel}`
@@ -391,7 +375,7 @@ Each list element is a JSON string:
 Signals the start of a streaming session. The subscriber spawns a task to read from the corresponding `relais:messages:streaming:{channel}:{correlation_id}` stream.
 
 ```
-PUBLISH relais:streaming:start:discord <Envelope JSON>
+PUBLISH relais:streaming:start:telegram <Envelope JSON>
 ```
 
 **Payload**: Full **Envelope JSON** (same schema as all pipeline streams).
@@ -399,7 +383,7 @@ PUBLISH relais:streaming:start:discord <Envelope JSON>
 > **Important**: The payload MUST be a complete JSON-serialized Envelope, not a bare UUID or correlation_id string.
 > The subscriber performs `json.loads(payload)` and reconstructs the Envelope to extract `correlation_id` and `metadata.reply_to`.
 
-**Why the full Envelope?** The subscriber needs both `correlation_id` (to identify the stream key) and `metadata.reply_to` or `metadata.discord_channel_id` (to find the Discord channel).
+**Why the full Envelope?** The subscriber needs both `correlation_id` (to identify the stream key) and `metadata.reply_to` (to find the target channel).
 
 ---
 
@@ -437,7 +421,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 
 | Stream | Consumer group(s) | Brick |
 |--------|------------------|-------|
-| `relais:messages:incoming` | `portail_group` | Portail |
+| `relais:messages:incoming` | `portail_group`, `commandant_group` | Portail, Commandant |
 | `relais:security` | `sentinelle_group` | Sentinelle |
 | `relais:tasks` | `atelier_group` | Atelier |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group`, `souvenir_outgoing_group` | Aiguilleur, Souvenir |

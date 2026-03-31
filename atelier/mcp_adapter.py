@@ -4,7 +4,7 @@ The McpSessionManager (unchanged from the SDK era) owns the MCP server lifecycle
 and provides ``call_tool(prefixed_name, input_dict) -> str``.
 
 This module bridges from McpSessionManager to the DeepAgents/LangChain tool
-interface by generating a StructuredTool per MCP tool exposed by active sessions.
+interface by generating a BaseTool per MCP tool exposed by active sessions.
 
 Each generated tool:
 - is named ``{server_name}__{tool_name}`` (same prefix convention as before)
@@ -16,9 +16,9 @@ Each generated tool:
 from __future__ import annotations
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 if TYPE_CHECKING:
@@ -51,13 +51,13 @@ class _McpTool(BaseTool):
     args_schema: type[BaseModel] = _McpToolArgs  # type: ignore[assignment]
 
     _prefixed_name: str = PrivateAttr()
-    _session_manager: Any = PrivateAttr()
+    _session_manager: "McpSessionManager" = PrivateAttr()
 
     def __init__(
         self,
         prefixed_name: str,
-        session_manager: Any,
-        **data: Any,
+        session_manager: "McpSessionManager",
+        **data: object,
     ) -> None:
         super().__init__(**data)
         self._prefixed_name = prefixed_name
@@ -76,10 +76,10 @@ class _McpTool(BaseTool):
             return (), tool_input.copy()
         return (tool_input,), {}
 
-    def _run(self, **kwargs: Any) -> str:  # type: ignore[override]
+    def _run(self, **kwargs: object) -> str:  # type: ignore[override]
         raise NotImplementedError("Use async variant via ainvoke().")
 
-    async def _arun(self, **kwargs: Any) -> str:  # type: ignore[override]
+    async def _arun(self, **kwargs: object) -> str:  # type: ignore[override]
         try:
             return await self._session_manager.call_tool(self._prefixed_name, kwargs)
         except Exception as exc:
@@ -94,7 +94,7 @@ class _McpTool(BaseTool):
 # ---------------------------------------------------------------------------
 
 
-async def make_mcp_tools(session_manager: McpSessionManager) -> list[StructuredTool]:
+async def make_mcp_tools(session_manager: "McpSessionManager") -> list[BaseTool]:
     """Create LangChain tool wrappers for all active MCP sessions.
 
     Iterates over ``session_manager.sessions`` (dict mapping server name →
@@ -106,13 +106,13 @@ async def make_mcp_tools(session_manager: McpSessionManager) -> list[StructuredT
 
     Args:
         session_manager: A McpSessionManager instance whose ``.sessions``
-            attribute maps server names to active MCP ClientSession objects.
+            property maps server names to active MCP ClientSession objects.
 
     Returns:
         List of tool instances, one per MCP tool discovered across all active
         sessions. Empty when no sessions are configured.
     """
-    tools: list[StructuredTool] = []  # type: ignore[type-arg]
+    tools: list[BaseTool] = []
 
     for server_name, session in session_manager.sessions.items():
         try:
@@ -126,7 +126,7 @@ async def make_mcp_tools(session_manager: McpSessionManager) -> list[StructuredT
                     prefixed_name=prefixed_name,
                     session_manager=session_manager,
                 )
-                tools.append(tool)  # type: ignore[arg-type]
+                tools.append(tool)
         except Exception as exc:
             logger.warning(
                 "Failed to list tools for MCP server '%s': %s — skipping",
@@ -134,4 +134,4 @@ async def make_mcp_tools(session_manager: McpSessionManager) -> list[StructuredT
                 exc,
             )
 
-    return tools  # type: ignore[return-value]
+    return tools

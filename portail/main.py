@@ -1,19 +1,23 @@
 import asyncio
 import logging
+import os
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any
+
+# Configure logging to standard output
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
+    stream=sys.stdout
+)
 
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
-
-# Configure logging to standard output
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout
-)
+from common.text_utils import strip_outer_quotes
 logger = logging.getLogger("portail")
 
 
@@ -31,6 +35,8 @@ class Portail:
         self.stream_out: str = "relais:security"
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
+        self._dnd_cached: bool | None = None
+        self._dnd_cache_at: float = 0.0
 
     async def _update_session(self, redis_conn: Any, user_id: str, channel: str) -> None:
         """Update active session TTL to route response appropriately.
@@ -85,6 +91,40 @@ class Portail:
                 exc,
             )
 
+    @staticmethod
+    def _is_command(content: str) -> bool:
+        """Retourne True si le contenu est une commande Commandant.
+
+        Gère les deux formes acceptées :
+        - ``/clear``      — slash direct
+        - ``"/clear"``    — entre guillemets doubles
+        - ``'/clear'``    — entre quotes simples
+
+        Args:
+            content: Contenu brut de l'enveloppe.
+
+        Returns:
+            True si le message commence par '/' suivi d'au moins un caractère
+            (après strip et dépouillage des guillemets éventuels), False sinon.
+        """
+        stripped = strip_outer_quotes(content)
+        return stripped.startswith("/") and len(stripped) > 1
+
+    async def _check_dnd(self, redis_conn: Any) -> bool:
+        """Retourne True si le mode DND est actif, avec cache 1 seconde.
+
+        Args:
+            redis_conn: Connexion Redis async active.
+
+        Returns:
+            True si relais:state:dnd est positionné.
+        """
+        now = time.monotonic()
+        if self._dnd_cached is None or now - self._dnd_cache_at >= 1.0:
+            self._dnd_cached = bool(await redis_conn.get("relais:state:dnd"))
+            self._dnd_cache_at = now
+        return self._dnd_cached
+
     async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
         """Consume incoming messages from Relays and forward to Sentinel.
 
@@ -124,13 +164,33 @@ class Portail:
                         target_id = message_id
                         try:
                             # Parse Envelope
-                            payload = data.get("payload", "{}")
+                            payload = data.get(b"payload") or data.get("payload", "{}")
+                            if isinstance(payload, bytes):
+                                payload = payload.decode()
                             envelope = Envelope.from_json(payload)
 
                             logger.info(
                                 f"Received message: {envelope.correlation_id} "
                                 f"from {envelope.channel}"
                             )
+
+                            # Drop commands — handled exclusively by Commandant
+                            if self._is_command(envelope.content):
+                                logger.debug(
+                                    "Command message — delegated to Commandant, skipping: %s",
+                                    envelope.correlation_id,
+                                )
+                                continue  # Le finally:xack s'exécute quand même
+
+                            # Check DND mode — drop message if active
+                            dnd_active = await self._check_dnd(redis_conn)
+                            if dnd_active:
+                                logger.info(
+                                    "DND active — dropping message %s from %s",
+                                    envelope.correlation_id,
+                                    envelope.sender_id,
+                                )
+                                continue  # Le finally:xack s'exécute quand même
 
                             # Update session mapping
                             await self._update_session(

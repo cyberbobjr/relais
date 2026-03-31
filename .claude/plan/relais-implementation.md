@@ -250,52 +250,6 @@ Ces champs existaient dans `ProfileConfig` pour le SDKExecutor (limite d'outils 
 
 ---
 
-## Phase 5c — Déduplication messages Discord streaming (2026-03-30) ✅ DONE
-
-### 5c.1 ✅ Bug : doublon de message Discord après streaming — RÉSOLU
-
-**Symptôme :** après un streaming complet (`is_final=1`), l'enveloppe finale publiée par Atelier sur `relais:messages:outgoing:discord` était envoyée comme **nouveau message** par `consume_outgoing_stream`, créant un doublon du message déjà streamé.
-
-**Cause racine :** deux tâches asyncio dans `RelaisDiscordClient` s'exécutent en parallèle :
-- `_subscribe_streaming_start` → `_handle_streaming_message` : édite le placeholder `▌` progressivement
-- `consume_outgoing_stream` : envoie l'enveloppe finale comme nouveau message via `channel.send()`
-
-**Solution implémentée (Option C — metadata + Redis String) :**
-
-1. **`aiguilleur/discord/main.py` — `_handle_streaming_message`** : après `channel.send("▌")`, stocke l'ID du message Discord dans Redis :
-   ```python
-   await self._redis.setex(f"relais:streamed_msg:{envelope.correlation_id}", 300, str(msg.id))
-   ```
-
-2. **`aiguilleur/discord/main.py` — `consume_outgoing_stream`** : si `metadata["streamed"]` est `True`, édite le message existant au lieu d'en envoyer un nouveau :
-   ```python
-   if envelope.metadata.get("streamed"):
-       redis_key = f"relais:streamed_msg:{envelope.correlation_id}"
-       discord_msg_id = await self.redis_conn.get(redis_key)
-       if discord_msg_id:
-           partial = channel.get_partial_message(int(discord_msg_id))
-           await partial.edit(content=envelope.content)
-           await self.redis_conn.delete(redis_key)
-       else:
-           await channel.send(envelope.content)  # fallback TTL expiré
-   else:
-       await channel.send(envelope.content)
-   ```
-
-3. **`atelier/main.py`** : après `stream_pub.finalize()`, positionne le flag dans l'enveloppe de réponse :
-   ```python
-   if stream_pub is not None:
-       response_env.metadata["streamed"] = True
-   ```
-
-**Tests ajoutés (TDD RED → GREEN) :**
-- `tests/test_aiguilleur_discord.py` : 4 tests (setex au placeholder, edit si clé présente, send si non-streamé, fallback send si TTL expiré)
-- `tests/test_atelier.py` : 2 tests (flag présent pour canal streaming, absent pour canal non-streaming)
-
-**Clé Redis introduite :** `relais:streamed_msg:{correlation_id}` — String, TTL 300s, valeur = Discord message ID (int as string).
-
----
-
 ## Phase 4 — Nouvelles briques (priorité moyenne)
 
 ### 4.1 `crieur/` — Push proactif multi-canal
@@ -313,13 +267,13 @@ Ces champs existaient dans `ProfileConfig` pour le SDKExecutor (limite d'outils 
 **Priorité supervisord:** 10
 **Dépendance:** APScheduler ≥ 4.x
 
-### 4.3 `guichet/` — Webhooks HMAC entrants
-**Taxonomie:** Transformer
-**Reçoit:** HTTP POST webhooks externes
-**Valide:** HMAC signature avant publication
-**Publie:** `relais:webhooks:*` → Crieur/Atelier
-**Fichiers:** main.py, sources/, webhook_acl.py
-**Dépendance:** FastAPI
+### 4.3 `aiguilleur/rest/` — Canal REST/SSE + Webhooks HMAC
+**Taxonomie:** Relay (canal Aiguilleur)
+**Reçoit:** HTTP POST `/message` + `POST /webhook/{source}` (HMAC validé)
+**Expose:** SSE `GET /stream/{correlation_id}` pour streaming token-par-token
+**Publie:** `relais:messages:incoming:rest`
+**Fichiers:** adapter.py, webhook_acl.py
+**Dépendance:** FastAPI, aiohttp
 
 ### 4.4 `forgeron/` — Génération skills auto (batch)
 **Taxonomie:** Batch Processor (lancé 1×/jour, exit)
@@ -429,7 +383,7 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 9. `veilleur/` — tâches planifiées (heartbeat Benjamin)
 10. `sentinelle/acl.py` — sécurité réelle (actuellement tout est autorisé)
 11. `souvenir/long_term_store.py` — mémoire persistante (actuellement volatile Redis)
-12. `guichet/` — webhooks (intégrations externes)
+12. `aiguilleur/rest/` — canal REST/SSE + webhooks HMAC
 13. `vigile/` — admin NLP + hot reload
 14. `forgeron/` — apprentissage automatique
 15. `scrutateur/` — monitoring

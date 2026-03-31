@@ -317,6 +317,36 @@ class LongTermStore:
         rows = list(reversed(rows))
         return [{"role": row.role, "content": row.content} for row in rows]
 
+    async def clear_session(self, session_id: str) -> int:
+        """Supprime tous les messages archivés d'une session SQLite.
+
+        Seule la table ``archived_messages`` est affectée. Les ``UserFact``
+        (table ``user_facts``) et les ``Memory`` (table ``memories``) sont
+        conservés.
+
+        Args:
+            session_id: Identifiant de la session à effacer.
+
+        Returns:
+            Nombre de lignes supprimées.
+        """
+        from sqlalchemy import delete as sa_delete
+
+        stmt = sa_delete(ArchivedMessage).where(
+            ArchivedMessage.session_id == session_id
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+
+        deleted_count: int = result.rowcount
+        logger.info(
+            "Cleared %d archived messages for session=%s",
+            deleted_count,
+            session_id,
+        )
+        return deleted_count
+
     async def query(
         self,
         user_id: str,

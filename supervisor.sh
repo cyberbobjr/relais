@@ -55,6 +55,16 @@ wait_for_supervisord() {
     exit 1
 }
 
+load_dotenv() {
+    local env_file="$REPO_ROOT/.env"
+    if [[ -f "$env_file" ]]; then
+        set -o allexport
+        # shellcheck source=/dev/null
+        source "$env_file"
+        set +o allexport
+    fi
+}
+
 ensure_supervisord_running() {
     mkdir -p "$REPO_ROOT/.relais/logs"
 
@@ -62,6 +72,7 @@ ensure_supervisord_running() {
         return 0
     fi
 
+    load_dotenv
     echo "Démarrage de supervisord..."
     supervisord -c "$CONFIG_PATH"
     wait_for_supervisord
@@ -102,8 +113,15 @@ case "$ACTION" in
             usage
             exit 1
         fi
-        ensure_supervisord_running
-        run_supervisorctl restart all
+        if is_supervisord_running; then
+            run_supervisorctl shutdown
+            sleep 0.5
+        fi
+        load_dotenv
+        echo "Démarrage de supervisord..."
+        supervisord -c "$CONFIG_PATH"
+        wait_for_supervisord
+        run_supervisorctl start all
         ;;
     reload)
         if [[ "$TARGET" != "all" ]]; then

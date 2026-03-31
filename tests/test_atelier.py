@@ -519,15 +519,15 @@ async def test_fetch_context_returns_parsed_messages_on_success() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_streaming_signal_published_for_discord_channel() -> None:
-    """handle_message publishes relais:streaming:start:discord for discord channel.
+async def test_streaming_signal_published_for_telegram_channel() -> None:
+    """handle_message publishes relais:streaming:start:telegram for telegram channel.
 
-    When the envelope channel is 'discord' (a STREAMING_CAPABLE_CHANNELS
+    When the envelope channel is 'telegram' (a STREAMING_CAPABLE_CHANNELS
     member), _handle_message must call redis.publish with the streaming-start
     signal before invoking SDK execute.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="discord")
+    envelope = _make_envelope(channel="telegram")
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -563,7 +563,7 @@ async def test_streaming_signal_published_for_discord_channel() -> None:
     # Verify redis.publish was called with the streaming-start signal
     publish_calls = [
         c for c in redis_conn.publish.await_args_list
-        if "relais:streaming:start:discord" in str(c)
+        if "relais:streaming:start:telegram" in str(c)
     ]
     assert len(publish_calls) >= 1
 
@@ -617,11 +617,11 @@ async def test_streaming_signal_not_published_for_non_streaming_channel() -> Non
 async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
     """StreamPublisher.finalize() is called after SDK execute() for streaming channels.
 
-    For discord (a STREAMING_CAPABLE_CHANNELS member), _handle_message must
+    For telegram (a STREAMING_CAPABLE_CHANNELS member), _handle_message must
     call stream_pub.finalize() once after sdk_executor.execute() completes.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="discord")
+    envelope = _make_envelope(channel="telegram")
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -708,7 +708,7 @@ async def test_fetch_context_uses_xadd_id_not_dollar() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_streaming_publish_payload_is_full_envelope_json() -> None:
-    """_handle_message must publish the full envelope JSON to relais:streaming:start:discord.
+    """_handle_message must publish the full envelope JSON to relais:streaming:start:telegram.
 
     The Pub/Sub payload must be a valid JSON string deserializable as an
     Envelope (containing at least correlation_id), NOT a bare UUID string.
@@ -716,7 +716,7 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
     JSONDecodeError in the Aiguilleur subscriber.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="discord")
+    envelope = _make_envelope(channel="telegram")
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -751,9 +751,9 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
 
     publish_calls = [
         c for c in redis_conn.publish.await_args_list
-        if c.args[0] == "relais:streaming:start:discord"
+        if c.args[0] == "relais:streaming:start:telegram"
     ]
-    assert len(publish_calls) == 1, "Expected exactly one publish to relais:streaming:start:discord"
+    assert len(publish_calls) == 1, "Expected exactly one publish to relais:streaming:start:telegram"
 
     payload = publish_calls[0].args[1]
     # Must be valid JSON (not a bare UUID string)
@@ -774,12 +774,12 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
 async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
     """_handle_message() sets metadata["streamed"]=True for streaming-capable channels.
 
-    When the envelope channel is "discord" (a STREAMING_CAPABLE_CHANNEL), the
-    response envelope published to relais:messages:outgoing:discord must carry
+    When the envelope channel is "telegram" (a STREAMING_CAPABLE_CHANNEL), the
+    response envelope published to relais:messages:outgoing:telegram must carry
     metadata["streamed"] == True so the Aiguilleur can edit instead of re-send.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="discord")
+    envelope = _make_envelope(channel="telegram")
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -814,7 +814,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
 
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == "relais:messages:outgoing:discord"
+        if c.args[0] == "relais:messages:outgoing:telegram"
     ]
     assert len(outgoing_calls) == 1
     payload_json = outgoing_calls[0].args[1]["payload"]

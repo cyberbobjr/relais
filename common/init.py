@@ -12,15 +12,17 @@ DEFAULT_FILES = [
     ("config/reply_policy.yaml",    "config/reply_policy.yaml.default"),
     ("config/mcp_servers.yaml",     "config/mcp_servers.yaml.default"),
     ("config/HEARTBEAT.md",         "config/HEARTBEAT.md.default"),
-    ("soul/SOUL.md",                "soul/SOUL.md.default"),
-    ("soul/variants/SOUL_concise.md",       "soul/variants/SOUL_concise.md.default"),
-    ("soul/variants/SOUL_professional.md",  "soul/variants/SOUL_professional.md.default"),
-    # Prompt templates (no .default suffix — shipped as-is)
-    ("prompts/whatsapp_default.md",  "prompts/whatsapp_default.md"),
-    ("prompts/telegram_default.md",  "prompts/telegram_default.md"),
-    ("prompts/out_of_hours.md",      "prompts/out_of_hours.md"),
-    ("prompts/in_meeting.md",        "prompts/in_meeting.md"),
-    ("prompts/vacation.md",          "prompts/vacation.md"),
+    # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
+    ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),
+    ("prompts/soul/variants/SOUL_concise.md",        "prompts/soul/variants/SOUL_concise.md.default"),
+    ("prompts/soul/variants/SOUL_professional.md",   "prompts/soul/variants/SOUL_professional.md.default"),
+    # Channel formatting overlays (Layer 4) — named {channel}_default.md
+    ("prompts/channels/whatsapp_default.md",  "prompts/channels/whatsapp_default.md"),
+    ("prompts/channels/telegram_default.md",  "prompts/channels/telegram_default.md"),
+    # Reply-policy overlays (Layer 5) — named {policy}.md
+    ("prompts/policies/out_of_hours.md",  "prompts/policies/out_of_hours.md"),
+    ("prompts/policies/in_meeting.md",    "prompts/policies/in_meeting.md"),
+    ("prompts/policies/vacation.md",      "prompts/policies/vacation.md"),
 ]
 
 def initialize_user_dir(system_install_path: Path | None = None):
@@ -40,9 +42,14 @@ def initialize_user_dir(system_install_path: Path | None = None):
 
     # Create directory structure
     dirs = [
-        "config", "soul/variants", "prompts",
+        "config",
+        "prompts/soul/variants",
+        "prompts/channels",
+        "prompts/policies",
+        "prompts/roles",
+        "prompts/users",
         "skills/manual", "skills/auto",
-        "media", "logs", "backup"
+        "media", "logs", "backup",
     ]
     for d in dirs:
         (home / d).mkdir(parents=True, exist_ok=True)

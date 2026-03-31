@@ -74,13 +74,13 @@ def test_config_md_default_is_non_empty(rel_path: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3.2  Fichiers SOUL dans soul/
+# 3.2  Fichiers SOUL dans prompts/soul/
 # ──────────────────────────────────────────────────────────────────────────────
 
 SOUL_MD_DEFAULTS = [
-    "soul/SOUL.md.default",
-    "soul/variants/SOUL_concise.md.default",
-    "soul/variants/SOUL_professional.md.default",
+    "prompts/soul/SOUL.md.default",
+    "prompts/soul/variants/SOUL_concise.md.default",
+    "prompts/soul/variants/SOUL_professional.md.default",
 ]
 
 
@@ -99,7 +99,7 @@ def test_soul_md_default_is_non_empty(rel_path: str) -> None:
 
 def test_soul_md_default_has_substantial_system_prompt() -> None:
     """SOUL.md.default doit contenir un prompt de personnalité non-trivial (>100 chars)."""
-    content = _project_file("soul/SOUL.md.default").read_text(encoding="utf-8").strip()
+    content = _project_file("prompts/soul/SOUL.md.default").read_text(encoding="utf-8").strip()
     assert len(content) > 100, (
         f"SOUL.md.default trop court ({len(content)} chars) — "
         "doit contenir un prompt de personnalité complet"
@@ -111,11 +111,11 @@ def test_soul_md_default_has_substantial_system_prompt() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 PROMPT_FILES = [
-    "prompts/whatsapp_default.md",
-    "prompts/telegram_default.md",
-    "prompts/out_of_hours.md",
-    "prompts/in_meeting.md",
-    "prompts/vacation.md",
+    "prompts/channels/whatsapp_default.md",
+    "prompts/channels/telegram_default.md",
+    "prompts/policies/out_of_hours.md",
+    "prompts/policies/in_meeting.md",
+    "prompts/policies/vacation.md",
 ]
 
 
@@ -147,7 +147,9 @@ def test_initialize_user_dir_creates_directory_structure(tmp_path: Path) -> None
 
         home = tmp_path / "relais_home"
         expected_dirs = [
-            "config", "soul/variants", "prompts",
+            "config",
+            "prompts/soul/variants", "prompts/channels", "prompts/policies",
+            "prompts/roles", "prompts/users",
             "skills/manual", "skills/auto",
             "media", "logs", "backup",
         ]

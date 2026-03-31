@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour:** 2026-03-30
+**Dernière mise à jour:** 2026-03-31
 **Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (Outils internes + MCP stdio/SSE), 5c (déduplication streaming Discord)
 
 ---
@@ -14,6 +14,7 @@
 5. [Garanties de livraison](#garanties-de-livraison)
 6. [Résolution de configuration](#résolution-de-configuration)
 7. [Carte de dépendances common/](#carte-de-dépendances-common)
+8. [Le Commandant — Ajouter une commande](#le-commandant--ajouter-une-commande)
 
 ---
 
@@ -57,7 +58,7 @@ async def main():
     })
 ```
 
-**Exemples:** Veilleur (tâches CRON), Guichet (webhooks)
+**Exemples:** Veilleur (tâches CRON), Aiguilleur/rest (webhooks)
 
 **Propriétés:**
 - Pas de consumer group
@@ -125,7 +126,7 @@ ENTRANT (Canaux externes)
 │                         └─ relais:messages:incoming:telegram
 ├─ Slack events        → Aiguilleur/slack (phase 5)
 │                         └─ relais:messages:incoming:slack
-└─ REST POST webhooks  → Guichet (phase 4)
+└─ REST POST webhooks  → Aiguilleur/rest
                          └─ relais:messages:incoming:rest
 
 PIPELINE CORE
@@ -167,13 +168,13 @@ SORTANT (Canaux externes)
 └─ relais:messages:outgoing:*
    ▼
    AIGUILLEUR/{channel} (producer)
-   ├─ Discord → Discord API  (avec déduplication streaming — voir ci-dessous)
+   ├─ Discord → Discord API
    ├─ Telegram → Telegram API
    ├─ Slack → Slack API
    └─ REST → HTTP webhook
 ```
 
-### Déduplication streaming Discord
+### Streaming par canal
 
 Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à la fois :
 - les chunks progressifs sur `relais:messages:streaming:{channel}:{correlation_id}` (rendu live)
@@ -181,31 +182,10 @@ Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à l
 
 > **Note :** Atelier lit `channels.yaml` **une seule fois au démarrage** pour construire la liste des canaux
 > streaming-capable. Tout changement du champ `streaming:` dans ce fichier nécessite un redémarrage
-> d'Atelier (`supervisorctl restart atelier`) pour être pris en compte — en plus du redémarrage d'Aiguilleur.
+> d'Atelier (`supervisorctl restart core:atelier`) pour être pris en compte — en plus du redémarrage d'Aiguilleur.
 
-Sans mécanisme de déduplication, Aiguilleur Discord enverrait deux messages identiques. Le mécanisme Option C résout ce problème :
-
-```
-Atelier publie Pub/Sub → relais:streaming:start:discord
-    │
-    ↓
-Aiguilleur: _handle_streaming_message() spawné
-    ├── channel.send("▌")                      → discord_msg_id obtenu
-    └── SETEX relais:streamed_msg:{corr_id} 300 {discord_msg_id}
-        (chunks progressifs → msg.edit())
-
-Atelier XADD → relais:messages:outgoing:discord (metadata.streamed=True)
-    │
-    ↓
-Aiguilleur: consume_outgoing_stream()
-    ├── metadata["streamed"] == True ?
-    │   ├── OUI → GET relais:streamed_msg:{corr_id}
-    │   │         ├── clé présente → partial.edit(content) + DELETE clé  ✓
-    │   │         └── clé absente (TTL expiré) → channel.send() (fallback)
-    └── NON → channel.send() (comportement normal)
-```
-
-**Clé Redis impliquée** : `relais:streamed_msg:{correlation_id}` — String, TTL 300s, valeur = Discord message ID.
+**Discord** (`streaming: false`) —  L'adapter Discord consomme uniquement
+`relais:messages:outgoing:discord` et envoie la réponse complète en un seul message.
 
 ---
 
@@ -218,7 +198,7 @@ Aiguilleur: consume_outgoing_stream()
 | `relais:messages:incoming:discord` | Discord API | Aiguilleur/discord | Enveloppe message |
 | `relais:messages:incoming:telegram` | Telegram API | Aiguilleur/telegram | Enveloppe message |
 | `relais:messages:incoming:slack` | Slack API | Aiguilleur/slack | Enveloppe message |
-| `relais:messages:incoming:rest` | HTTP POST | Guichet | Enveloppe message |
+| `relais:messages:incoming:rest` | HTTP POST | Aiguilleur/rest | Enveloppe message |
 
 ### Streams intermédiaires
 
@@ -228,8 +208,7 @@ Aiguilleur: consume_outgoing_stream()
 | `relais:context:{session_id}` | (Redis List) | Souvenir | Historique court-terme (max 20 msgs, TTL 24h) |
 | `relais:memory:request` | Souvenir | Atelier | Requêtes mémoire (`get`) avant exécution agentique |
 | `relais:memory:response` | Atelier | Souvenir | Réponses mémoire (contexte court-terme) |
-| `relais:messages:streaming:{channel}:{correlation_id}` | Aiguilleur/{channel} | Atelier | Chunks streaming progressif (Discord edit mode) |
-| `relais:streamed_msg:{correlation_id}` | (Redis String, TTL 300s) | Aiguilleur/discord | Discord message ID du placeholder streaming (déduplication) |
+| `relais:messages:streaming:{channel}:{correlation_id}` | Aiguilleur/{channel} | Atelier | Chunks streaming progressif |
 
 ### Streams de sortie
 
@@ -511,9 +490,14 @@ class AiguilleurDiscord(AiguilleurBase):
 
 ### Implémentations actuelles
 
-- **Aiguilleur/Discord** ✅ — discord.py bot
-  - Handles mentions + DMs
-  - format_for_channel() → Discord markdown
+- **Aiguilleur/Discord** ✅ — discord.py bot (`aiguilleur/channels/discord/adapter.py`)
+  - Gère mentions + DMs
+  - **Streaming désactivé** (`streaming: false` dans `channels.yaml`) — réponse complète en un seul message
+  - Méthodes internes de `_RelaisDiscordClient` :
+    - `_ensure_consumer_group(stream, group)` — création idempotente du consumer group Redis
+    - `_resolve_discord_channel(envelope)` — résolution canal/DM avec fallback `fetch_user + create_dm`
+    - `_deliver_outgoing_message(data)` — parse + envoi du message final
+    - `_consume_outgoing_stream()` — boucle de consommation `relais:messages:outgoing:discord`
 
 ### Implémentations Phase 5
 
@@ -711,35 +695,15 @@ L'Atelier utilise deux classes complémentaires :
 - **`AgentExecutor`** (`atelier/agent_executor.py`) — boucle agentique via `deepagents.create_deep_agent()`, gestion des outils LangChain (`list[BaseTool]`) et streaming token-by-token.
 - **`McpSessionManager`** (`atelier/mcp_session_manager.py`) — cycle de vie des serveurs MCP (démarrage, sessions, dispatch avec timeout). Séparé de l'exécuteur pour que la logique MCP soit isolée et testable indépendamment.
 
-```python
-class AgentExecutor:
-    async def execute(self, envelope, context, stream_callback=None) -> str:
-        """Execute the agentic loop for an incoming envelope.
-
-        Args:
-            envelope: Incoming message envelope.
-            context: Short-term conversation context.
-            stream_callback: Optional async callable receiving each token chunk.
-
-        Returns:
-            Aggregated reply string.
-        """
-        mcp_tools = await make_mcp_tools(self._mcp_servers)
-        all_tools = self._tools + mcp_tools  # BaseTool list
-        agent = create_deep_agent(
-            model=self._profile.model,   # provider:model-id format
-            tools=all_tools,
-            system_prompt=self._soul_prompt,
-        )
-        full_reply = ""
-        async for chunk in agent.astream(
-            {"messages": self._build_messages(envelope, context)},
-            stream_mode="messages",
-        ):
-            if stream_callback and chunk.content:
-                await stream_callback(chunk.content)
-            full_reply += chunk.content or ""
-        return full_reply
+```
+AgentExecutor.execute(envelope, context, stream_callback?):
+    tools  ← internal_tools + MCP tools (all as BaseTool)
+    agent  ← create_deep_agent(model, tools, system_prompt)
+    for each chunk in agent.astream(messages, stream_mode="messages"):
+        if stream_callback and chunk has content:
+            await stream_callback(chunk.content)
+        accumulate full_reply
+    return full_reply
 ```
 
 ### Outils (LangChain `BaseTool`)
@@ -759,10 +723,10 @@ relais:messages:streaming:{channel}:{correlation_id}
 ├─ seq: 1, text: "Bonjour", is_final: 0
 ├─ seq: 2, text: "Bonjour, c'est", is_final: 0
 ├─ seq: 3, text: "Bonjour, c'est sympa", is_final: 1
-└─ (Aiguilleur/Discord édite le message en temps réel)
+└─ (Aiguilleur édite le message en temps réel)
 ```
 
-**Throttling Discord:** 80 caractères minimum entre éditions (rate limit 5 req/5s).
+**Throttling:** 80 caractères minimum entre éditions (rate limit 5 req/5s).
 
 ### Serveurs MCP — McpSessionManager
 
@@ -817,6 +781,202 @@ Souvenir consomme deux streams:
 
 **Redis List (`relais:context:{session_id}`):** Cache rapide 20 msgs, TTL 24h
 **SQLite (`memory.db`):** Source de vérité, fallback si Redis redémarre
+
+---
+
+## Le Commandant — Ajouter une commande
+
+Le Commandant intercepte les messages commençant par `/` **avant** qu'ils n'entrent dans le pipeline LLM. Il opère en parallèle du Portail sur le stream `relais:messages:incoming`, via son propre consumer group `commandant_group`.
+
+### Architecture du registre
+
+Tout — handler, nom, description — vit dans **`commandant/commands.py`** : source unique de vérité. Il n'y a pas de fichier séparé pour les handlers ni de `DISPATCH` dict.
+
+```python
+# commandant/commands.py
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str                                      # Nom de la commande (ex: "clear")
+    description: str                               # Description courte affichée par /help
+    handler: Callable[..., Awaitable[None]]        # Coroutine exécutée à la détection
+
+COMMAND_REGISTRY: dict[str, CommandSpec] = {
+    "clear": CommandSpec(name="clear", description="...", handler=handle_clear),
+    "dnd":   CommandSpec(name="dnd",   description="...", handler=handle_dnd),
+    "brb":   CommandSpec(name="brb",   description="...", handler=handle_brb),
+    "help":  CommandSpec(name="help",  description="...", handler=handle_help),
+}
+
+# Dérivé automatiquement — ne pas modifier manuellement
+KNOWN_COMMANDS: frozenset[str] = frozenset(COMMAND_REGISTRY)
+```
+
+`/help` construit sa réponse en itérant sur `COMMAND_REGISTRY.values()` — il se met à jour automatiquement quand une nouvelle commande est ajoutée.
+
+### Ajouter une commande en 2 étapes
+
+Ajouter une commande ne touche qu'**un seul fichier** : `commandant/commands.py`.
+
+**Exemple: ajouter `/status` qui retourne l'état du pipeline**
+
+#### Étape 1 — Écrire le handler puis l'enregistrer (`commandant/commands.py`)
+
+```python
+# 1a. Définir le handler (avant COMMAND_REGISTRY dans le fichier)
+async def handle_status(envelope: Envelope, redis_conn: Any) -> None:
+    """Retourne l'état courant du pipeline.
+
+    Args:
+        envelope: L'enveloppe du message /status reçu.
+        redis_conn: Connexion Redis async active.
+    """
+    task_len = await redis_conn.xlen("relais:tasks") or 0
+    status_text = f"Pipeline actif — relais:tasks: {task_len} message(s) en attente."
+
+    response = Envelope.from_parent(envelope, status_text)
+    await redis_conn.xadd(
+        f"relais:messages:outgoing:{envelope.channel}",
+        {"payload": response.to_json()},
+    )
+
+
+# 1b. Ajouter l'entrée dans COMMAND_REGISTRY
+COMMAND_REGISTRY: dict[str, CommandSpec] = {
+    # ... entrées existantes ...
+    "status": CommandSpec(
+        name="status",
+        description="Retourne l'état actuel du pipeline (streams actifs, bricks en ligne).",
+        handler=handle_status,
+    ),
+}
+```
+
+`KNOWN_COMMANDS` se met à jour automatiquement. `/help` liste la commande sans autre modification.
+
+#### Étape 2 — Écrire les tests (`tests/test_commandant.py`)
+
+```python
+@pytest.mark.unit
+def test_parse_status_command():
+    from commandant.commands import parse_command
+    result = parse_command("/status")
+    assert result is not None
+    assert result.command == "status"
+    assert result.args == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_status_publishes_confirmation(mock_redis):
+    from commandant.commands import handle_status
+    envelope = Envelope(
+        content="/status",
+        sender_id="discord:123456",
+        channel="discord",
+        session_id="session_abc",
+    )
+    mock_redis.xlen = AsyncMock(return_value=0)
+    await handle_status(envelope, mock_redis)
+
+    expected_stream = "relais:messages:outgoing:discord"
+    calls = [str(c) for c in mock_redis.xadd.call_args_list]
+    assert any(expected_stream in c for c in calls)
+```
+
+### Règles de conception
+
+| Règle | Raison |
+|-------|--------|
+| Toujours publier la réponse sur `relais:messages:outgoing:{envelope.channel}` | Canal de retour standard vers l'Aiguilleur |
+| Utiliser `Envelope.from_parent(envelope, text)` pour la réponse | Préserve `session_id`, `correlation_id`, `channel` |
+| Handler défini **avant** `COMMAND_REGISTRY` dans le fichier | Python évalue les noms au moment de la construction du dict |
+| Actions Redis complexes → déléguer via stream | Ex: `/clear` → `XADD relais:memory:request {action: clear}` (Souvenir traite) |
+| Pas de TTL sur `relais:state:*` | Les états (DND...) doivent survivre aux redémarrages Redis |
+
+### Commandes qui ont besoin d'Atelier (LLM)
+
+> **Principe :** Le Commandant est conçu pour les commandes **hors-LLM** (réponse immédiate, état Redis). Si la commande nécessite un appel LLM, le handler peut injecter une enveloppe synthétique directement dans `relais:security` pour court-circuiter le Portail tout en passant par Sentinelle (vérification ACL) puis Atelier.
+
+**Quand utiliser ce pattern :**
+
+- La commande transforme ou prépare un message à soumettre au LLM (ex: `/résume`, `/reformule`)
+- La commande a besoin d'un traitement LLM mais pas de la gestion de session du Portail
+
+**Quand NE PAS utiliser ce pattern :**
+
+- Le message n'a pas besoin d'être une commande `/` — préférer un message normal qui traverse le pipeline complet
+- La commande a besoin de la mise à jour de session (`relais:active_sessions`) — le Portail doit être dans la boucle
+
+**Exemple : `/résume` qui demande à Atelier de résumer la conversation**
+
+```python
+# Dans commandant/commands.py
+
+async def handle_resume(envelope: Envelope, redis_conn: Any) -> None:
+    """Injecte une demande de résumé dans le pipeline LLM.
+
+    Court-circuite le Portail (pas de mise à jour de session) mais passe
+    par Sentinelle (vérification ACL) puis Atelier (exécution LLM).
+
+    Args:
+        envelope: L'enveloppe du message /résume reçu.
+        redis_conn: Connexion Redis async active.
+    """
+    # Construire un message LLM à partir de la commande
+    llm_request = Envelope.from_parent(
+        envelope,
+        "Résume notre conversation en 3 points clés.",
+    )
+    llm_request.add_trace("commandant", "command /resume → injected into pipeline")
+
+    # Publier directement sur relais:security (après Portail, avant Sentinelle)
+    await redis_conn.xadd(
+        "relais:security",
+        {"payload": llm_request.to_json()},
+    )
+    logger.info(
+        "Resume request injected into pipeline for session=%s",
+        envelope.session_id,
+    )
+
+
+COMMAND_REGISTRY: dict[str, CommandSpec] = {
+    # ... entrées existantes ...
+    "resume": CommandSpec(
+        name="resume",
+        description="Demande à l'IA de résumer la conversation en cours.",
+        handler=handle_resume,
+    ),
+}
+```
+
+**Circuit résultant :**
+
+```
+Discord: "/resume"
+    │
+    ├─► COMMANDANT  → handle_resume() → XADD relais:security ──► SENTINELLE ──► ATELIER
+    │                                                               (ACL check)   (LLM)
+    └─► PORTAIL     → _is_command() → drop (ACK sans forward)
+```
+
+**Important — permissions Redis :** le user `commandant` doit avoir accès à `relais:security` dans `config/redis.conf` :
+
+```
+user commandant on >pass_commandant ~relais:messages:incoming ~relais:messages:outgoing:* ~relais:memory:request ~relais:security ~relais:state:* ~relais:logs +@all
+```
+
+### Vérification
+
+```bash
+# Lancer les tests Commandant
+pytest tests/test_commandant.py -v
+
+# Vérifier que /help liste la nouvelle commande
+# (test automatique via test_handle_help_lists_all_command_names)
+pytest tests/test_commandant.py::test_handle_help_lists_all_command_names -v
+```
 
 ---
 

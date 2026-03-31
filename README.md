@@ -20,13 +20,15 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 └────────┼────────────────┼────────────────┼────────────────────┘
          └────────────────┴────────────────┘
                           │ relais:messages:incoming
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│ PORTAIL — Validation des messages entrants                  │
-│  Consomme : relais:messages:incoming                        │
-│  Valide le format, applique reply_policy (DND, hors-heures) │
-│  Produit  : relais:security                                 │
-└─────────────────────────────────────────────────────────────┘
+              ┌───────────┴────────────┐
+              ▼                        ▼
+┌─────────────────────────┐  ┌─────────────────────────────────────────────┐
+│ COMMANDANT              │  │ PORTAIL — Validation des messages entrants  │
+│  Commandes hors-LLM     │  │  Consomme : relais:messages:incoming        │
+│  /clear /dnd /brb       │  │  Valide le format, applique reply_policy    │
+│  (consumer group dédié) │  │  Check relais:state:dnd avant forward       │
+└─────────────────────────┘  │  Produit  : relais:security                 │
+                             └─────────────────────────────────────────────┘
                           │
                     relais:security
                           │
@@ -91,9 +93,18 @@ flowchart TD
     end
 
     AIG_IN -->|"relais:messages:incoming"| PORTAIL
+    AIG_IN -->|"relais:messages:incoming"| COMMANDANT
+
+    subgraph COMMANDANT["COMMANDANT — Commandes hors-LLM"]
+        CM["consumer group dédié\n/clear · /dnd · /brb\n(parallel, hors pipeline LLM)"]
+    end
+
+    COMMANDANT -->|"relais:state:dnd SET/DEL"| PORTAIL
+    COMMANDANT -->|"relais:memory:request clear"| SOUVENIR
+    COMMANDANT -->|"relais:messages:outgoing:{ch}"| AIG_OUT
 
     subgraph PORTAIL["PORTAIL — Validation"]
-        P["Valide le format\nApplique reply_policy\n(DND, hors-heures)"]
+        P["Valide le format\nApplique reply_policy\n(DND, hors-heures)\nCheck relais:state:dnd"]
     end
 
     PORTAIL -->|"relais:security"| SENTINELLE
@@ -145,7 +156,7 @@ L'Atelier est la brique qui exécute l'intelligence. Il utilise **DeepAgents/Lan
 | **Mémoire conversationnelle** | Historique court-terme injecté depuis Souvenir avant chaque appel |
 | **Serveurs MCP** | Outils externes via stdio ou SSE — déclarés dans `mcp_servers.yaml`, filtrés par profil |
 | **Outils internes** | Fonctions `@tool` LangChain exposées à la boucle agentique (`list_skills`, `read_skill`) |
-| **Streaming live** | Chunks publiés en temps réel sur `relais:messages:streaming:{channel}:{cid}` → rendu progressif Discord / Telegram |
+| **Streaming live** | Chunks publiés en temps réel sur `relais:messages:streaming:{channel}:{cid}` → rendu progressif (Telegram, TUI — désactivé sur Discord) |
 | **Profils LLM** | Modèle, température, max_turns configurables par profil (`profiles.yaml`) |
 | **Provider direct** | `ANTHROPIC_API_KEY` → appel direct Anthropic via DeepAgents/LangChain |
 | **Résilience** | Retry avec backoff configurable ; messages non-récupérables → DLQ (`relais:tasks:failed`) |
@@ -230,10 +241,14 @@ Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (ut
 │   ├── channels.yaml        Canaux actifs, streaming, redémarrages (Aiguilleur + Atelier)
 │   ├── mcp_servers.yaml     Serveurs MCP (outils externes)
 │   └── HEARTBEAT.md         Tâches CRON planifiées
-├── soul/
-│   ├── SOUL.md              Personnalité principale de l'assistant
-│   └── variants/            Variantes de personnalité
-├── prompts/                 Templates de prompts par canal et contexte
+├── prompts/                 System prompt multi-couche (voir section dédiée ci-dessous)
+│   ├── soul/
+│   │   ├── SOUL.md          Personnalité principale de l'assistant  ← Layer 1
+│   │   └── variants/        Variantes de personnalité (usage manuel)
+│   ├── roles/               Overlays par rôle utilisateur           ← Layer 2
+│   ├── users/               Overrides par utilisateur               ← Layer 3
+│   ├── channels/            Formatage par canal                     ← Layer 4
+│   └── policies/            Overlays de politique de réponse        ← Layer 5
 ├── storage/
 │   ├── memory.db            Mémoire long-terme (SQLite, géré par Alembic)
 │   └── audit.db             Journal d'audit
@@ -442,7 +457,7 @@ Centralise l'activation/désactivation de tous les canaux et configure le compor
 channels:
   discord:
     enabled: true                    # Activé/désactivé
-    streaming: true                  # Supporte le streaming progressif
+    streaming: false                 # Streaming désactivé sur Discord (réponse complète en un message)
     type: native                     # "native" (Python) | "external" (subprocess)
     class_path: null                 # Override optionnel : "aiguilleur.channels.discord.adapter.DiscordAiguilleur"
     max_restarts: 5                  # Nombre max de redémarrages avant abandon
@@ -531,6 +546,43 @@ mcp_servers:
 - `sse` : Server-Sent Events — connexion à un serveur HTTP existant (recommandé pour services distants persistants)
 
 > **Timeout et nombre max d'outils** — configurés par profil dans `profiles.yaml` (champs `mcp_timeout` et `mcp_max_tools`).
+
+---
+
+### Personnalisation du system prompt
+
+L'Atelier assemble le system prompt à partir de **5 couches optionnelles** lues dans `~/.relais/prompts/`. Les fichiers manquants sont ignorés silencieusement — il suffit de créer ceux dont vous avez besoin.
+
+| Couche | Répertoire | Convention de nom | Déclencheur |
+|--------|-----------|-------------------|-------------|
+| 1 — Personnalité | `prompts/soul/` | `SOUL.md` (fixe) | Toujours chargé (warning si absent) |
+| 2 — Rôle | `prompts/roles/` | `{role}.md` | Quand l'utilisateur a un `role` dans `users.yaml` |
+| 3 — Utilisateur | `prompts/users/` | `{channel}_{id}.md` | Quand `sender_id` est défini (`:` → `_`) |
+| 4 — Canal | `prompts/channels/` | `{channel}_default.md` | Quand un canal est actif |
+| 5 — Politique | `prompts/policies/` | `{policy}.md` | Quand `reply_policy` est actif |
+
+Les couches présentes sont concaténées dans l'ordre avec `---` comme séparateur. Une **6e couche** (faits mémoire long-terme sur l'utilisateur) est ajoutée dynamiquement par le Souvenir — elle ne correspond à aucun fichier sur disque.
+
+**Exemples de fichiers à créer :**
+
+```
+# Personnalité — toujours active
+~/.relais/prompts/soul/SOUL.md
+
+# Overlay pour le rôle "admin" (users.yaml : role: admin)
+~/.relais/prompts/roles/admin.md
+
+# Override spécifique à un utilisateur Discord (sender_id "discord:123456789")
+~/.relais/prompts/users/discord_123456789.md
+
+# Formatage Telegram (canal "telegram")
+~/.relais/prompts/channels/telegram_default.md
+
+# Overlay activé quand reply_policy = "in_meeting"
+~/.relais/prompts/policies/in_meeting.md
+```
+
+> **Variantes de personnalité** : `prompts/soul/variants/` contient des variantes livrées (`SOUL_concise.md`, `SOUL_professional.md`) que vous pouvez copier sur `prompts/soul/SOUL.md` pour changer la personnalité de base.
 
 ---
 
@@ -652,6 +704,124 @@ redis-cli -s ~/.relais/redis.sock XRANGE relais:tasks - +
 # Suivre les logs JSON
 tail -f ~/.relais/logs/events.jsonl
 ```
+
+---
+
+## Débogage avec debugpy
+
+Toutes les briques sont lancées via `launcher.py`, un wrapper qui active **debugpy** à la demande via des variables d'environnement. Aucune modification de code n'est nécessaire.
+
+### Ports attribués par brique
+
+| Brique       | Port  |
+|--------------|-------|
+| `atelier`    | 5678  |
+| `portail`    | 5679  |
+| `sentinelle` | 5680  |
+| `archiviste` | 5681  |
+| `souvenir`   | 5682  |
+| `commandant` | 5683  |
+| `aiguilleur` | 5684  |
+
+### Variables de contrôle
+
+| Variable         | Valeur | Effet |
+|------------------|--------|-------|
+| `DEBUGPY_ENABLED` | `"1"` | Active debugpy (écoute sur `DEBUGPY_PORT`) |
+| `DEBUGPY_ENABLED` | `"0"` | Désactivé — la brique démarre normalement (défaut) |
+| `DEBUGPY_WAIT`   | `"1"` | **Bloque le démarrage** jusqu'à ce qu'un débogueur s'attache |
+| `DEBUGPY_WAIT`   | `"0"` | La brique démarre immédiatement, le débogueur peut s'attacher après (défaut) |
+| `DEBUGPY_PORT`   | entier | Port d'écoute (déjà configuré par brique dans `supervisord.conf`) |
+
+### Activer le débogage via supervisord
+
+Modifiez la ligne `environment=` de la brique cible dans `supervisord.conf`, puis redémarrez-la :
+
+```ini
+; Exemple : débugger atelier avec attente du débogueur
+[program:atelier]
+environment=...,DEBUGPY_ENABLED="1",DEBUGPY_PORT="5678",DEBUGPY_WAIT="1"
+```
+
+```bash
+supervisorctl restart atelier
+# → La brique attend l'attachement VS Code avant de démarrer
+```
+
+> Remettez `DEBUGPY_ENABLED="0"` et `DEBUGPY_WAIT="0"` une fois le débogage terminé, puis relancez la brique.
+
+### Activer le débogage manuellement (sans supervisord)
+
+```bash
+# Débogage immédiat (pas d'attente)
+DEBUGPY_ENABLED=1 DEBUGPY_PORT=5679 uv run python launcher.py portail/main.py
+
+# Débogage avec attente du débogueur (bloque au démarrage)
+DEBUGPY_ENABLED=1 DEBUGPY_PORT=5679 DEBUGPY_WAIT=1 uv run python launcher.py portail/main.py
+```
+
+### Connexion depuis VS Code
+
+Ajoutez une configuration dans `.vscode/launch.json` :
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach — atelier (5678)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5678 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Attach — portail (5679)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5679 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Attach — sentinelle (5680)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5680 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Attach — archiviste (5681)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5681 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Attach — souvenir (5682)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5682 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Attach — commandant (5683)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5683 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Attach — aiguilleur (5684)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5684 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    }
+  ]
+}
+```
+
+Lancez la brique avec `DEBUGPY_ENABLED=1`, puis dans VS Code : **Run → Start Debugging** (ou `F5`) sur la configuration correspondante.
 
 ---
 

@@ -10,8 +10,16 @@ Architecture dual-stream :
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import Any
+
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
+    stream=sys.stdout,
+)
 
 from atelier.profile_loader import load_profiles, resolve_profile
 from common.envelope import Envelope
@@ -21,11 +29,6 @@ from souvenir.context_store import ContextStore
 from souvenir.long_term_store import LongTermStore
 from souvenir.memory_extractor import MemoryExtractor
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout,
-)
 logger = logging.getLogger("souvenir")
 
 # Canaux dont les streams sortants sont observés.
@@ -198,7 +201,10 @@ class Souvenir:
                 for _stream, messages in results:
                     for message_id, data in messages:
                         try:
-                            req = json.loads(data.get("payload", "{}"))
+                            _payload = data.get(b"payload") or data.get("payload", "{}")
+                            if isinstance(_payload, bytes):
+                                _payload = _payload.decode()
+                            req = json.loads(_payload)
                             action = req.get("action")
                             session_id = req.get("session_id", "")
                             correlation_id = req.get("correlation_id")
@@ -211,6 +217,31 @@ class Souvenir:
                                     session_id=session_id,
                                     correlation_id=correlation_id,
                                 )
+
+                            elif action == "clear":
+                                await context_store.clear(session_id)
+                                await self._long_term.clear_session(session_id)
+                                logger.info(
+                                    "Cleared context for session=%s (Redis + SQLite)",
+                                    session_id,
+                                )
+                                envelope_json = req.get("envelope_json")
+                                if envelope_json:
+                                    try:
+                                        orig = Envelope.from_json(envelope_json)
+                                        confirmation = Envelope.from_parent(
+                                            orig,
+                                            "✓ Historique de conversation effacé.",
+                                        )
+                                        await redis_conn.xadd(
+                                            f"relais:messages:outgoing:{orig.channel}",
+                                            {"payload": confirmation.to_json()},
+                                        )
+                                    except Exception as _conf_exc:
+                                        logger.warning(
+                                            "Could not send /clear confirmation: %s",
+                                            _conf_exc,
+                                        )
 
                             elif action == "store_memory":
                                 user_id = req.get("user_id", session_id)

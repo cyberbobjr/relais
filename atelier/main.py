@@ -34,6 +34,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+# Configure logging to standard output.
+# LOG_LEVEL env var controls verbosity (default: INFO).
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
+    stream=sys.stdout,
+)
+
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
@@ -48,14 +57,6 @@ from atelier.tools import make_skills_tools
 from common.config_loader import resolve_prompts_dir, resolve_skills_dir
 from aiguilleur.channel_config import load_channels_config
 
-# Configure logging to standard output.
-# LOG_LEVEL env var controls verbosity (default: INFO).
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout,
-)
 logger = logging.getLogger("atelier")
 
 # Timeout (seconds) waiting for Souvenir memory response.
@@ -196,13 +197,11 @@ class Atelier:
                 )
             # MCP sessions closed; finalize stream and publish response.
 
-            if stream_pub is not None:
-                await stream_pub.finalize()
-
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.metadata["user_message"] = envelope.content
             if stream_pub is not None:
+                await stream_pub.finalize()
                 response_env.metadata["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 

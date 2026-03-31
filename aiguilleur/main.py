@@ -5,11 +5,13 @@ per enabled channel.  Handles SIGTERM/SIGINT for graceful shutdown.
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
     stream=sys.stdout,
 )

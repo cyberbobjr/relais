@@ -1,26 +1,10 @@
-# RELAIS — Document d'Architecture Complet
-## Version 12 — Référence définitive
+# RELAIS — Document d'Architecture
 
 > **RELAIS** — *Station de relais : reçoit des messages de toutes origines,*
 > *les achemine vers leur destination avec fiabilité et continuité.*
 >
 > Framework d'agents conversationnels multi-canaux, autonomes, extensibles,
 > et auto-apprenants. Projet francophone, code anglais.
-
----
-
-## Changements v12
-
-- **Répertoire utilisateur `~/.relais/`** — config, skills, logs, médias stockés dans le home du compte qui lance RELAIS
-- **Cascade de résolution** — `~/.relais/` surcharge `/opt/relais/` surcharge `./`
-- **Variable `RELAIS_HOME`** — override explicite du répertoire utilisateur
-- **Initialisation au premier lancement** — création automatique de `~/.relais/` avec les fichiers par défaut
-
-### Phase 5 — Outils internes + MCP stdio
-
-- **Outils internes** — outils Python natifs exposés dans la boucle agentique : `list_skills` (catalogue) et `read_skill` (lecture complète d'un `SKILL.md`)
-- **`load_for_sdk(profile)`** — lit `mcp_servers.yaml`, filtre par `enabled` et profil, retourne un dict de configuration prêt pour l'exécuteur agentique
-- **Exécuteur agentique** — démarre les serveurs MCP, préfixe les outils MCP `{server}__{tool}`, gère la boucle agentique multi-tour jusqu'à `end_turn` ou `max_turns`
 
 ---
 
@@ -36,26 +20,20 @@
 8. L'Aiguilleur — adaptateur de canaux & formatage Markdown
 9. Le Portail — routage & politique de réponse
 10. La Sentinelle — sécurité & profils
-11. L'Atelier — exécution des agents, résilience LLM, sous-agents
+11. L'Atelier — exécution des agents, résilience LLM, outils internes
 12. Le Souvenir — mémoire, compaction, pagination
-13. Le Veilleur — planification, backup, rétention
-14. Le Forgeron — auto-apprentissage & versioning skills
-15. L'Archiviste — logs & audit
-16. Le Crieur — push proactif & multi-canal
-17. Le Guichet — webhooks entrants
-18. Le Vigile — administration NLP & hot reload
-19. Le Tableau — TUI bidirectionnel
-20. Le Tisserand — extensions intercepteurs
-21. Le Scrutateur — monitoring
-22. SOUL.md — personnalité JARVIS & i18n
-23. Profils — modélisation complète
-24. Politique de réponse automatique
-25. Gestion des médias
-26. Système d'extensions
-27. Sécurité
-28. Corrélation end-to-end
-29. Structure du projet
-30. La Charte RELAIS v12
+13. L'Archiviste — logs & audit
+14. Le Commandant — commandes globales hors-LLM
+15. Corrélation end-to-end
+16. SOUL.md — personnalité JARVIS & i18n
+17. Profils — modélisation complète
+18. Politique de réponse automatique
+19. Gestion des médias
+20. Système d'extensions
+21. Sécurité
+22. Structure du projet
+23. La Charte RELAIS
+24. Planifié — Briques futures
 
 ---
 
@@ -124,151 +102,30 @@ Toute la configuration personnalisée, les skills, les logs et les médias sont 
 
 ### Cascade de résolution
 
-```python
-# common/config_loader.py
-
-def get_relais_home() -> Path:
-    """
-    Returns the RELAIS user directory.
-    Override via RELAIS_HOME environment variable.
-    """
-    custom = os.environ.get("RELAIS_HOME")
-    if custom:
-        return Path(custom)
-    return Path.home() / ".relais"
-
-
-# Search path — user config always takes priority
-CONFIG_SEARCH_PATH = [
-    get_relais_home(),          # 1. ~/.relais/      (user — highest priority)
-    Path("/opt/relais"),        # 2. /opt/relais/    (system installation)
-    Path("./"),                 # 3. ./              (current dir — dev mode)
-]
-
-
-def resolve_config_path(filename: str) -> Path:
-    """
-    Resolves a config file using cascade priority.
-    User config in ~/.relais/ always overrides system config.
-
-    Example:
-      ~/.relais/config/config.yaml      → found → use it
-      ~/.relais/config/profiles.yaml    → not found → try /opt/relais/
-      /opt/relais/config/profiles.yaml  → found → use it
-    """
-    for base in CONFIG_SEARCH_PATH:
-        candidate = base / filename
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"Config file '{filename}' not found.\n"
-        f"Searched: {[str(p / filename) for p in CONFIG_SEARCH_PATH]}"
-    )
-
-
-def resolve_skills_dir() -> Path:
-    """
-    Skills directory is ALWAYS in user home — never system.
-    Le Forgeron writes here. CLAUDE.md references paths here.
-    """
-    path = get_relais_home() / "skills"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def resolve_logs_dir() -> Path:
-    """L'Archiviste always writes to user home logs."""
-    path = get_relais_home() / "logs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def resolve_media_dir() -> Path:
-    """Temporary media files — always in user home."""
-    path = get_relais_home() / "media"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 ```
+1. ~/.relais/config/     ← config utilisateur (priorité maximale)
+2. /opt/relais/config/   ← installation système
+3. ./config/             ← répertoire courant (mode dev)
+```
+
+La variable `RELAIS_HOME` permet de surcharger `~/.relais/` explicitement (ex: `/srv/relais` en production, `/tmp/relais-test` pour les tests d'intégration).
 
 ### Initialisation au premier lancement
 
-```python
-# common/init.py
-import shutil
+Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers `.default` depuis `/opt/relais/`. Les fichiers déjà présents ne sont jamais écrasés — l'opération est idempotente.
 
-SYSTEM_INSTALL_PATH = Path("/opt/relais")
-
-# Default template files shipped with the system installation
-DEFAULT_FILES = [
-    ("config/config.yaml",          "config/config.yaml.default"),
-    ("config/profiles.yaml",        "config/profiles.yaml.default"),
-    ("config/users.yaml",           "config/users.yaml.default"),
-    ("config/reply_policy.yaml",    "config/reply_policy.yaml.default"),
-    ("config/mcp_servers.yaml",     "config/mcp_servers.yaml.default"),
-    ("config/HEARTBEAT.md",         "config/HEARTBEAT.md.default"),
-    ("soul/SOUL.md",                "soul/SOUL.md.default"),
-    ("soul/variants/SOUL_concise.md",       "soul/variants/SOUL_concise.md.default"),
-    ("soul/variants/SOUL_professional.md",  "soul/variants/SOUL_professional.md.default"),
-]
-
-
-def initialize_user_dir():
-    """
-    Creates ~/.relais/ structure on first run.
-    Copies default templates from system installation.
-    NEVER overwrites existing user files — safe to call on every startup.
-    """
-    home = get_relais_home()
-
-    # Create directory structure
-    dirs = [
-        "config", "soul/variants", "prompts",
-        "skills/manual", "skills/auto",
-        "media", "logs", "backup"
-    ]
-    for d in dirs:
-        (home / d).mkdir(parents=True, exist_ok=True)
-
-    # Copy defaults — only if file doesn't exist yet
-    for dest_rel, src_rel in DEFAULT_FILES:
-        dest = home / dest_rel
-        src = SYSTEM_INSTALL_PATH / src_rel
-        if not dest.exists() and src.exists():
-            shutil.copy(src, dest)
-
-    # Create empty CLAUDE.md for skills registry if not present
-    claude_md = home / "skills" / "CLAUDE.md"
-    if not claude_md.exists():
-        claude_md.write_text(
-            "# RELAIS Skills Registry\n\n"
-            "## Skills actifs\n"
-            "# Ajoutez vos skills ici — Le Forgeron met à jour automatiquement\n"
-        )
-```
-
-### Variable d'environnement
-
-```bash
-# .env — override du répertoire utilisateur
-RELAIS_HOME=/custom/path/relais     # optionnel — défaut : ~/.relais
-
-# Exemples d'usage
-RELAIS_HOME=/srv/relais             # serveur multi-utilisateurs
-RELAIS_HOME=/tmp/relais-test        # tests d'intégration
-```
-
-### Impact sur les briques
+### Impact par brique
 
 | Brique | Ce qui change |
 |---|---|
 | L'Archiviste | Écrit dans `~/.relais/logs/` |
 | Le Forgeron | Lit/écrit dans `~/.relais/skills/auto/` |
 | L'Atelier | Charge les skills depuis `~/.relais/skills/` |
-| Le Souvenir | DB dans `~/.relais/storage/memory.db` via `resolve_storage_dir()` |
+| Le Souvenir | DB dans `~/.relais/storage/memory.db` |
 | Le Portail | Charge `~/.relais/config/reply_policy.yaml` |
 | Le Vigile | Charge `~/.relais/soul/SOUL.md` pour hot reload |
 | Le Veilleur | Lit `~/.relais/config/HEARTBEAT.md` + backup vers `~/.relais/backup/` |
-| Tous | Config chargée via `resolve_config_path()` — cascade automatique |
+| Tous | Config chargée via cascade automatique |
 
 ---
 
@@ -302,13 +159,12 @@ RELAIS_HOME=/tmp/relais-test        # tests d'intégration
 ├──────────────────────┼──────────────────────────────────────────┤
 │ TRANSFORMER          │ Souscrit Redis + republish Redis         │
 │                      │ → Le Portail, La Sentinelle, Le Crieur   │
-│                      │ → Le Guichet                             │
 ├──────────────────────┼──────────────────────────────────────────┤
 │ STREAM CONSUMER      │ Consomme Stream, exécute, répond         │
 │                      │ → L'Atelier, Le Souvenir                 │
 ├──────────────────────┼──────────────────────────────────────────┤
 │ RELAY                │ Canal externe ↔ Redis                    │
-│                      │ → L'Aiguilleur (N instances)             │
+│                      │ → L'Aiguilleur (processus unifié)        │
 ├──────────────────────┼──────────────────────────────────────────┤
 │ ADMIN                │ Pilote supervisord + Redis               │
 │                      │ → Le Vigile, Le Tableau                  │
@@ -322,63 +178,68 @@ RELAIS_HOME=/tmp/relais-test        # tests d'intégration
 
 ## 5. Les Briques — tableau d'ensemble
 
-| Brique | Module | Port | Taxonomie | Rôle |
+### Briques implémentées
+
+| Brique | Module | Taxonomie | Rôle | Streams |
 |---|---|---|---|---|
-| 🚦 **L'Aiguilleur** | `aiguilleur/` | 810x | Relay | Adaptateur de canaux — 1 instance/canal |
-| 🏛️ **Le Portail** | `portail/` | 8000 | Transformer | Routage, identification, politique |
-| 🛡️ **La Sentinelle** | `sentinelle/` | 8001 | Transformer | ACL, profils, guardrails |
-| 📨 **Le Coursier** | Redis | — | Infrastructure | Bus messages Unix socket |
-| ⚒️ **L'Atelier** | `atelier/` | 8002 | Stream Consumer | Exécution agents LLM |
-| 💭 **Le Souvenir** | `souvenir/` | 8003 | Stream Consumer | Mémoire contexte + longue durée |
-| 🌙 **Le Veilleur** | `veilleur/` | 8004 | Pure Publisher | CRON + Heartbeat + backup |
-| 🔧 **Le Forgeron** | `forgeron/` | 8005 | Batch Processor | Génération skills auto |
-| 📚 **L'Archiviste** | `archiviste/` | 8006 | Pure Observer | Logs → JSONL + SQLite |
-| 📣 **Le Crieur** | `crieur/` | 8007 | Transformer | Push proactif multi-canal |
-| 🔗 **Le Guichet** | `guichet/` | 8008 | Transformer | Webhooks HMAC → pipeline |
-| 🔱 **Le Vigile** | `vigile/` | 8009 | Admin | NLP → supervisord + hot reload |
-| 📊 **Le Tableau** | `tableau/` | 8010 | Admin + Relay | TUI bidirectionnel |
-| 🧵 **Le Tisserand** | `tisserand/` | — | Interceptor Chain | Extensions in-process |
-| 🔍 **Le Scrutateur** | `scrutateur/` | 8011 | Pure Observer | Prometheus + Loki + ES |
+| 🚦 **L'Aiguilleur** | `aiguilleur/` | Relay | Adaptateur de canaux — processus unifié | ← `outgoing:{ch}` / → `incoming:{ch}` |
+| 🏛️ **Le Portail** | `portail/` | Transformer | Routage, identification, politique | ← `incoming:{ch}` / → `security` |
+| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, profils, guardrails | ← `security` / → `tasks` |
+| 📨 **Le Coursier** | Redis | Infrastructure | Bus messages Unix socket | — |
+| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `tasks` / → `outgoing:{ch}`, `tasks:failed` |
+| 💭 **Le Souvenir** | `souvenir/` | Stream Consumer | Mémoire contexte + longue durée | ← `memory:request` + `outgoing:*` / → `memory:response` |
+| 📚 **L'Archiviste** | `archiviste/` | Pure Observer | Logs → JSONL + SQLite | ← `logs` + `events:*` (pubsub) |
+
+### Briques planifiées
+
+Voir section 23 pour le détail fonctionnel.
+
+| Brique | Module | Taxonomie | Rôle |
+|---|---|---|---|
+| 🌙 **Le Veilleur** | `veilleur/` | Pure Publisher | CRON + Heartbeat + backup |
+| 🔧 **Le Forgeron** | `forgeron/` | Batch Processor | Génération skills auto |
+| 📣 **Le Crieur** | `crieur/` | Transformer | Push proactif multi-canal |
+| 🔱 **Le Vigile** | `vigile/` | Admin | NLP → supervisord + hot reload |
+| 📊 **Le Tableau** | `tableau/` | Admin + Relay | TUI bidirectionnel |
+| 🧵 **Le Tisserand** | `tisserand/` | Interceptor Chain | Extensions in-process |
+| 🔍 **Le Scrutateur** | `scrutateur/` | Pure Observer | Prometheus + Loki + ES |
+| 🎮 **Le Commandant** | `commandant/` | Transformer | Commandes globales hors-LLM (`/clear`, `/dnd`, `/brb`) |
 
 ---
 
 ## 6. Infrastructure — supervisord & MCP servers
 
-### supervisord.conf — ordre de démarrage
+### Ordre de démarrage
 
-```
-priority 1   → Le Coursier (Redis)
-priority 5   → LiteLLM proxy
-priority 6   → MCP servers globaux (supervisord)
-priority 8   → Observers purs (L'Archiviste, Le Scrutateur)
-priority 10  → Briques core
-priority 20  → Les instances de L'Aiguilleur
-priority 30  → Le Tableau (local, à la demande)
-```
+| Priorité | Groupe | Briques |
+|---|---|---|
+| 1 | `infra` | Le Coursier (Redis) |
+| 8 | `observers` | L'Archiviste |
+| 10 | `core` | Le Portail, La Sentinelle, L'Atelier, Le Souvenir, **Le Commandant** |
+| 20 | `relays` | L'Aiguilleur (processus unifié) |
+| 30 | — | Le Tableau (local, à la demande, `autostart=false`) |
+
+Toutes les briques loggent dans `~/.relais/logs/` via `stdout_logfile` supervisord.
 
 ### MCP servers lifecycle — modèle hybride
-
-Deux types de MCP servers selon leur nature :
 
 ```
 MCP GLOBAUX — supervisord (processus persistants)
   Toujours disponibles, légers, indépendants du contexte
   Démarrent avec RELAIS, vivent toute la durée de vie du système
 
-  [program:mcp-calendar]
-  [program:mcp-brave-search]
+  Ex: mcp-calendar, mcp-brave-search
 
-MCP CONTEXTUELS — claude-agent-sdk (lancés à la demande)
-  Liés à un projet ou un contexte spécifique
-  Spawned par L'Atelier pour chaque session, tués en fin de tâche
-  Définis dans profiles.yaml sous mcp_servers
+MCP CONTEXTUELS — spawned par L'Atelier (à la demande)
+  Liés à un profil ou un contexte spécifique
+  Spawned pour chaque session, tués en fin de tâche
 
   Ex: mcp__jcodemunch, mcp__gitlab
 ```
 
 ### config/mcp_servers.yaml
 
-Format canonique avec clé racine `mcp_servers:` — deux transports supportés : `stdio` (sous-processus spawné par l'Atelier) et `sse` (connexion à un serveur HTTP existant).
+Format canonique — deux transports supportés : `stdio` (sous-processus spawné par l'Atelier) et `sse` (connexion à un serveur HTTP existant).
 
 ```yaml
 mcp_servers:
@@ -410,286 +271,6 @@ mcp_servers:
 > **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
 >
 > **Timeout et nombre max d'outils** — configurés par profil dans `profiles.yaml` (`mcp_timeout`, `mcp_max_tools`), pas dans ce fichier.
-
-```ini
-; supervisord.conf — MCP globaux (priority 6)
-[program:mcp-calendar]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 mcp/calendar/server.py'
-directory=/opt/relais
-priority=6
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/relais/mcp-calendar.log
-
-[program:mcp-brave-search]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec node mcp/brave-search/server.js'
-directory=/opt/relais
-priority=6
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/relais/mcp-brave-search.log
-```
-
-### supervisord.conf — complet
-
-```ini
-[supervisord]
-logfile=/var/log/relais/supervisord.log
-pidfile=/var/run/relais/supervisord.pid
-nodaemon=false
-
-[unix_http_server]
-file=/var/run/relais/supervisor.sock
-chmod=0700
-
-[supervisorctl]
-serverurl=unix:///var/run/relais/supervisor.sock
-
-[rpcinterface:supervisor]
-supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
-
-; priority 1 — infrastructure
-[program:courier]
-command=redis-server /opt/relais/config/redis.conf
-priority=1
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/relais/courier.log
-
-; priority 5 — LLM proxy
-[program:litellm]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec litellm --config config/litellm.yaml --port 4000'
-directory=/opt/relais
-priority=5
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/relais/litellm.log
-
-; priority 6 — MCP globaux
-[program:mcp-calendar]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 mcp/calendar/server.py'
-directory=/opt/relais
-priority=6
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/relais/mcp-calendar.log
-
-[program:mcp-brave-search]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec node mcp/brave-search/server.js'
-directory=/opt/relais
-priority=6
-autostart=true
-autorestart=true
-stdout_logfile=/var/log/relais/mcp-brave-search.log
-
-; priority 8 — pure observers
-[program:archiviste]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 archiviste/main.py'
-directory=/opt/relais
-priority=8
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/archiviste.log
-
-[program:scrutateur]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 scrutateur/main.py'
-directory=/opt/relais
-priority=8
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/scrutateur.log
-
-; priority 10 — core bricks
-[program:sentinelle]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 sentinelle/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-startretries=10
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/sentinelle.log
-
-[program:souvenir]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 souvenir/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-stopwaitsecs=15
-stopsignal=TERM
-stdout_logfile=/var/log/relais/souvenir.log
-
-[program:atelier]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 atelier/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-startretries=5
-stopwaitsecs=35
-stopsignal=TERM
-stdout_logfile=/var/log/relais/atelier.log
-
-[program:crieur]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 crieur/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/crieur.log
-
-[program:portail]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 portail/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-stopwaitsecs=15
-stopsignal=TERM
-stdout_logfile=/var/log/relais/portail.log
-
-[program:vigile]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 vigile/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/vigile.log
-
-[program:veilleur]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 veilleur/main.py'
-directory=/opt/relais
-priority=10
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/veilleur.log
-
-[program:guichet]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 guichet/main.py'
-directory=/opt/relais
-priority=10
-autostart=false
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/guichet.log
-
-[program:forgeron]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 forgeron/main.py'
-directory=/opt/relais
-priority=20
-autostart=false
-autorestart=false
-stdout_logfile=/var/log/relais/forgeron.log
-
-; priority 20 — L'Aiguilleur instances
-[program:aiguilleur-telegram]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 aiguilleur/telegram/main.py'
-directory=/opt/relais
-priority=20
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stopsignal=TERM
-stdout_logfile=/var/log/relais/aiguilleur-telegram.log
-
-[program:aiguilleur-discord]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 aiguilleur/discord/main.py'
-directory=/opt/relais
-priority=20
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stdout_logfile=/var/log/relais/aiguilleur-discord.log
-
-[program:aiguilleur-slack]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 aiguilleur/slack/main.py'
-directory=/opt/relais
-priority=20
-autostart=false
-autorestart=true
-stdout_logfile=/var/log/relais/aiguilleur-slack.log
-
-[program:aiguilleur-matrix]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 aiguilleur/matrix/main.py'
-directory=/opt/relais
-priority=20
-autostart=false
-autorestart=true
-stdout_logfile=/var/log/relais/aiguilleur-matrix.log
-
-[program:aiguilleur-teams]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 aiguilleur/teams/main.py'
-directory=/opt/relais
-priority=20
-autostart=false
-autorestart=true
-stdout_logfile=/var/log/relais/aiguilleur-teams.log
-
-[program:aiguilleur-rest]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 aiguilleur/rest/main.py'
-directory=/opt/relais
-priority=20
-autostart=true
-autorestart=true
-stopwaitsecs=10
-stdout_logfile=/var/log/relais/aiguilleur-rest.log
-
-[program:aiguilleur-whatsapp]
-command=node aiguilleur/whatsapp/index.js
-directory=/opt/relais
-priority=20
-autostart=true
-autorestart=true
-startretries=3
-stopwaitsecs=15
-stdout_logfile=/var/log/relais/aiguilleur-whatsapp.log
-
-[program:aiguilleur-signal]
-command=bash aiguilleur/signal/run.sh
-directory=/opt/relais
-priority=20
-autostart=false
-autorestart=true
-stdout_logfile=/var/log/relais/aiguilleur-signal.log
-
-; priority 30 — interfaces locales
-[program:tableau]
-command=bash -c 'set -a; source /opt/relais/.env; set +a; exec python3 tableau/main.py'
-directory=/opt/relais
-priority=30
-autostart=false
-autorestart=false
-stdout_logfile=/var/log/relais/tableau.log
-
-; groups
-[group:mcp]
-programs=mcp-calendar,mcp-brave-search
-
-[group:observers]
-programs=archiviste,scrutateur
-
-[group:relays]
-programs=aiguilleur-telegram,aiguilleur-discord,aiguilleur-rest,aiguilleur-whatsapp
-
-[group:core]
-programs=portail,sentinelle,atelier,souvenir,crieur,vigile,veilleur
-
-[group:relais]
-programs=mcp,observers,relays,core,litellm
-```
 
 ---
 
@@ -744,10 +325,6 @@ user vigile     on >${REDIS_PASS_VIGILE}
   ~relais:admin:* ~relais:push:* ~relais:logs
   +subscribe +psubscribe +publish
 
-user guichet    on >${REDIS_PASS_GUICHET}
-  ~relais:push:* ~relais:webhooks:*
-  +publish
-
 user scrutateur on >${REDIS_PASS_SCRUTATEUR}
   ~relais:events:* ~relais:logs
   +subscribe +psubscribe
@@ -786,7 +363,7 @@ PUB/SUB (fire & forget — perte acceptable)
   relais:events:*                Monitoring — Scrutateur
   relais:admin:*                 Vigile ↔ Briques
   relais:admin:reload            Vigile → Briques (hot reload)
-  relais:webhooks:*              Guichet → Crieur/Atelier
+  relais:webhooks:*              Aiguilleur/rest → Crieur/Atelier
   relais:media:*                 Aiguilleur → Portail (métadonnées médias)
 ```
 
@@ -794,102 +371,30 @@ PUB/SUB (fire & forget — perte acceptable)
 
 ## 8. L'Aiguilleur — adaptateur de canaux & formatage Markdown
 
+### Architecture — processus unifié
+
+L'Aiguilleur est un **processus unique** (`aiguilleur/main.py`) qui gère tous les adaptateurs de canaux. L'`AiguilleurManager` charge les canaux depuis `channels.yaml` et instancie les adaptateurs au démarrage.
+
+- **Adaptateurs natifs** (`type: native`) — thread Python + `asyncio.run`, ex: `DiscordAiguilleur`
+- **Adaptateurs externes** (`type: external`) — `subprocess.Popen`, pour les adaptateurs non-Python
+- **Restart automatique** — backoff exponentiel `min(2^restart_count, 30)` secondes, `max_restarts` configurable
+- **Découverte automatique** — convention `aiguilleur.channels.{name}.adapter.{Name}Aiguilleur`, surchargeable via `class_path`
+
 ### Deux responsabilités à la sortie
 
-L'Aiguilleur fait la conversion Markdown à la **sortie uniquement** (réponses vers le canal). Chaque instance connaît les règles syntaxiques de son canal.
+L'Aiguilleur fait la conversion Markdown à la **sortie uniquement** (réponses vers le canal). Chaque adaptateur connaît les règles syntaxiques de son canal :
 
-```python
-# aiguilleur/base.py
-class AiguilleurBase(ABC):
-
-    @abstractmethod
-    async def receive(self) -> Envelope: ...
-
-    @abstractmethod
-    async def send(self, envelope: Envelope) -> None: ...
-
-    def format_for_channel(self, text: str) -> str:
-        """
-        Converts Markdown to channel-specific syntax.
-        Override in each relay implementation.
-        Default: passthrough (for channels supporting Markdown natively).
-        """
-        return text
-
-    async def health(self) -> dict:
-        return {"status": "ok", "brick": self.name, "channel": self.channel_name}
-```
-
-### Règles de formatage par canal
-
-```python
-# aiguilleur/telegram/main.py
-def format_for_channel(self, text: str) -> str:
-    """Telegram uses its own Markdown variant (MarkdownV2)."""
-    # **bold** → *bold*
-    # `code` → `code` (same)
-    # [link](url) → [link](url) (same)
-    # escape special chars: _ * [ ] ( ) ~ ` > # + - = | { } . !
-    return convert_md_to_telegram(text)
-
-# aiguilleur/whatsapp/main.py (ou index.js)
-def format_for_channel(self, text: str) -> str:
-    """WhatsApp does not render Markdown — strip all formatting."""
-    return strip_markdown(text)
-
-# aiguilleur/discord/main.py
-def format_for_channel(self, text: str) -> str:
-    """Discord renders standard Markdown natively."""
-    return text  # passthrough
-
-# aiguilleur/slack/main.py
-def format_for_channel(self, text: str) -> str:
-    """Slack uses mrkdwn syntax."""
-    return convert_md_to_slack_mrkdwn(text)
-
-# aiguilleur/tui/main.py
-def format_for_channel(self, text: str) -> str:
-    """Textual renders Markdown natively."""
-    return text  # passthrough
-
-# aiguilleur/rest/main.py
-def format_for_channel(self, text: str) -> str:
-    """REST returns raw Markdown — client handles rendering."""
-    return text  # passthrough
-```
-
-### Authentification canal REST
-
-```python
-# aiguilleur/rest/main.py
-from fastapi import FastAPI, Header, HTTPException
-import os
-
-app = FastAPI(
-    title="RELAIS REST Relay",
-    docs_url="/docs",      # Swagger UI — activé par défaut
-    redoc_url="/redoc"     # ReDoc — activé par défaut
-)
-
-REST_API_KEY = os.environ.get("REST_API_KEY")
-
-async def verify_api_key(x_api_key: str = Header(...)):
-    """Simple static API Key middleware."""
-    if x_api_key != REST_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-@app.post("/message", dependencies=[Depends(verify_api_key)])
-async def receive_message(body: MessageRequest):
-    """
-    Send a message to RELAIS.
-    Authentication: X-Api-Key header (static key from .env REST_API_KEY)
-    """
-    ...
-```
+| Canal | Conversion |
+|---|---|
+| Discord | Passthrough (Markdown standard natif) |
+| Telegram | Markdown → MarkdownV2 |
+| Slack | Markdown → mrkdwn |
+| WhatsApp | Strip (pas de Markdown) |
+| Signal | Strip |
+| REST | Passthrough (brut, client gère le rendu) |
+| TUI | Passthrough (Textual rend le Markdown) |
 
 ### Configuration des canaux via `channels.yaml`
-
-Chaque canal est configuré et activé/désactivé via le fichier `channels.yaml` (cascade de résolution : `~/.relais/config/` → `/opt/relais/config/` → `./config/`). Cette centralisation permet de gérer les adaptateurs sans modification du code.
 
 ```yaml
 channels:
@@ -939,17 +444,12 @@ channels:
 ```
 
 **Paramètres clés :**
-- `enabled` — activé/désactivé (pas de suppression de fichiers, juste un toggle)
-- `streaming` — supporte le streaming progressif (flag utilisé par Atelier pour `STREAMING_CAPABLE_CHANNELS`)
-- `type` — `native` (thread Python + asyncio) ou `external` (subprocess via `Popen`)
-- `class_path` — override de la classe adaptateur (convention : `aiguilleur.channels.{name}.adapter.{Name}Aiguilleur`)
-- `max_restarts` — nombre max de redémarrages avant abandon (restart automatique avec backoff exponentiel `min(2^count, 30)` secondes)
-- `command`/`args` — requis pour type `external` uniquement
-
-**Découverte automatique des adaptateurs :**
-- Adaptateurs natifs : convention `aiguilleur.channels.{channel_name}.adapter` si `type: native`
-- Classe : `{ChannelName}Aiguilleur(NativeAiguilleur)` (ex. `DiscordAiguilleur`)
-- Si `class_path` fourni : utilisé à la place
+- `enabled` — toggle sans suppression de code
+- `streaming` — flag utilisé par L'Atelier pour `STREAMING_CAPABLE_CHANNELS`
+- `type` — `native` (thread Python + asyncio) ou `external` (subprocess)
+- `class_path` — override de la classe adaptateur
+- `max_restarts` — max avant abandon, restart avec backoff exponentiel
+- `command`/`args` — requis pour `type: external` uniquement
 
 ### Tableau des canaux
 
@@ -965,23 +465,17 @@ channels:
 | WhatsApp | Baileys (Node.js) | Strip | Oui | QR code |
 | Signal | signal-cli | Strip | Non | Numéro dédié |
 
+### Streaming progressif — édition temps réel
+
+Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier publie les chunks token-par-token dans `relais:messages:streaming:{channel}:{correlation_id}`. L'Aiguilleur envoie un message placeholder, lit les chunks en boucle, et édite le message progressivement. Un flag `is_final` signale la fin du stream.
+
 ---
 
 ## 9. Le Portail — routage & politique de réponse
 
-### Registre des sessions actives
+### Rôle
 
-```python
-async def update_active_sessions(user_id: str, channel: str):
-    """
-    Updated on every incoming message.
-    Le Crieur reads this hash to resolve notification targets.
-    TTL: 1h (refreshed on each message)
-    """
-    key = f"relais:active_sessions:{user_id}"
-    await redis.hset(key, channel, datetime.utcnow().timestamp())
-    await redis.expire(key, 3600)
-```
+Le Portail valide le format Envelope entrant, met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (DND, vacation, in_meeting) et route vers La Sentinelle.
 
 ### config/reply_policy.yaml
 
@@ -1099,10 +593,10 @@ users:
     role: SCHEDULER_AGENT
     identities: {}
     notification_strategy:
-      normal: last_active     # notifie Benjamin sur son dernier canal actif
+      normal: last_active
       high: all_active
       critical: all_active
-    notification_target_user: usr_benjamin  # les réponses vont à Benjamin
+    notification_target_user: usr_benjamin
     active: true
 ```
 
@@ -1122,11 +616,9 @@ channels:
 
 ## 11. L'Atelier — exécution des agents, résilience LLM, outils internes
 
-**Updated 2026-03-30:** L'Atelier utilise une boucle agentique multi-tour avec gestion explicite des outils. La dépendance `claude-agent-sdk` et le binaire CLI Node.js `claude` sont supprimés. Les serveurs MCP stdio et SSE restent supportés.
-
 ### Architecture générale
 
-L'Atelier follows this flow for each incoming task:
+L'Atelier suit ce flux pour chaque tâche entrante :
 
 ```
 Incoming envelope
@@ -1141,7 +633,7 @@ Load MCP servers for profile (mcp_loader.load_for_sdk)
   ↓
 Build internal tools list (make_skills_tools)
   ↓
-Execute via exécuteur agentique (boucle multi-tour explicite)
+Execute via AgentExecutor (boucle multi-tour explicite)
   ├─ Start MCP servers (stdio/SSE)
   ├─ Merge internal tools + MCP tools
   └─ Loop: stream → tool calls → results → next turn, until end_turn or max_turns
@@ -1153,98 +645,58 @@ Publish response to relais:messages:outgoing:{channel}
 Conditional XACK (success or DLQ) — never lose messages on retry
 ```
 
-### Stack technique — remplacement de claude-agent-sdk
-
-| Composant | Ancienne approche | Nouvelle approche |
-|-----------|------------------|------------------|
-| Appels LLM | `claude-agent-sdk` → spawn CLI `claude` | Exécuteur agentique Python pur |
-| `ANTHROPIC_BASE_URL` | Workaround Bug #677 (cli_path) | Supporté nativement |
-| Dépendance externe | Binaire Node.js `claude` obligatoire | Python pur, aucun binaire requis |
-| Boucle tool-use | Gérée par le CLI (opaque) | Explicite, multi-tour |
-| Serveurs MCP | Via `ClaudeAgentOptions.mcp_servers` | Lifecycle géré par `McpSessionManager` |
-| Outils natifs | AgentDefinition (abandonné) | Outils Python natifs avec handler |
-
 ### Modules — atelier/
 
 ```
 atelier/
-├── main.py             # Brique principale — loop Redis, dispatch
-├── agent_executor.py   # AgentExecutor : boucle agentique multi-tour
-├── mcp_adapter.py      # make_mcp_tools() → outils MCP via langchain-mcp-adapters
+├── main.py                 # Brique principale — loop Redis, dispatch
+├── agent_executor.py       # AgentExecutor : boucle agentique multi-tour
+├── mcp_adapter.py          # make_mcp_tools() → outils MCP via langchain-mcp-adapters
 ├── mcp_session_manager.py  # Cycle de vie des serveurs MCP
-├── skills_tools.py     # make_skills_tools() → list_skills + read_skill
-├── mcp_loader.py       # Chargement config MCP servers (inchangé)
-├── profile_loader.py   # ProfileConfig, ResilienceConfig (inchangé)
-├── soul_assembler.py   # Assemblage prompt système (inchangé)
-└── stream_publisher.py # Publication chunks Redis (inchangé)
+├── tools.py                # make_skills_tools() → list_skills + read_skill
+├── mcp_loader.py           # Chargement config MCP servers
+├── profile_loader.py       # ProfileConfig, ResilienceConfig
+├── soul_assembler.py       # Assemblage prompt système
+└── stream_publisher.py     # Publication chunks Redis
 ```
 
 ### Boucle agentique
 
-L'exécuteur agentique gère un cycle multi-tour :
+L'`AgentExecutor` gère un cycle multi-tour via `deepagents.create_deep_agent()` :
 1. Construction des messages (contexte court-terme + envelope)
 2. Démarrage des serveurs MCP et chargement des outils
-3. Appel LLM avec streaming token-by-token
+3. Appel LLM avec streaming token-by-token (`agent.astream(stream_mode="messages")`)
 4. Dispatch des tool calls ; injection des résultats (`tool_result`)
 5. Rebouclage jusqu'à `end_turn` ou `max_turns`
 
 ### Outils natifs — make_skills_tools()
 
-`atelier/skills_tools.py` expose deux outils pour la gestion des skills :
+`atelier/tools.py` expose deux outils pour la gestion des skills :
 
 | Outil | Description |
 |-------|-------------|
 | `list_skills` | Scanne `skills_dir` récursivement pour les `SKILL.md`, retourne un catalogue `"- {nom}: {première ligne}"` |
 | `read_skill(skill_name)` | Lit et retourne le contenu complet du `SKILL.md` correspondant |
 
-`self._skills_dir` est chargé au démarrage depuis `Path(__file__).parent.parent / "skills"`.
-
 ### Serveurs MCP — McpSessionManager
 
 `McpSessionManager` prend en charge deux transports : `stdio` (sous-processus) et `sse` (connexion HTTP). Si le package MCP est absent, le manager loggue un warning et retourne des listes vides sans crash — les outils internes restent fonctionnels dans tous les cas.
 
-**Format retourné par `mcp_loader.load_for_sdk()` :**
-```python
-# Serveur stdio
-{"server_name": {"type": "stdio", "command": "...", "args": [...], "env": {...}}}
-
-# Serveur SSE
-{"server_name": {"type": "sse", "url": "http://...", "env": {...}}}
-# env omis si vide
-```
-
 ### ProfileConfig — champs clés
 
-```python
-# atelier/profile_loader.py
-@dataclass(frozen=True)
-class ProfileConfig:
-    model: str               # format provider:model-id (ex. anthropic:claude-sonnet-4-6)
-    temperature: float
-    max_tokens: int
-    resilience: ResilienceConfig
-    max_turns: int = 20      # ← Nombre max de tours de la boucle agentique
-    mcp_timeout: int = 10    # ← Timeout (s) par appel outil MCP
-    mcp_max_tools: int = 20  # ← Max outils MCP exposés au modèle (0 = aucun)
-    # … autres champs : allowed_tools, allowed_mcp, guardrails, memory_scope, fallback_model
-```
+| Champ | Type | Description |
+|-------|------|-------------|
+| `model` | str | Format `provider:model-id` (ex: `anthropic:claude-sonnet-4-6`) |
+| `temperature` | float | Température LLM |
+| `max_tokens` | int | Tokens max par réponse |
+| `max_turns` | int | Tours max boucle agentique (défaut: 20) |
+| `mcp_timeout` | int | Timeout (s) par appel outil MCP (défaut: 10) |
+| `mcp_max_tools` | int | Max outils MCP exposés au modèle (0 = aucun MCP) |
+| `resilience` | ResilienceConfig | Retries, délais backoff, fallback model |
 
-`max_turns` contrôle le nombre d'itérations de la boucle agentique.
+`mcp_timeout` annule un appel outil MCP dépassant le délai imparti et retourne une chaîne d'erreur au modèle sans interrompre la boucle. `mcp_max_tools` tronque la liste des outils MCP — les outils internes ne sont pas comptés dans cette limite.
 
-`mcp_timeout` annule un appel outil MCP dépassant le délai imparti. Un timeout retourne une chaîne d'erreur au modèle sans interrompre la boucle.
-
-`mcp_max_tools` tronque la liste des outils MCP. Les outils internes ne sont pas comptés dans cette limite. La valeur `0` est utilisée par le profil `memory_extractor` pour désactiver complètement les outils MCP.
-
-### Profil `memory_extractor` — extraction légère de faits utilisateur (Axe C)
-
-**New in 2026-03-29:** A dedicated profile `memory_extractor` is used by Souvenir for identifying user facts.
-
-Le Souvenir utilise ce profil pour extraire automatiquement les faits utilisateur des conversations. Ce profil est optimisé pour :
-- **Modèle léger** : `glm-4.7-flash` (vs gpt-3.5-turbo précédemment hardcodé)
-- **Latence minimale** : `max_tokens: 512`, `temperature: 0.1`
-- **Pas de mémoire contexte** : `short_term_messages: 0`
-- **Pas de streaming** : `stream: false`
-- **Résilience légère** : 2 retries avec délai `[1, 3]`
+### Profil `memory_extractor` — extraction légère de faits utilisateur
 
 ```yaml
 # config/profiles.yaml.default
@@ -1267,39 +719,14 @@ memory_extractor:
     fallback_model: null
 ```
 
-**Chargement dynamique dans Souvenir** :
-
-```python
-# souvenir/main.py
-from common.config_loader import load_profiles, resolve_profile
-
-_FALLBACK_EXTRACTION_MODEL = "glm-4.7-flash"
-try:
-    _profiles = load_profiles()
-    _extraction_profile = resolve_profile(_profiles, "memory_extractor")
-    extraction_model = _extraction_profile.model
-except Exception as exc:
-    logger.warning("Could not load memory_extractor profile: %s", exc)
-    extraction_model = _FALLBACK_EXTRACTION_MODEL
-
-class Souvenir:
-    def __init__(self, litellm_url: str, ...):
-        self._extractor = MemoryExtractor(
-            litellm_url=litellm_url,
-            model=extraction_model  # Dynamic, not hardcoded
-        )
-```
-
-Ce chargement dynamique permet de changer le modèle d'extraction via configuration sans redéploiement.
+Utilisé par Le Souvenir pour l'extraction automatique de faits utilisateur. Le modèle est chargé dynamiquement depuis ce profil au démarrage de Le Souvenir — changeable sans redéploiement.
 
 ### Résilience LLM — pattern XACK
-
-Si le backend LLM est indisponible, l'exécuteur agentique lève `AgentExecutionError`. L'appelant route vers la DLQ et ACK. Les erreurs transientes non catchées restent en PEL pour re-livraison.
 
 ```yaml
 # config/profiles.yaml — section résilience dans chaque profil
 default:
-  model: claude-opus-4-6
+  model: anthropic:claude-opus-4-6
   max_turns: 20
   temperature: 0.7
   max_tokens: 2048
@@ -1309,147 +736,15 @@ default:
     fallback_model: null
 ```
 
-**Pattern XACK dans `atelier/main.py`** :
+**Règle fondamentale :** ne jamais XACK avant le succès ou l'épuisement des retries.
 
-```python
-# AgentExecutionError → DLQ + ACK (non-retriable)
-# Exception générique → laisse en PEL (transient, re-delivery automatique)
-except AgentExecutionError as exc:
-    await redis_conn.xadd("relais:tasks:failed", {"payload": payload, "reason": str(exc), ...})
-    return True  # ACK — dans DLQ, pas perdu
-except Exception as exc:
-    return False  # pas d'ACK — reste en PEL
-```
-
-### Streaming progressif — édition temps réel Discord/Telegram
-
-Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier publie les chunks au fur et à mesure dans `relais:messages:streaming:{channel}:{correlation_id}` :
-
-```python
-# atelier/stream_publisher.py
-class StreamPublisher:
-    """Publishes response chunks for real-time message editing."""
-    STREAM_TTL_SECONDS = 300
-    STREAM_MAXLEN = 500
-
-    async def push_chunk(self, chunk: str, is_final: bool = False):
-        """Append chunk to streaming Redis stream."""
-        await self.redis.xadd(
-            f"relais:messages:streaming:{self.channel}:{self.correlation_id}",
-            {"seq": self.seq, "chunk": chunk, "is_final": int(is_final)},
-            maxlen=self.STREAM_MAXLEN,
-            approximate=True
-        )
-        # Set TTL on the stream
-        await self.redis.expire(
-            f"relais:messages:streaming:{self.channel}:{self.correlation_id}",
-            self.STREAM_TTL_SECONDS
-        )
-        self.seq += 1
-
-    async def finalize(self):
-        """Signal end of response stream."""
-        await self.push_chunk("", is_final=True)
-```
-
-**Aiguilleur (Discord) consomme via:**
-
-```python
-# aiguilleur/discord/main.py
-STREAM_EDIT_THROTTLE_CHARS = 80
-STREAM_READ_BLOCK_MS = 150
-
-async def _handle_streaming_message(self, envelope: Envelope):
-    """Send placeholder, read chunks, edit message progressively."""
-    msg = await self.channel.send("▌")  # Placeholder
-    accumulated = ""
-
-    while True:
-        # XREAD relais:messages:streaming:discord:{correlation_id}
-        chunks = await redis.xread(
-            {f"relais:messages:streaming:discord:{envelope.correlation_id}": "$"},
-            block=self.STREAM_READ_BLOCK_MS
-        )
-        for chunk_data in chunks:
-            if chunk_data.get("is_final"):
-                # Final edit without cursor
-                await msg.edit(content=accumulated)
-                break
-            chunk = chunk_data.get("chunk", "")
-            accumulated += chunk
-            if len(accumulated) >= self.STREAM_EDIT_THROTTLE_CHARS:
-                await msg.edit(content=accumulated + " ▌")
-                await asyncio.sleep(0.2)  # Rate limit edits
-```
-
-### Context window compaction
-
-Le Souvenir surveille la taille de l'historique. Quand l'historique dépasse 80% du context window du modèle, un LLM léger (Haiku) génère un résumé qui remplace les anciens messages.
-
-```python
-# souvenir/context_store.py
-class ContextStore:
-
-    CONTEXT_WINDOW_LIMITS = {
-        "claude-opus-4-6":   200_000,
-        "claude-sonnet-4-6": 200_000,
-        "claude-haiku-4-5":  200_000,
-        "qwen3-coder-30b":   32_000,
-        "llama3.2":          128_000,
-    }
-    COMPACTION_THRESHOLD = 0.80  # 80% du context window
-
-    async def get_recent(
-        self, session_id: str, limit: int = 20
-    ) -> list[dict]:
-        """Get recent messages from Redis (cache) with SQLite fallback."""
-        # Try Redis first (fast path)
-        messages = await self.redis_list.get_recent(session_id, limit)
-        if messages:
-            return messages
-
-        # Fallback to SQLite if Redis miss
-        return await self.long_term.get_recent_messages(session_id, limit)
-
-    async def append_turn(self, session_id: str, user_msg: str, assistant_msg: str):
-        """Append user+assistant pair to session history."""
-        await self.redis_list.rpush(session_id, {
-            "role": "user",
-            "content": user_msg,
-            "timestamp": time.time()
-        })
-        await self.redis_list.rpush(session_id, {
-            "role": "assistant",
-            "content": assistant_msg,
-            "timestamp": time.time()
-        })
-        await self.redis_list.ltrim(session_id, 0, 19)  # Keep last 20
-        await self.redis_list.expire(session_id, 86400)  # 24h TTL
-```
-
-### Graceful shutdown
-
-```python
-# atelier/main.py
-shutdown = GracefulShutdown(timeout=30.0)
-shutdown.setup()
-
-while not shutdown.is_set():
-    for msg_id, payload in await consumer.reclaim_pending():
-        t = asyncio.create_task(handle_task(msg_id, payload))
-        shutdown.track(t)
-    for msg_id, payload in await consumer.read(count=5, block_ms=1000):
-        t = asyncio.create_task(handle_task(msg_id, payload))
-        shutdown.track(t)
-
-await shutdown.wait_for_tasks()
-```
+- `AgentExecutionError` → DLQ (`relais:tasks:failed`) + ACK
+- Exception transiente (réseau, timeout) → pas d'ACK → reste en PEL pour re-livraison
+- Succès → ACK après publication dans `relais:messages:outgoing:{channel}`
 
 ---
 
 ## 12. Le Souvenir — mémoire, dual-stream, extraction de faits
-
-**Updated 2026-03-28:** Souvenir now consumes two streams (memory requests from Atelier + observes outgoing messages). Automated memory extraction via fast LLM identifies user facts for long-term storage.
 
 ### Deux niveaux de mémoire
 
@@ -1465,34 +760,14 @@ Mémoire longue    → SQLite (dev) → PostgreSQL (prod) via Alembic migrations
 
 ### Architecture dual-stream
 
-Souvenir consomme deux streams :
+Le Souvenir consomme deux streams en parallèle :
 
 **Stream 1 : `relais:memory:request`** (Atelier → Souvenir)
 - Action `get` : retourner l'historique pour une session donnée
 - Flux : Atelier envoie `{action: "get", session_id, correlation_id}` → Souvenir répond via `relais:memory:response`
 
-**Stream 2 : `relais:messages:outgoing:{channel}`** (observe) — NOUVEAU
-- Observer toutes les réponses assistantes (from all channels)
-- Pour chaque message sortant : extraire les faits utilisateur, archiver en SQLite, mettre en cache Redis
-
-```python
-# souvenir/main.py — dual consumer groups
-consumer_get = StreamConsumer(redis, "relais:memory:request", "souvenir_memory")
-consumer_out = StreamConsumer(redis, f"relais:messages:outgoing:*", "souvenir_outgoing")
-
-while not shutdown.is_set():
-    # Handle memory get requests
-    for msg_id, payload in await consumer_get.read(count=5, block_ms=100):
-        await _handle_get_request(payload)
-        await consumer_get.ack(msg_id)
-
-    # Observe outgoing messages (extract facts, archive)
-    for channel_name in ["discord", "telegram", "rest"]:
-        stream = f"relais:messages:outgoing:{channel_name}"
-        for msg_id, payload in await consumer_out.read(stream, count=1, block_ms=100):
-            await _handle_outgoing(payload)
-            await consumer_out.ack(msg_id)
-```
+**Stream 2 : `relais:messages:outgoing:{channel}`** (observe toutes les réponses)
+- Pour chaque message sortant : mettre en cache Redis, archiver en SQLite, extraire les faits utilisateur
 
 ### Flux mémoire : get (Atelier → Souvenir → Atelier)
 
@@ -1517,118 +792,30 @@ while not shutdown.is_set():
    b. Extract assistant reply from envelope.content
    c. RPUSH relais:context:{session_id} [user_msg, assistant_reply]
       LTRIM -20, EXPIRE 24h
-   d. long_term_store.archive(envelope)  ← existing (SQLite messages)
-   e. memory_extractor.extract(envelope) ← NEW (identify user facts)
+   d. long_term_store.archive(envelope)     ← SQLite messages
+   e. memory_extractor.extract(envelope)    ← identification faits utilisateur
 ```
 
-### Memory extraction — identification automatique de faits utilisateur (Axe B & C)
+### Memory extraction — identification automatique de faits utilisateur
 
-**Updated 2026-03-29:** Memory extraction now uses a dedicated `memory_extractor` profile for dynamic model selection.
+Le `MemoryExtractor` appelle un LLM léger (profil `memory_extractor`) pour identifier les faits durables sur l'utilisateur (préférences, contraintes, objectifs) à partir de chaque échange. Les faits avec une confiance > 0.7 sont stockés en SQLite dans la table `user_facts`. L'extraction est idempotente — un hash `(sender_id, fact)` évite les doublons.
 
-Nouvelle étape dans `_handle_outgoing` :
+**Table `user_facts` :**
 
-```python
-# souvenir/main.py — initialization with dynamic profile loading
-from common.config_loader import load_profiles, resolve_profile
+| Colonne | Type | Description |
+|---------|------|-------------|
+| `id` | TEXT PK | Hash SHA256 de `sender_id:fact` |
+| `sender_id` | TEXT | Identifiant expéditeur |
+| `fact` | TEXT | Fait extrait |
+| `category` | TEXT | `preference`, `constraint`, `goal`, `context` |
+| `confidence` | REAL | Score 0.0–1.0 |
+| `source_corr` | TEXT | `correlation_id` du message source |
+| `created_at` | REAL | Epoch seconds |
+| `updated_at` | REAL | Epoch seconds |
 
-_FALLBACK_EXTRACTION_MODEL = "glm-4.7-flash"
-try:
-    _profiles = load_profiles()
-    _extraction_profile = resolve_profile(_profiles, "memory_extractor")
-    extraction_model = _extraction_profile.model
-except Exception as exc:
-    logger.warning("Could not load memory_extractor profile, using fallback: %s", exc)
-    extraction_model = _FALLBACK_EXTRACTION_MODEL
+### Compaction contexte
 
-class Souvenir:
-    def __init__(self, ...):
-        self._extractor = MemoryExtractor(litellm_url=litellm_url, model=extraction_model)
-```
-
-```python
-# souvenir/memory_extractor.py — NOUVEAU
-class MemoryExtractor:
-    """Fast LLM call to extract durable user facts from conversation.
-
-    Model selection from memory_extractor profile (config/profiles.yaml).
-    Fallback: glm-4.7-flash (previously hardcoded as gpt-3.5-turbo).
-    """
-
-    def __init__(self, litellm_url: str, model: str):
-        self.litellm_url = litellm_url
-        self.model = model  # Dynamically loaded from profile
-        self.http_client = httpx.AsyncClient(base_url=litellm_url)
-
-    async def extract(self, envelope: Envelope) -> list[UserFact]:
-        """Analyze user message + assistant reply, extract structured facts."""
-        user_msg = envelope.metadata.get("user_message", "")
-        assistant_reply = envelope.content
-
-        prompt = f"""Analyse cet échange utilisateur-assistant.
-        Extrais les faits durables sur l'utilisateur (préférences, contraintes, objectifs).
-
-        Échange:
-        Utilisateur: {user_msg}
-        Assistant: {assistant_reply}
-
-        Réponds en JSON strict: [{{"fact": "...", "category": "preference|constraint|goal|context", "confidence": 0.0-1.0}}]
-        """
-
-        # Fast LLM call via LiteLLM proxy (profil "memory_extractor" model + settings)
-        response = await self.http_client.post(
-            "/v1/chat/completions",
-            json={
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 512,
-                "top_p": 1.0
-            },
-            timeout=10
-        )
-
-        try:
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            facts = json.loads(content)
-            # Filter confidence > 0.7
-            return [f for f in facts if f.get("confidence", 0) > 0.7]
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Memory extraction parse error: {response.text}")
-
-    async def store(self, sender_id: str, facts: list[UserFact]):
-        """Upsert facts into SQLite user_facts table (fire-and-forget)."""
-        for fact in facts:
-            # Hash (sender_id, fact) for idempotency
-            fact_hash = hashlib.sha256(f"{sender_id}:{fact['fact']}".encode()).hexdigest()
-            await self.long_term.upsert_fact(
-                id=fact_hash,
-                sender_id=sender_id,
-                fact=fact["fact"],
-                category=fact["category"],
-                confidence=fact["confidence"],
-                source_corr=fact.get("source_corr"),
-                created_at=time.time(),
-                updated_at=time.time()
-            )
-```
-
-**Table `user_facts` (Alembic migration):**
-
-```sql
-CREATE TABLE user_facts (
-    id TEXT PRIMARY KEY,
-    sender_id TEXT NOT NULL,
-    fact TEXT NOT NULL,
-    category TEXT,  -- preference, constraint, goal, context
-    confidence REAL,
-    source_corr TEXT,  -- correlation_id du message source
-    created_at REAL,
-    updated_at REAL,
-    INDEX idx_sender_id (sender_id),
-    INDEX idx_category (category)
-);
-```
+Quand l'historique dépasse 80% du context window du modèle, un LLM léger (Haiku) génère un résumé qui remplace les anciens messages.
 
 ### Scopes mémoire
 
@@ -1641,618 +828,119 @@ CREATE TABLE user_facts (
 
 ### Pagination native
 
-```python
-# souvenir/long_term_store.py
-class LongTermStore:
-
-    async def query(
-        self,
-        user_id: str,
-        limit: int = 20,
-        offset: int = 0,
-        since: datetime | None = None,
-        until: datetime | None = None,
-        search: str | None = None
-    ) -> PaginatedResult:
-        """
-        Paginated query on long-term memory.
-        Used by Le Vigile for admin queries:
-          "montre page 2 des logs d'hier"
-          "recherche les mentions de la MR #42"
-        """
-        query = "SELECT * FROM facts WHERE user_id = ?"
-        params = [user_id]
-
-        if since:
-            query += " AND created_at >= ?"
-            params.append(since)
-        if until:
-            query += " AND created_at <= ?"
-            params.append(until)
-        if search:
-            query += " AND content LIKE ?"
-            params.append(f"%{search}%")
-
-        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-
-        rows = await self.db.fetch_all(query, params)
-        total = await self.db.fetch_one(
-            "SELECT COUNT(*) FROM facts WHERE user_id = ?", [user_id]
-        )
-
-        return PaginatedResult(
-            items=[dict(r) for r in rows],
-            total=total[0],
-            limit=limit,
-            offset=offset,
-            has_more=(offset + limit) < total[0]
-        )
-```
+Le Souvenir expose une API de requête paginée sur la mémoire longue terme : `limit`, `offset`, `since`, `until`, `search`. Utilisée par Le Vigile pour les requêtes admin ("montre page 2 des logs d'hier").
 
 ---
 
-## 13. Le Veilleur — planification, backup, rétention
+## 13. L'Archiviste — pure observer avec pipeline observation
 
-### Pure publisher
+L'Archiviste est un observer pur — il consomme sans jamais publier.
 
-```python
-# veilleur/main.py
-class Veilleur:
-    """
-    Pure publisher — no LLM, no direct agent execution.
-    Publishes AgentTasks to relais:tasks Stream.
-    L'Atelier executes them with SCHEDULER_AGENT profile.
-    """
+**Deux consumer groups en parallèle :**
 
-    async def tick(self):
-        overdue = self.find_overdue_checks()
-        for check in overdue:
-            await self.stream_producer.publish("relais:tasks", {
-                "profile_id": "SCHEDULER_AGENT",
-                "origin": "veilleur",
-                "channel": "system",
-                "user_id": "usr_system",
-                "session_id": f"cron-{check.name}-{uuid4()}",
-                "system_prompt": check.prompt,
-                "message": f"Execute: {check.name}",
-            })
-            self.update_timestamp(check.name)
-```
+1. `archiviste_logs_group` — observe `relais:logs` (logs critiques de toutes les briques)
+2. `archiviste_pipeline_group` — observe tous les streams du pipeline pour visibilité end-to-end
 
-### HEARTBEAT.md — tâches complètes
+**Streams observés :**
+- `relais:messages:incoming:*` (par canal)
+- `relais:security`
+- `relais:tasks`
+- `relais:tasks:failed` (DLQ)
+- `relais:messages:outgoing:*` (par canal)
 
-```markdown
-# HEARTBEAT.md
+**Pub/Sub :** `relais:events:*` (fire & forget)
 
-## MR GitLab check
-- Cadence: every 15 minutes
-- Prompt: Scanne les nouvelles MR assignées à Benjamin. Signale uniquement les nouvelles.
+**Enrichissement des logs :** Chaque entrée dans `relais:logs` est enrichie par les briques avec `correlation_id`, `sender_id`, et `content_preview` (60 premiers caractères). L'Archiviste préfixe les lignes de log avec `[{cid[:8]}] {sender_id} | message`.
 
-## Email check
-- Cadence: every 30 minutes (08:00-21:00 only)
-- Prompt: Vérifie les emails urgents.
-
-## Calendar check
-- Cadence: every 2 hours (08:00-22:00 only)
-- Prompt: Événements dans les 24h à venir.
-
-## System health
-- Cadence: daily at 03:00
-- Prompt: Vérification disque, mémoire.
-
-## Bridge health check
-- Cadence: every 6 hours
-- Prompt: GET /health aiguilleur-whatsapp et aiguilleur-signal.
-  Si déconnecté : notifier ADMIN (urgency: high) + tenter restart.
-
-## Log retention cleanup
-- Cadence: daily at 03:30
-- Prompt: SYSTEM:cleanup_logs
-  Supprime JSONL > 90j. Purge SQLite archiviste > 1 an (hors audit). Vacuum SQLite.
-
-## Backup
-- Cadence: daily at 04:00 (if backup.enabled in config)
-- Prompt: SYSTEM:backup
-  SQLite snapshot souvenir + archiviste. rsync vers backup_path.
-
-## Auto-forgeron run
-- Cadence: daily at 02:00
-- Prompt: SYSTEM:start_forgeron
-```
-
-### Backup — configurable
-
-```yaml
-# config/config.yaml
-backup:
-  enabled: true                         # activé/désactivé
-  path: "/Volumes/Backup/relais"        # chemin configurable
-  files:
-    - souvenir/relais_memory.db         # SQLite Le Souvenir
-    - archiviste/logs/relais.db         # SQLite L'Archiviste
-    - atelier/skills/                   # tous les skills
-    - soul/                             # personnalité JARVIS
-    - config/                           # configuration
-  sqlite_backup_api: true               # utilise .backup() SQLite (safe en concurrent)
-  rsync_options: "-av --delete"
-```
-
-```python
-# veilleur/backup_handler.py
-class BackupHandler:
-    """
-    Triggered by SYSTEM:backup command from Le Veilleur.
-    Uses SQLite .backup() API for safe concurrent backup.
-    """
-
-    async def run(self, config: BackupConfig):
-        if not config.enabled:
-            return
-
-        backup_path = Path(config.path) / datetime.now().strftime("%Y-%m-%d")
-        backup_path.mkdir(parents=True, exist_ok=True)
-
-        for db_file in [f for f in config.files if f.endswith(".db")]:
-            await self._backup_sqlite(db_file, backup_path)
-
-        await self._rsync_files(
-            [f for f in config.files if not f.endswith(".db")],
-            backup_path,
-            config.rsync_options
-        )
-
-        await publish_event(self.redis, "relais:events:backup_completed", {
-            "path": str(backup_path),
-            "files_count": len(config.files),
-        })
-
-    async def _backup_sqlite(self, db_path: str, dest: Path):
-        """Uses SQLite .backup() API — safe while DB is in use."""
-        import sqlite3
-        src = sqlite3.connect(db_path)
-        dst = sqlite3.connect(str(dest / Path(db_path).name))
-        src.backup(dst)
-        dst.close()
-        src.close()
-```
-
-### Rétention des logs
-
-```yaml
-# config/config.yaml
-retention:
-  jsonl_days: 90          # fichiers JSONL — nettoyage quotidien par Le Veilleur
-  sqlite_days: 365        # enregistrements SQLite L'Archiviste
-  audit_days: null        # logs d'audit (commandes admin) — jamais supprimés
-  media_hours: 24         # fichiers médias temporaires — TTL 24h
-```
+**Rétention :** L'Archiviste traite les commandes `SYSTEM:cleanup_logs` du Veilleur — suppression des JSONL selon `retention.jsonl_days`, purge SQLite selon `retention.sqlite_days`, les logs d'audit ne sont jamais supprimés.
 
 ---
 
-## 14. Le Forgeron — auto-apprentissage & versioning skills
+## 24. Le Commandant — commandes globales hors-LLM
 
-### Batch processor isolé
+### Rôle
 
-```python
-# forgeron/main.py
-class Forgeron:
-    """
-    Reads Archiviste's SQLite directly (shared local file).
-    Publishes skills to relais:skills:new (Stream).
-    Exits cleanly when done (autorestart=false in supervisord).
-    """
+Le Commandant intercepte les messages textuels commençant par `/` avant qu'ils n'atteignent le pipeline LLM. Il exécute l'action demandée immédiatement et répond directement à l'utilisateur sur le canal d'origine. Aucun token LLM n'est consommé.
 
-    async def run(self):
-        patterns = await self.analyzer.find_repeated_patterns(
-            db_path="archiviste/logs/relais.db",
-            min_occurrences=config.forgeron.min_occurrences,
-            min_days=config.forgeron.min_days,
-            score_threshold=config.forgeron.score_threshold
-        )
+**Taxonomie :** Transformer — consomme `relais:messages:incoming`, publie vers `relais:messages:outgoing:{channel}` et/ou `relais:memory:request`.
 
-        for pattern in patterns:
-            skill_content = await self.generator.generate(pattern)
-            await self.stream_producer.publish("relais:skills:new", {
-                "name": pattern.suggested_name,
-                "content": skill_content,
-                "pattern": pattern.to_dict(),
-                "auto_approve": config.forgeron.auto_approve,
-            })
-
-        sys.exit(0)
-```
-
-### Versioning des skills — par nom de fichier
+### Architecture
 
 ```
-Pas de Git, pas de SQLite de versioning.
-Les fichiers auto-générés sont nommés avec la date et jamais supprimés.
-
-atelier/skills/auto/
-  SKILL_auto_mr_review_20260327.md    ← version courante dans CLAUDE.md
-  SKILL_auto_mr_review_20260315.md    ← version précédente — conservée
-  SKILL_auto_mr_review_20260301.md    ← version encore plus ancienne
-
-Rollback :
-  Le Vigile modifie CLAUDE.md pour pointer vers une version antérieure.
-  "Vigile : utilise la version du 15 mars pour le skill mr_review"
-  → Le Vigile met à jour le chemin dans CLAUDE.md
-  → La prochaine session charge l'ancienne version
-
-CLAUDE.md — registre des skills actifs
-  # Skills actifs (modifié par Le Vigile)
-  - mr_review → atelier/skills/auto/SKILL_auto_mr_review_20260327.md
-  - rag_index → atelier/skills/manual/SKILL_rag_index.md
+relais:messages:incoming
+  ├─► [Le Portail]      (portail_group)      — pipeline normal
+  └─► [Le Commandant]   (commandant_group)   — interception des commandes
 ```
 
----
+Le Commandant possède son propre consumer group sur `relais:messages:incoming`. Pour chaque message lu :
+- Si le contenu commence par `/` → intercepte, traite, ACK, répond sur `outgoing:{channel}`
+- Sinon → ACK immédiatement sans action (le Portail traite de son côté dans son groupe)
 
-## 15. L'Archiviste — pure observer avec pipeline observation (Axe A)
+Le pipeline normal n'est jamais perturbé : les deux consumer groups sont indépendants.
 
-**Updated 2026-03-29:** Archiviste now runs two parallel consumer groups for comprehensive pipeline visibility:
-1. `archiviste_logs_group` — observes critical logs from `relais:logs` (existing)
-2. `archiviste_pipeline_group` — observes all pipeline streams (NEW)
+### Commandes supportées
 
-```python
-# archiviste/main.py
-class Archiviste:
-    """
-    Pure observer — consumes relais:logs Stream + pipeline streams + relais:events:* Pub/Sub.
-    Writes to JSONL + SQLite.
-    Never publishes to Redis.
-    Handles retention cleanup on SYSTEM:cleanup_logs command.
-    """
-
-    async def run(self):
-        # Consumer group 1: Critical logs
-        log_consumer = StreamConsumer(
-            redis=self.redis, stream="relais:logs",
-            group="archiviste_logs_group", consumer="archiviste-logs-1"
-        )
-        await log_consumer.ensure_group()
-
-        # Consumer group 2: Pipeline observation (NEW)
-        pipeline_consumer = StreamConsumer(
-            redis=self.redis,
-            group="archiviste_pipeline_group", consumer="archiviste-pipeline-1"
-        )
-        await pipeline_consumer.ensure_group()
-
-        pubsub = self.redis.pubsub()
-        await pubsub.psubscribe("relais:events:*")
-
-        await asyncio.gather(
-            self._consume_log_stream(log_consumer),
-            self._process_pipeline_streams(pipeline_consumer),  # NEW
-            self._consume_events(pubsub),
-        )
-
-    async def _process_pipeline_streams(self, pipeline_consumer):
-        """
-        Observes all pipeline streams (Axe A):
-        - relais:messages:incoming:* (per channel)
-        - relais:security
-        - relais:tasks
-        - relais:tasks:failed (DLQ)
-        - relais:messages:outgoing:* (per channel)
-
-        For each message, logs: [{cid[:8]}] {sender_id} → {stream} | traces={traces} | "{content_preview}..."
-        """
-        pipeline_streams = [
-            "relais:messages:incoming:discord",
-            "relais:messages:incoming:telegram",
-            "relais:security",
-            "relais:tasks",
-            "relais:tasks:failed",
-            "relais:messages:outgoing:discord",
-            "relais:messages:outgoing:telegram",
-        ]
-
-        while not self.shutdown.is_set():
-            for stream in pipeline_streams:
-                try:
-                    messages = await pipeline_consumer.read(
-                        stream=stream, count=1, block_ms=100
-                    )
-                    for msg_id, payload in messages:
-                        envelope = Envelope.from_json(payload.get("envelope", "{}"))
-                        cid = envelope.correlation_id[:8]
-                        sender = envelope.sender_id or "system"
-                        content_preview = envelope.content[:60].replace("\n", " ")
-                        traces = envelope.metadata.get("traces", [])
-
-                        self.logger.info(
-                            f"[{cid}] {sender} → {stream} | traces={traces} | \"{content_preview}...\"",
-                            extra={"stream": stream, "correlation_id": envelope.correlation_id}
-                        )
-                        await pipeline_consumer.ack(msg_id)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    self.logger.warning(f"Pipeline stream read error ({stream}): {e}")
-
-### Enriched Brick Logs (Axe B)
-
-**New in 2026-03-29:** All core bricks (Portail, Sentinelle, Atelier, Souvenir) now enrich their `relais:logs` entries with three fields:
-
-```python
-# All bricks now enrich logs with:
-enriched_log = {
-    "timestamp": time.time(),
-    "level": "info|warning|error",
-    "message": "...",
-    # NEW Axe B fields:
-    "correlation_id": envelope.correlation_id,  # UUID tracking across pipeline
-    "sender_id": envelope.sender_id,            # e.g. "discord:805123..."
-    "content_preview": envelope.content[:60].replace("\n", " "),  # first 60 chars
-}
-
-# Each brick publishes to relais:logs:
-await redis.xadd("relais:logs", enriched_log)
-```
-
-Archiviste re-emits these enriched entries with correlation_id prefix:
-
-```python
-# archiviste/main.py — in _consume_log_stream()
-cid = payload.get("correlation_id", "unknown")[:8]
-sender = payload.get("sender_id", "system")
-message = payload.get("message", "")
-# Log line: [a1b2c3d4] discord:805123... | message text
-self.logger.info(f"[{cid}] {sender} | {message}")
-```
-
-This enables:
-- End-to-end request tracking via correlation_id
-- Quick identification of message origin (sender_id)
-- Content preview for debugging without reading full messages
-
-    async def cleanup_retention(self, config: RetentionConfig):
-        """Triggered by SYSTEM:cleanup_logs from Le Veilleur."""
-        if config.jsonl_days:
-            cutoff = datetime.now() - timedelta(days=config.jsonl_days)
-            for f in Path("archiviste/logs").glob("*.jsonl"):
-                if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
-                    f.unlink()
-
-        if config.sqlite_days:
-            cutoff_ts = (datetime.now() - timedelta(days=config.sqlite_days)).isoformat()
-            await self.db.execute(
-                "DELETE FROM logs WHERE level != 'audit' AND ts < ?",
-                [cutoff_ts]
-            )
-            await self.db.execute("VACUUM")
-```
-
----
-
-## 16. Le Crieur — push proactif & multi-canal
-
-### Stratégie multi-canal sans déduplication
-
-```yaml
-# config/config.yaml
-crieur:
-  routing_strategy:
-    normal:   last_active   # 1 canal — évite le bruit quotidien
-    high:     all_active    # tous les canaux actifs — intentionnel
-    critical: all_active    # tous les canaux + notification OS native
-    # Pour high et critical : recevoir sur plusieurs canaux est voulu.
-    # L'objectif est de s'assurer que l'utilisateur voit l'alerte.
-```
-
-### Résolution des destinataires
-
-```python
-# crieur/router.py
-async def resolve_targets(self, push: PushEnvelope) -> list[tuple[str, str]]:
-    if push.target_user_id:
-        return await self._resolve_for_user(push.target_user_id, push.urgency)
-
-    if push.target_role:
-        result = []
-        for uid in await self._get_users_by_role(push.target_role):
-            result.extend(await self._resolve_for_user(uid, push.urgency))
-        return result
-
-    if push.session_id:
-        session = await self.redis.hgetall(f"relais:sessions:{push.session_id}")
-        if session:
-            return await self._resolve_for_user(session["user_id"], push.urgency)
-
-    return []
-
-async def _resolve_for_user(self, user_id: str, urgency: str) -> list[tuple[str, str]]:
-    strategy = config.crieur.routing_strategy[urgency]
-    active = await self.redis.hgetall(f"relais:active_sessions:{user_id}")
-
-    if not active:
-        preferred = config.users.get(user_id, {}).get("preferred_channel")
-        return [(user_id, preferred)] if preferred else []
-
-    channels = {ch: float(ts) for ch, ts in active.items()}
-
-    if strategy == "last_active":
-        best = max(channels.items(), key=lambda x: x[1])
-        return [(user_id, best[0])]
-    else:  # all_active — intentionnel pour high et critical
-        return [(user_id, ch) for ch in channels]
-```
-
----
-
-## 17. Le Guichet — webhooks entrants
-
-```python
-# guichet/main.py
-@app.post("/webhook/{source}")
-async def receive_webhook(source: str, request: Request,
-                           x_hub_signature: str = Header(None)):
-    if source not in SOURCES:
-        raise HTTPException(404)
-    body = await request.body()
-    secret = get_secret(f"WEBHOOK_SECRET_{source.upper()}")
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(f"sha256={expected}", x_hub_signature or ""):
-        raise HTTPException(403, "Invalid signature")
-    payload = await request.json()
-    push = PushEnvelope(source=f"guichet:{source}", ...)
-    await redis.publish("relais:push:high", push.to_json())
-    return {"status": "received"}
-```
-
----
-
-## 18. Le Vigile — administration NLP & hot reload
-
-### Hot config reload
-
-```python
-# vigile/main.py
-class Vigile:
-
-    async def handle_admin_command(self, text: str, user: User) -> str:
-        intent = await self.nlp_parser.parse(text)
-
-        match intent.action:
-            case "reload_config":
-                await self._hot_reload_config()
-                return "✅ Configuration rechargée sur toutes les briques."
-            # ... autres actions
-
-    async def _hot_reload_config(self):
-        """
-        Publishes reload signal to all bricks.
-        Each brick reloads its config section from disk.
-        No restart required.
-        """
-        await self.redis.publish("relais:admin:reload", json.dumps({
-            "action": "reload",
-            "files": ["config.yaml", "profiles.yaml",
-                      "reply_policy.yaml", "soul/SOUL.md"]
-        }))
-```
-
-```python
-# common/config_loader.py
-class ConfigWatcher:
-    """
-    Each brick subscribes to relais:admin:reload
-    and reloads its config section in memory.
-    """
-
-    async def watch(self, redis, on_reload: callable):
-        pubsub = redis.pubsub()
-        await pubsub.subscribe("relais:admin:reload")
-        async for msg in pubsub.listen():
-            if msg["type"] == "message":
-                await on_reload()
-
-# Usage in each main.py:
-# config_watcher = ConfigWatcher()
-# asyncio.create_task(config_watcher.watch(redis, lambda: reload_my_config()))
-```
-
-### Pilotage supervisord
-
-```python
-# vigile/supervisord_client.py
-class SupervisordClient:
-    def __init__(self, url="http://localhost:9001/RPC2"):
-        self.server = xmlrpc.client.ServerProxy(url)
-
-    def get_all_status(self) -> list[ProcessStatus]: ...
-    def start(self, name: str) -> bool: ...
-    def stop(self, name: str) -> bool: ...
-    def restart(self, name: str) -> bool: ...
-    def get_logs(self, name: str, offset=0, length=2000) -> str: ...
-    def start_group(self, group: str) -> bool: ...
-    def stop_group(self, group: str) -> bool: ...
-```
-
-### Exemples de commandes
-
-```
-"status de toutes les briques"
-"redémarre le relay WhatsApp"
-"recharge la config"
-"active le mode réunion pour 1h"
-"combien de tokens consommés aujourd'hui ?"
-"liste les extensions actives"
-"utilise la version du 15 mars pour le skill mr_review"
-"montre les messages en attente de debounce"
-"déclenche un backup maintenant"
-```
-
----
-
-## 19. Le Tableau — TUI bidirectionnel
-
-Layout Textual 3 colonnes avec streaming, notifications push async, et monitoring supervisord en temps réel. Les messages push arrivent sans interrompre la saisie via `call_from_thread`.
-
-```
-💬 Messages utilisateur   → fond bleu
-🤖 Réponses JARVIS        → streaming token par token
-📣 Notifications push     → fond ambre
-⚙️ Événements système     → fond gris
-```
-
----
-
-## 20. Le Tisserand — extensions intercepteurs
-
-### Règle de décision fondamentale
-
-```
-"Peut bloquer ?"  → intercepteur (Le Tisserand)
-"Observe ?"       → Redis event  (out-of-process)
-```
-
-### Intercepteurs natifs
-
-| Extension | Priority | Rôle |
+| Commande | Description | Portée |
 |---|---|---|
-| `quota-enforcer` | 5 | Bloque si quota dépassé (Redis INCR + TTL minuit) |
-| `content-filter` | 1 | Bloque patterns dangereux |
-| `custom-tools` | 50 | Injecte MCP supplémentaires par utilisateur |
+| `/clear` | Efface l'historique de la session courante | Session courante |
+| `/dnd` | Active le mode "Do Not Disturb" — suspend toutes les réponses LLM | Global (tous canaux) |
+| `/brb` | Désactive le mode DND — reprend le pipeline normal | Global (tous canaux) |
 
-### Interface développeur
+### Comportement détaillé
 
-```python
-class Interceptor(ABC):
-    name: str
-    priority: int = 100
-    required_permissions: list[str] = []
+#### `/clear`
 
-    async def on_request(self, event) -> RequestEvent | None: return event
-    async def on_stream_chunk(self, event) -> StreamChunkEvent | None: return event
-    async def on_tool_call_start(self, event) -> ToolCallStartEvent | None: return event
-    async def on_command(self, event) -> CommandEvent | None: return event
-```
+1. Le Commandant publie `{"action": "clear", "session_id": <session_id>}` sur `relais:memory:request`
+2. Le Souvenir efface :
+   - Le contexte Redis court terme (`relais:context:{session_id}`)
+   - Les messages SQLite de la session (table `messages`)
+   - Les `user_facts` sont **conservés**
+3. Le Commandant répond sur `relais:messages:outgoing:{channel}` : `"Historique effacé."`
 
-Timeout 2s par intercepteur. Exception → skippé + loggé. RELAIS ne crashe jamais à cause d'une extension.
+#### `/dnd`
+
+1. Le Commandant écrit `SET relais:state:dnd 1` dans Redis (sans TTL — persistant jusqu'au `/brb`)
+2. Le Portail consulte cette clé avant tout routage. Si présente : ACK le message sans le transmettre à La Sentinelle
+3. Le Commandant répond : `"Mode silencieux activé. Utilisez /brb pour reprendre."`
+
+#### `/brb`
+
+1. Le Commandant exécute `DEL relais:state:dnd`
+2. Le pipeline reprend normalement dès le message suivant
+3. Le Commandant répond : `"De retour ! Je vous écoute."`
+
+### Accès Redis requis
+
+| Opération | Stream / Clé |
+|---|---|
+| XREADGROUP (lecture) | `relais:messages:incoming` |
+| XADD (réponse canal) | `relais:messages:outgoing:*` |
+| XADD (effacement mémoire) | `relais:memory:request` |
+| SET / DEL (état DND) | `relais:state:dnd` |
+
+Le Portail doit avoir accès en lecture à `relais:state:dnd` (GET).
+
+### Extensibilité
+
+Toute nouvelle commande hors-LLM s'ajoute dans Le Commandant sans toucher aux autres briques. Le registre des commandes est un dictionnaire `{"/nom": handler_function}` — ajout en O(1).
+
+Les commandes inconnues sont ignorées silencieusement (ACK + pas de réponse) afin de ne pas bloquer les messages légitimes commençant par `/` sur certains canaux (ex: commandes Slack natives).
 
 ---
 
-## 21. Le Scrutateur — pure observer
+## 14. Corrélation end-to-end
 
 ```
-GET /metrics                → Prometheus
-GET /health                 → statut global
-GET /stats                  → résumé (sessions actives, coûts)
-GET /trace/{correlation_id} → chemin complet d'une requête
+Généré une seule fois par L'Aiguilleur.
+Propagé via Envelope.from_parent() dans TOUTES les enveloppes dérivées.
+Jamais régénéré.
+Inclus dans tous les events Redis et tous les logs.
+Le Scrutateur expose GET /trace/{correlation_id}.
 ```
-
-Métriques : `relais_requests_total`, `relais_tokens_total`, `relais_request_duration_seconds`, `relais_tool_calls_total`, `relais_errors_total`, `relais_active_sessions`, `relais_daily_cost_usd`, `relais_interceptor_blocks_total`.
-
-Dashboards Grafana dans `scrutateur/grafana/dashboards/`.
 
 ---
 
-## 22. SOUL.md & prompts — personnalité JARVIS multi-couches
-
-**Updated 2026-03-28:** Prompts are now organized in a structured directory layout (6 layers), assembled by `soul_assembler.py`.
+## 15. SOUL.md & prompts — personnalité JARVIS multi-couches
 
 ### Structure multi-couches des prompts
 
@@ -2277,42 +965,20 @@ prompts/
     └── vacation.md
 ```
 
-**Layer assembly order :**
+**Ordre d'assemblage :**
 
-| Order | Source | File | Always present |
+| Ordre | Source | Fichier | Toujours présent |
 |-------|--------|------|---|
-| 1 | Personality | `soul/SOUL.md` | Yes (error if missing) |
-| 2 | Role | `prompts/roles/{role}.md` | No (optional) |
-| 3 | User | `prompts/users/{sender_id}.md` | No (optional) |
-| 4 | Channel | `prompts/channels/{channel}_default.md` | No (warning if missing) |
-| 5 | Policy | `prompts/policies/{reply_policy}.md` | No (optional) |
-| 6 | Memory | Injected user facts from SQLite | No (optional) |
-
-```python
-# atelier/soul_assembler.py
-system_prompt = assemble_system_prompt(
-    prompts_dir="~/.relais/prompts",
-    channel="discord",
-    sender_id="discord:123456789",
-    user_role="admin",
-    reply_policy="in_meeting",
-    user_facts=["Préfère la concision", "Occupé jeudi 14h-15h"]
-)
-```
+| 1 | Personality | `soul/SOUL.md` | Oui (erreur si absent) |
+| 2 | Role | `prompts/roles/{role}.md` | Non (optionnel) |
+| 3 | User | `prompts/users/{sender_id}.md` | Non (optionnel) |
+| 4 | Channel | `prompts/channels/{channel}_default.md` | Non (warning si absent) |
+| 5 | Policy | `prompts/policies/{reply_policy}.md` | Non (optionnel) |
+| 6 | Memory | Faits utilisateur injectés depuis SQLite | Non (optionnel) |
 
 ### Internationalisation — SOUL.md gère tout
 
-SOUL.md instructions à JARVIS d'utiliser la langue de son interlocuteur. Le LLM détecte automatiquement la langue entrante et répond dans la même langue. Les notifications système natives (macOS/Linux) restent en français car elles sont générées par Le Crieur, pas par le LLM.
-
-```markdown
-# soul/SOUL.md (extrait)
-
-**En français par défaut.** Tu détectes automatiquement la langue de ton
-interlocuteur et tu bascules vers cette langue pour ta réponse.
-Si quelqu'un t'écrit en anglais, tu répondras en anglais.
-Si quelqu'un t'écrit en arabe, tu répondras en arabe.
-Tu ne mélanges jamais les langues dans une même réponse.
-```
+SOUL.md instruit JARVIS d'utiliser la langue de son interlocuteur. Le LLM détecte automatiquement la langue entrante et répond dans la même langue. Les notifications système natives restent en français car elles sont générées par Le Crieur, pas par le LLM.
 
 ### Construction du prompt final
 
@@ -2328,27 +994,25 @@ Message utilisateur                                      N tokens
 
 ---
 
-## 23. Profils — config/profiles.yaml complet
+## 16. Profils — config/profiles.yaml complet
 
 ```yaml
 profiles:
 
-  # ── Human profiles — SOUL applied ────────────────────────────────────────
+  # ── Profils humains — SOUL appliqué ──────────────────────────────────────
 
   ADMIN:
     type: human
     apply_soul: true
-    model: claude-opus-4-6
-    base_url: http://localhost:4000
+    model: anthropic:claude-opus-4-6
     memory: { context: true, long_term: true, scope: global }
     allowed_tools: ["*"]
     allowed_mcp: ["*"]
     sub_agent_limits: { max_depth: 2, max_token_budget: 50000 }
-    llm_resilience:
-      retries: 3
-      backoff_base: 2
-      fallback_model: llama3.2
-      fallback_base_url: http://localhost:11434
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]
+      fallback_model: ollama:llama3.2
     guardrails:
       max_tokens_per_day: null
       forbidden_bash_patterns: []
@@ -2357,17 +1021,15 @@ profiles:
   SUPERVISOR:
     type: human
     apply_soul: true
-    model: claude-sonnet-4-6
-    base_url: http://localhost:4000
+    model: anthropic:claude-sonnet-4-6
     memory: { context: true, long_term: true, scope: own }
     allowed_tools: [Read, "Bash(git *)", "Bash(docker ps*)", "Bash(docker logs*)"]
     allowed_mcp: ["mcp__gitlab__*", mcp__brave__search, mcp__jcodemunch__read_file]
     sub_agent_limits: { max_depth: 1, max_token_budget: 20000 }
-    llm_resilience:
-      retries: 3
-      backoff_base: 2
-      fallback_model: llama3.2
-      fallback_base_url: http://localhost:11434
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]
+      fallback_model: ollama:llama3.2
     guardrails:
       max_tokens_per_day: 200000
       forbidden_bash_patterns: ["rm *", "sudo *", "curl * | bash"]
@@ -2376,102 +1038,111 @@ profiles:
   USER:
     type: human
     apply_soul: true
-    model: claude-haiku-4-5
-    base_url: http://localhost:4000
+    model: anthropic:claude-haiku-4-5
     memory: { context: true, long_term: true, scope: own }
     allowed_tools: [Read]
     allowed_mcp: [mcp__brave__search]
     sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    llm_resilience:
-      retries: 3
-      backoff_base: 2
-      fallback_model: llama3.2
-      fallback_base_url: http://localhost:11434
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]
+      fallback_model: ollama:llama3.2
       fallback_message: "Service momentanément limité, je continue avec un modèle local."
     guardrails:
       max_tokens_per_day: 50000
       forbidden_bash_patterns: ["*"]
       forbidden_topics: [credentials, "internal system"]
 
-  # ── Technical conversational — SOUL applied ───────────────────────────────
+  # ── Profils conversationnels — SOUL appliqué ──────────────────────────────
 
   AUTO_REPLY:
     type: auto_reply
     apply_soul: true
-    model: claude-sonnet-4-6
-    base_url: http://localhost:4000
+    model: anthropic:claude-sonnet-4-6
     memory: { context: true, long_term: true, scope: sender }
     allowed_tools: [Read, mcp__calendar__read_agenda, mcp__brave__search]
     allowed_mcp: ["mcp__calendar__*", mcp__brave__search]
     sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    llm_resilience:
-      retries: 3
-      backoff_base: 2
-      fallback_model: llama3.2
-      fallback_base_url: http://localhost:11434
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]
+      fallback_model: ollama:llama3.2
     guardrails:
       max_tokens_per_response: 500
       forbidden_topics: [credentials, "banking data"]
       mandatory_signature: "— JARVIS, assistant de Benjamin"
       max_sub_agents: 0
 
-  # ── Silent technical — no SOUL ────────────────────────────────────────────
+  # ── Profils techniques silencieux — pas de SOUL ───────────────────────────
 
   SUB_AGENT:
     type: technical
     apply_soul: false
-    model: qwen3-coder-30b
-    base_url: http://localhost:11434
+    model: ollama:qwen3-coder-30b
     memory: { context: true, long_term: false, scope: task }
     allowed_tools: [Read, "Bash(git *)", "mcp__jcodemunch__*"]
     allowed_mcp: ["mcp__jcodemunch__*", mcp__gitlab__get_mr]
     sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    llm_resilience:
-      retries: 2
-      backoff_base: 1
-      fallback_model: null   # pas de fallback pour les sous-agents
+    resilience:
+      retry_attempts: 2
+      retry_delays: [1, 3]
+      fallback_model: null
     guardrails:
       max_tokens_per_turn: 2000
 
   SCHEDULER_AGENT:
     type: technical
     apply_soul: false
-    model: claude-haiku-4-5
-    base_url: http://localhost:4000
+    model: anthropic:claude-haiku-4-5
     memory: { context: false, long_term: true, scope: global }
     allowed_tools: [Read, "mcp__gitlab__*", "mcp__calendar__*", mcp__brave__search]
     allowed_mcp: ["*"]
     sub_agent_limits: { max_depth: 1, max_token_budget: 10000 }
-    llm_resilience:
-      retries: 3
-      backoff_base: 2
-      fallback_model: llama3.2
-      fallback_base_url: http://localhost:11434
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]
+      fallback_model: ollama:llama3.2
     guardrails:
       max_tokens_per_run: 5000
 
   LEARNER_AGENT:
     type: technical
     apply_soul: false
-    model: claude-sonnet-4-6
-    base_url: http://localhost:4000
+    model: anthropic:claude-sonnet-4-6
     memory: { context: false, long_term: false, scope: task }
     allowed_tools: [Read, Write]
     allowed_mcp: []
     sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    llm_resilience:
-      retries: 3
-      backoff_base: 2
+    resilience:
+      retry_attempts: 3
+      retry_delays: [2, 5, 15]
       fallback_model: null
     guardrails:
       max_tokens_per_run: 10000
+
+  memory_extractor:
+    model: glm-4.7-flash
+    temperature: 0.1
+    max_tokens: 512
+    max_turns: 1
+    stream: false
+    memory:
+      short_term_messages: 0
+    allowed_tools: null
+    allowed_mcp: null
+    guardrails: []
+    memory_scope: own
+    resilience:
+      retry_attempts: 2
+      retry_delays: [1, 3]
+      fallback_model: null
 ```
 
 ---
 
-## 24. Politique de réponse automatique
+## 17. Politique de réponse automatique
 
-Voir section 8. Résumé des modes :
+Voir section 9. Résumé des modes :
 
 | Mode | Comportement |
 |---|---|
@@ -2480,94 +1151,67 @@ Voir section 8. Résumé des modes :
 | `auto_immediate` | Réponse JARVIS sans délai |
 | `auto_deferred` | Attente N sec, puis JARVIS |
 
+### Suspension dynamique via commandes
+
+Le mode DND ("Do Not Disturb") peut être activé et désactivé à la volée par l'utilisateur via des commandes textuelles (voir section 24). Lorsque DND est actif, Le Portail supprime silencieusement tous les messages entrants avant tout routage vers La Sentinelle — aucune réponse LLM n'est produite.
+
+| Commande | Effet |
+|---|---|
+| `/dnd` | Active le mode DND global — Le Portail ignore tous les messages |
+| `/brb` | Désactive le mode DND — reprise normale du pipeline |
+
 ---
 
-## 25. Gestion des médias
+## 18. Gestion des médias
 
 ### Principe
 
-Les médias (images, audio, documents) sont stockés temporairement dans `media/` avec un TTL de 24h. L'agent ne voit pas directement le fichier — un lien local est injecté dans le prompt.
+Les médias (images, audio, documents) sont stockés temporairement dans `~/.relais/media/` avec un TTL de 24h. L'agent ne voit pas directement le fichier — une référence locale (`MediaRef`) est injectée dans l'Envelope et transformée en section dans le prompt.
 
-```python
-# aiguilleur/base.py
-async def handle_media(self, raw_media: bytes, mime_type: str,
-                       sender_id: str) -> MediaRef:
-    """
-    Stores media temporarily and returns a reference.
-    Called by each relay when a media message is received.
-    """
-    media_id = str(uuid4())
-    ext = mime_to_extension(mime_type)
-    path = Path(f"media/{media_id}.{ext}")
-    path.write_bytes(raw_media)
+**Champ `media_refs` de l'Envelope :**
 
-    # TTL via a Redis key — cleaned up by Le Veilleur
-    await self.redis.setex(f"relais:media:{media_id}", 86400, str(path))
-
-    return MediaRef(
-        media_id=media_id,
-        path=str(path),
-        mime_type=mime_type,
-        size_bytes=len(raw_media),
-        expires_in_hours=24
-    )
-```
-
-```python
-# portail/prompt_loader.py
-def inject_media_into_prompt(prompt: str, media_refs: list[MediaRef]) -> str:
-    """
-    Injects media references into the task prompt.
-    The agent can reference the file path — it does not see the binary content.
-    """
-    if not media_refs:
-        return prompt
-
-    media_section = "\n\n## Fichiers joints\n"
-    for ref in media_refs:
-        media_section += (
-            f"- [{ref.mime_type}] {ref.path} "
-            f"({ref.size_bytes // 1024} Ko) "
-            f"— disponible pendant {ref.expires_in_hours}h\n"
-        )
-    return prompt + media_section
-```
+| Champ | Type | Description |
+|-------|------|-------------|
+| `media_id` | str | UUID unique |
+| `path` | str | Chemin local dans `~/.relais/media/` |
+| `mime_type` | str | Type MIME |
+| `size_bytes` | int | Taille en octets |
+| `expires_in_hours` | int | TTL (24h) |
 
 ### Nettoyage
 
-Le Veilleur nettoie les fichiers médias expirés dans son tick quotidien :
-
-```markdown
-# HEARTBEAT.md
-## Media cleanup
-- Cadence: daily at 03:00
-- Prompt: SYSTEM:cleanup_media
-  Supprime les fichiers dans media/ dont la clé Redis relais:media:* a expiré.
-```
-
-### Enveloppe — champ media
-
-```python
-@dataclass
-class Envelope:
-    # ... champs existants ...
-    media_refs: list[MediaRef] = field(default_factory=list)
-```
+Le Veilleur nettoie les fichiers médias expirés lors de son tick quotidien (`SYSTEM:cleanup_media`). Les fichiers dont la clé Redis `relais:media:{media_id}` a expiré sont supprimés.
 
 ---
 
-## 26. Système d'extensions
+## 19. Système d'extensions
 
 ```
 INTERCEPTEUR (tisserand/)  In-process · Python · 2s timeout · return None = blocage
 OBSERVER (relais:events:*) Out-of-process · Tout langage · Fire & forget
 ```
 
+**Règle de décision fondamentale :**
+```
+"Peut bloquer ?"  → intercepteur (Le Tisserand)
+"Observe ?"       → Redis event  (out-of-process)
+```
+
+### Intercepteurs natifs
+
+| Extension | Priority | Rôle |
+|---|---|---|
+| `quota-enforcer` | 5 | Bloque si quota dépassé (Redis INCR + TTL minuit) |
+| `content-filter` | 1 | Bloque patterns dangereux |
+| `custom-tools` | 50 | Injecte MCP supplémentaires par utilisateur |
+
+**Interface intercepteur :** `on_request`, `on_stream_chunk`, `on_tool_call_start`, `on_command` — timeout 2s par intercepteur, exception → skippé + loggé, RELAIS ne crashe jamais à cause d'une extension.
+
 Observer tiers — aucun SDK requis, juste un client Redis avec compte ACL. Exemples dans `observers/`.
 
 ---
 
-## 27. Sécurité
+## 20. Sécurité
 
 ### .env — secrets complets
 
@@ -2587,19 +1231,18 @@ REST_API_KEY=...
 
 # Redis
 REDIS_PASSWORD=...
-REDIS_PASS_RELAY=...
-REDIS_PASS_GATEWAY=...
-REDIS_PASS_SENTINEL=...
-REDIS_PASS_WORKSHOP=...
-REDIS_PASS_MEMORY=...
-REDIS_PASS_SCHEDULER=...
-REDIS_PASS_HERALD=...
-REDIS_PASS_LEARNER=...
-REDIS_PASS_ARCHIVIST=...
-REDIS_PASS_WARDEN=...
-REDIS_PASS_INTAKE=...
-REDIS_PASS_INSPECTOR=...
-REDIS_PASS_WEAVER=...
+REDIS_PASS_AIGUILLEUR=...
+REDIS_PASS_PORTAIL=...
+REDIS_PASS_SENTINELLE=...
+REDIS_PASS_ATELIER=...
+REDIS_PASS_SOUVENIR=...
+REDIS_PASS_VEILLEUR=...
+REDIS_PASS_CRIEUR=...
+REDIS_PASS_FORGERON=...
+REDIS_PASS_ARCHIVISTE=...
+REDIS_PASS_VIGILE=...
+REDIS_PASS_SCRUTATEUR=...
+REDIS_PASS_TISSERAND=...
 
 # MCP servers
 GITLAB_TOKEN=...
@@ -2618,31 +1261,11 @@ BACKUP_PATH=/Volumes/Backup/relais
 
 ### Graceful shutdown
 
-```python
-class GracefulShutdown:
-    def setup(self): ...          # handlers SIGTERM + SIGINT
-    def is_set(self) -> bool: ...
-    def track(self, task): ...
-    async def wait_for_tasks(self): ...
-```
-
-`stopwaitsecs` supervisord > timeout Python pour chaque brique.
+Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking des tâches async en vol, attente de fin avant exit. Le `stopwaitsecs` supervisord doit être supérieur au timeout Python de chaque brique.
 
 ---
 
-## 28. Corrélation end-to-end
-
-```
-Généré une seule fois par L'Aiguilleur.
-Propagé via Envelope.from_parent() dans TOUTES les enveloppes dérivées.
-Jamais régénéré.
-Inclus dans tous les events Redis et tous les logs.
-Le Scrutateur expose GET /trace/{correlation_id}.
-```
-
----
-
-## 29. Structure complète du projet
+## 21. Structure du projet
 
 ```
 /opt/relais/                           ← Installation système (code uniquement)
@@ -2651,6 +1274,7 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 ├── .env                               ← JAMAIS committé
 ├── .gitignore
 ├── supervisord.conf
+├── pyproject.toml
 ├── README.md
 │
 ├── config/                            ← Templates système (*.default)
@@ -2659,8 +1283,7 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │   ├── users.yaml.default
 │   ├── reply_policy.yaml.default
 │   ├── mcp_servers.yaml.default
-│   ├── redis.conf                     ← reste dans système (Unix socket)
-│   ├── litellm.yaml
+│   ├── redis.conf
 │   └── HEARTBEAT.md.default
 │
 ├── soul/                              ← Templates SOUL par défaut
@@ -2670,11 +1293,17 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │       └── SOUL_professional.md.default
 │
 ├── prompts/                           ← Prompts système par défaut
-│   ├── whatsapp_default.md
-│   ├── telegram_default.md
-│   ├── out_of_hours.md
-│   ├── vacation.md
-│   └── in_meeting.md
+│   ├── channels/
+│   │   ├── discord_default.md
+│   │   ├── telegram_default.md
+│   │   └── whatsapp_default.md
+│   ├── policies/
+│   │   ├── out_of_hours.md
+│   │   ├── vacation.md
+│   │   └── in_meeting.md
+│   └── roles/
+│       ├── admin.md
+│       └── user.md
 │
 ├── common/
 │   ├── envelope.py                    ← Envelope + PushEnvelope + MediaRef
@@ -2688,18 +1317,14 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │   └── markdown_converter.py
 │
 ├── aiguilleur/
-│   ├── base.py
-│   ├── telegram/main.py
-│   ├── discord/main.py
-│   ├── slack/main.py
-│   ├── matrix/main.py
-│   ├── teams/main.py
-│   ├── rest/main.py                   ← API Key auth + /docs Swagger
-│   ├── tui/main.py
-│   ├── whatsapp/
-│   │   ├── index.js
-│   │   └── package.json
-│   └── signal/run.sh
+│   ├── main.py                        ← AiguilleurManager (processus unifié)
+│   ├── base.py                        ← AiguilleurBase ABC
+│   ├── channel_config.py
+│   └── channels/
+│       ├── discord/adapter.py
+│       ├── telegram/adapter.py
+│       ├── slack/adapter.py
+│       └── rest/adapter.py
 │
 ├── portail/
 │   ├── main.py
@@ -2707,76 +1332,40 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │   └── prompt_loader.py
 │
 ├── sentinelle/
-│   ├── main.py
-│   ├── acl.py
-│   └── guardrails.py
+│   └── main.py
 │
 ├── atelier/
 │   ├── main.py
-│   ├── executor.py
+│   ├── agent_executor.py
+│   ├── mcp_adapter.py
+│   ├── mcp_session_manager.py
+│   ├── tools.py                       ← list_skills + read_skill
+│   ├── mcp_loader.py
+│   ├── profile_loader.py
 │   ├── soul_assembler.py
-│   └── debounce.py
+│   └── stream_publisher.py
 │
 ├── souvenir/
 │   ├── main.py
 │   ├── context_store.py
 │   ├── long_term_store.py
+│   ├── memory_extractor.py
+│   ├── models.py
 │   └── migrations/
 │
-├── veilleur/
-│   ├── main.py
-│   ├── backup_handler.py
-│   └── cleanup_handler.py
-│
-├── forgeron/
-│   ├── main.py
-│   ├── pattern_analyzer.py
-│   └── skill_generator.py
-│
 ├── archiviste/
-│   ├── main.py
-│   └── cleanup_retention.py
+│   └── main.py
 │
-├── crieur/
-│   ├── main.py
-│   ├── router.py
-│   └── formatter.py
-│
-├── guichet/
-│   ├── main.py
-│   ├── sources/
-│   └── webhook_acl.py
-│
-├── vigile/
-│   ├── main.py
-│   ├── supervisord_client.py
-│   └── nlp_parser.py
-│
-├── tableau/
-│   ├── main.py
-│   ├── app.py
-│   ├── screens/
-│   └── widgets/
-│
-├── tisserand/
-│   ├── main.py
-│   ├── events.py
-│   └── extension_base.py
-│
-├── scrutateur/
-│   ├── main.py
-│   └── grafana/
-│
-├── mcp/
+├── mcp/                               ← MCP servers globaux supervisord
 │   ├── calendar/server.py
 │   └── brave-search/server.js
 │
-├── extensions/
+├── extensions/                        ← Intercepteurs Le Tisserand
 │   ├── quota-enforcer/
 │   ├── content-filter/
 │   └── custom-tools/
 │
-├── observers/
+├── observers/                         ← Exemples observers out-of-process
 │   ├── example_python.py
 │   ├── example_node.js
 │   └── example_go.go
@@ -2786,14 +1375,14 @@ Le Scrutateur expose GET /trace/{correlation_id}.
     ├── integration/
     └── e2e/
 
-─────────────────────────────────────────────────────────────────────────
+─────────────────────────────────────────────────────────────────────
 
 ~/.relais/                             ← Répertoire utilisateur (données & config)
 │                                         Résolu par get_relais_home()
 │                                         Override via RELAIS_HOME=...
 │                                         Créé automatiquement au 1er lancement
 ├── config/
-│   ├── config.yaml                    ← surcharge /opt/relais/config/*.default
+│   ├── config.yaml
 │   ├── profiles.yaml
 │   ├── users.yaml
 │   ├── reply_policy.yaml
@@ -2801,38 +1390,38 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │   └── HEARTBEAT.md
 │
 ├── soul/
-│   ├── SOUL.md                        ← personnalité JARVIS personnalisée
+│   ├── SOUL.md
 │   └── variants/
 │       ├── SOUL_concise.md
 │       └── SOUL_professional.md
 │
-├── prompts/                           ← prompts personnalisés
+├── prompts/
 │   ├── marie.md
 │   └── family.md
 │
 ├── skills/
-│   ├── CLAUDE.md                      ← registre skills actifs (Le Vigile met à jour)
-│   ├── manual/                        ← skills écrits à la main
+│   ├── CLAUDE.md                      ← registre skills actifs
+│   ├── manual/
 │   │   └── SKILL_my_custom.md
-│   └── auto/                          ← générés par Le Forgeron
+│   └── auto/
 │       └── SKILL_auto_mr_review_20260327.md
 │
-├── media/                             ← fichiers médias temporaires (TTL 24h)
+├── media/                             ← TTL 24h
 │
-├── logs/                              ← L'Archiviste écrit ici
-│   ├── relais.db                      ← SQLite L'Archiviste + Le Souvenir
+├── logs/
+│   ├── relais.db
 │   └── YYYY-MM-DD.jsonl
 │
-└── backup/                            ← backups (si backup.path non configuré)
+└── backup/
 ```
 
 ---
 
-## 30. La Charte RELAIS v12 — définitive
+## 22. La Charte RELAIS
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    LA CHARTE RELAIS v12                         │
+│                      LA CHARTE RELAIS                           │
 ├─────────────────────────────────────────────────────────────────┤
 │  ARCHITECTURE                                                    │
 │  1.  UNE BRIQUE = UNE RESPONSABILITÉ                            │
@@ -2850,7 +1439,7 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │  INFRASTRUCTURE                                                  │
 │  6.  REDIS = Unix socket — port TCP = 0 — ACL par brique       │
 │  7.  SUPERVISORD gère les processus — Le Vigile via XML-RPC     │
-│  8.  MCP globaux dans supervisord — contextuels via SDK         │
+│  8.  MCP globaux dans supervisord — contextuels via L'Atelier   │
 │  9.  SECRETS dans .env — jamais dans config.yaml               │
 │  10. GRACEFUL SHUTDOWN — SIGTERM → finit les tâches in-flight  │
 │                                                                  │
@@ -2858,7 +1447,7 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 │  11. STREAMS pour topics critiques — PUB/SUB pour monitoring   │
 │  12. relais:logs → Stream (audit ne se perd jamais)            │
 │  13. PUSH high/critical → tous canaux actifs (intentionnel)    │
-│  14. WEBHOOKS via Le Guichet — HMAC avant publication          │
+│  14. WEBHOOKS via Aiguilleur/rest — HMAC avant publication     │
 │  15. CORRELATION_ID via Envelope.from_parent() — une seule fois│
 │  16. HOT RELOAD via relais:admin:reload — pas de redémarrage   │
 │                                                                  │
@@ -2901,63 +1490,198 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 
 ---
 
-## Annexe A — Stack technique
+## 23. Planifié — Briques futures
 
-| Lib | Version | Rôle |
-|---|---|---|
-| supervisord | ≥ 4.x | Gestion processus |
-| Redis | ≥ 7.0 | Pub/Sub + Streams |
-| LiteLLM | ≥ 1.50 | Proxy LLM multi-modèles |
-| claude-agent-sdk | latest | Exécution agents |
-| FastAPI | ≥ 0.115 | REST relay + Guichet |
-| Textual | ≥ 1.0 | Le Tableau TUI |
-| SQLModel | ≥ 0.14 | Le Souvenir |
-| Alembic | ≥ 1.13 | Migrations DB |
-| APScheduler | ≥ 4.x | Le Veilleur |
-| Pydantic v2 | ≥ 2.9 | Validation config |
-| structlog | ≥ 24.x | Logs structurés |
-| prometheus-client | ≥ 0.20 | /metrics |
-| aiohttp | ≥ 3.9 | Loki, ES, webhooks |
-| pytz | latest | Fuseaux horaires |
-| python-dotenv | ≥ 1.0 | Chargement .env |
-| python-telegram-bot | ≥ 21 | Relay Telegram |
-| discord.py | ≥ 2.4 | Relay Discord |
-| slack-bolt | ≥ 1.20 | Relay Slack |
-| matrix-nio | ≥ 0.24 | Relay Matrix |
-| botbuilder-python | ≥ 4.x | Relay Teams |
-| Baileys (Node.js) | ≥ 6.7 | Relay WhatsApp |
-| signal-cli (Java) | ≥ 0.13 | Relay Signal |
+Les briques de cette section sont entièrement spécifiées fonctionnellement mais pas encore implémentées.
 
 ---
 
-## Annexe B — Estimation de complexité
+### 🌙 Le Veilleur — planification, backup, rétention
 
-| Couche | Effort | Complexité |
-|---|---|---|
-| Infrastructure (supervisord, Redis, MCP) | 3-4 j | Faible |
-| common/ (envelope, streams, shutdown, markdown) | 4-5 j | Faible |
-| L'Aiguilleur — canaux natifs Python | 1-2 j / canal | Faible |
-| Bridges WhatsApp / Signal | 3-5 j | Moyenne |
-| Le Portail + politique de réponse | 4-5 j | Moyenne |
-| La Sentinelle + ACL + guardrails | 3-4 j | Faible |
-| L'Atelier (résilience LLM + limites sous-agents) | 6-8 j | Moyenne |
-| Le Souvenir (compaction + pagination) | 5-6 j | Moyenne |
-| Le Veilleur (backup + rétention) | 3-4 j | Faible |
-| Le Forgeron (batch) | 4-6 j | Moyenne |
-| L'Archiviste (observer + rétention) | 2-3 j | Faible |
-| Le Crieur + routing multi-canal | 3-4 j | Moyenne |
-| Le Guichet (webhooks) | 2-3 j | Faible |
-| Le Vigile + NLP + hot reload | 5-6 j | Moyenne |
-| Le Tableau (TUI Textual) | 6-8 j | Moyenne |
-| Le Tisserand + extensions natives | 4-5 j | Moyenne |
-| Le Scrutateur + Grafana | 3-4 j | Faible |
-| SOUL.md + profils + médias | 3-4 j | Faible |
-| Tests (unit + integration + e2e) | ongoing | Variable |
-| **MVP fonctionnel** | **~10-12 semaines** | |
+**Taxonomie :** Pure Publisher — pas de LLM, pas d'exécution directe d'agents.
+
+**Rôle :** Publie des `AgentTask` dans `relais:tasks` selon les tâches définies dans `HEARTBEAT.md`. L'Atelier les exécute avec le profil `SCHEDULER_AGENT` sous l'identité `usr_system`.
+
+**HEARTBEAT.md — tâches configurées :**
+
+```yaml
+# config/HEARTBEAT.md
+
+## MR GitLab check
+- Cadence: every 15 minutes
+- Prompt: Scanne les nouvelles MR assignées à Benjamin. Signale uniquement les nouvelles.
+
+## Email check
+- Cadence: every 30 minutes (08:00-21:00 only)
+- Prompt: Vérifie les emails urgents.
+
+## Calendar check
+- Cadence: every 2 hours (08:00-22:00 only)
+- Prompt: Événements dans les 24h à venir.
+
+## System health
+- Cadence: daily at 03:00
+- Prompt: Vérification disque, mémoire.
+
+## Media cleanup
+- Cadence: daily at 03:00
+- Prompt: SYSTEM:cleanup_media
+
+## Log retention cleanup
+- Cadence: daily at 03:30
+- Prompt: SYSTEM:cleanup_logs
+
+## Backup
+- Cadence: daily at 04:00 (if backup.enabled in config)
+- Prompt: SYSTEM:backup
+
+## Auto-forgeron run
+- Cadence: daily at 02:00
+- Prompt: SYSTEM:start_forgeron
+```
+
+**Backup — configurable :**
+
+```yaml
+# config/config.yaml
+backup:
+  enabled: true
+  path: "/Volumes/Backup/relais"
+  files:
+    - souvenir/relais_memory.db
+    - archiviste/logs/relais.db
+    - skills/
+    - soul/
+    - config/
+  sqlite_backup_api: true   # utilise .backup() SQLite (safe en concurrent)
+  rsync_options: "-av --delete"
+```
+
+**Rétention :**
+
+```yaml
+# config/config.yaml
+retention:
+  jsonl_days: 90          # fichiers JSONL
+  sqlite_days: 365        # enregistrements SQLite L'Archiviste
+  audit_days: null        # logs d'audit — jamais supprimés
+  media_hours: 24         # fichiers médias temporaires
+```
 
 ---
 
-*RELAIS — Document d'Architecture v12 — 2026-03-27*
-*Updated 2026-03-28: Phase 2.2-bis — claude-agent-sdk migration, streaming, and memory extraction*
-*"Transmettre avec fiabilité, de toute origine vers toute destination."*
-*— JARVIS, assistant de Benjamin*
+### 🔧 Le Forgeron — auto-apprentissage & versioning skills
+
+**Taxonomie :** Batch Processor — lit SQLite L'Archiviste, génère des skills, publie, exit.
+
+**Rôle :** Identifie les patterns répétés dans les logs de L'Archiviste, génère des `SKILL.md` automatiques, les publie dans `relais:skills:new`. Lancé quotidiennement par Le Veilleur (`SYSTEM:start_forgeron`), `autostart=false`, `autorestart=false`.
+
+**Versioning des skills — par nom de fichier :**
+
+```
+Pas de Git, pas de SQLite de versioning.
+Les fichiers auto-générés sont nommés avec la date et jamais supprimés.
+
+~/.relais/skills/auto/
+  SKILL_auto_mr_review_20260327.md    ← version courante dans CLAUDE.md
+  SKILL_auto_mr_review_20260315.md    ← version précédente — conservée
+  SKILL_auto_mr_review_20260301.md    ← version encore plus ancienne
+
+Rollback :
+  Le Vigile modifie CLAUDE.md pour pointer vers une version antérieure.
+  → La prochaine session charge l'ancienne version
+```
+
+---
+
+### 📣 Le Crieur — push proactif & multi-canal
+
+**Taxonomie :** Transformer — consomme `relais:push:{urgency}`, résout les destinataires, publie vers `relais:notifications:{role}`.
+
+**Rôle :** Envoie des notifications proactives sur les canaux actifs de l'utilisateur. La stratégie de routage est intentionnellement multi-canal pour `high` et `critical`.
+
+```yaml
+# config/config.yaml
+crieur:
+  routing_strategy:
+    normal:   last_active   # 1 canal — évite le bruit quotidien
+    high:     all_active    # tous les canaux actifs — intentionnel
+    critical: all_active    # tous les canaux + notification OS native
+```
+
+**Résolution des destinataires :** par `target_user_id`, `target_role`, ou `session_id`. Si aucun canal actif, fallback sur le `preferred_channel` de l'utilisateur.
+
+---
+
+### 🔱 Le Vigile — administration NLP & hot reload
+
+**Taxonomie :** Admin — pilote supervisord via XML-RPC + publie `relais:admin:reload`.
+
+**Rôle :** Interprète les commandes admin en langage naturel et les traduit en actions système.
+
+**Exemples de commandes :**
+```
+"status de toutes les briques"
+"redémarre le relay WhatsApp"
+"recharge la config"
+"active le mode réunion pour 1h"
+"combien de tokens consommés aujourd'hui ?"
+"liste les extensions actives"
+"utilise la version du 15 mars pour le skill mr_review"
+"montre les messages en attente de debounce"
+"déclenche un backup maintenant"
+```
+
+**Hot config reload :** Le Vigile publie `relais:admin:reload` avec la liste des fichiers à recharger. Chaque brique souscrit à ce topic et recharge sa section de config en mémoire sans redémarrage.
+
+---
+
+### 📊 Le Tableau — TUI bidirectionnel
+
+**Taxonomie :** Admin + Relay — interface locale Textual, `autostart=false`.
+
+**Rôle :** Interface TUI 3 colonnes avec streaming token-par-token, notifications push async, et monitoring supervisord en temps réel. Les messages push arrivent sans interrompre la saisie.
+
+```
+💬 Messages utilisateur   → fond bleu
+🤖 Réponses JARVIS        → streaming token par token
+📣 Notifications push     → fond ambre
+⚙️ Événements système     → fond gris
+```
+
+---
+
+### 🧵 Le Tisserand — extensions intercepteurs
+
+**Taxonomie :** Interceptor Chain — in-process dans L'Atelier.
+
+**Rôle :** Chaîne d'intercepteurs Python exécutés in-process avant/pendant l'exécution agentique. Timeout 2s par intercepteur. Exception → skippé + loggé. RELAIS ne crashe jamais à cause d'une extension.
+
+**Interface développeur :**
+
+| Hook | Rôle |
+|------|------|
+| `on_request` | Avant envoi au LLM |
+| `on_stream_chunk` | Sur chaque token streamé |
+| `on_tool_call_start` | Avant exécution d'un outil |
+| `on_command` | Sur commandes admin |
+
+`return None` = blocage du message. `return event` = passage à l'intercepteur suivant.
+
+---
+
+### 🔍 Le Scrutateur — monitoring pure observer
+
+**Taxonomie :** Pure Observer — consomme `relais:events:*` (Pub/Sub), expose métriques Prometheus.
+
+**Endpoints :**
+```
+GET /metrics                → Prometheus
+GET /health                 → statut global
+GET /stats                  → résumé (sessions actives, coûts)
+GET /trace/{correlation_id} → chemin complet d'une requête
+```
+
+**Métriques exposées :** `relais_requests_total`, `relais_tokens_total`, `relais_request_duration_seconds`, `relais_tool_calls_total`, `relais_errors_total`, `relais_active_sessions`, `relais_daily_cost_usd`, `relais_interceptor_blocks_total`.
+
+Dashboards Grafana dans `scrutateur/grafana/dashboards/`.
