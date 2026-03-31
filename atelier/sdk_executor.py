@@ -4,6 +4,16 @@ Uses the ``anthropic`` Python SDK (AsyncAnthropic) with an explicit tool-use
 agentic loop. MCP stdio servers are started via the ``mcp`` Python SDK.
 Compatible with LiteLLM proxy via ANTHROPIC_BASE_URL.
 
+**Why messages.create() instead of messages.stream():**
+The agentic loop uses ``client.messages.create()`` (non-streaming) for ALL
+turns. When streaming through LiteLLM proxy, ``input_json_delta`` SSE events
+are silently dropped, resulting in ``block.input == {}`` for ``tool_use``
+blocks — the model calls ``read_skill`` but the ``skill_name`` argument never
+arrives. ``create()`` returns the fully-assembled JSON object, making
+``block.input`` reliable. The ``stream_callback`` is still supported: each
+``text`` block in the response is forwarded to the callback immediately after
+the API call returns, which is sufficient for Discord/Telegram rendering.
+
 Error contract (critical for at-least-once delivery):
 - ``anthropic.APIStatusError``  → non-retriable, wrapped in ``SDKExecutionError``
   → caller ACKs and routes to DLQ.
@@ -14,7 +24,6 @@ Error contract (critical for at-least-once delivery):
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import inspect
 import logging
@@ -40,7 +49,64 @@ class SDKExecutionError(Exception):
     """Raised when the agentic loop encounters a non-retriable failure.
 
     Routed to the DLQ by Atelier and ACKed so the message is not redelivered.
+
+    Attributes:
+        response_body: Raw response body from the API (truncated to 4000 chars),
+            useful for DLQ diagnostics.
     """
+
+    def __init__(self, message: str, response_body: str | None = None) -> None:
+        super().__init__(message)
+        self.response_body: str | None = response_body
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _classify_api_error(exc: anthropic.APIStatusError) -> str:
+    """Classify the origin of an APIStatusError as litellm_proxy, upstream_model, or unknown.
+
+    Args:
+        exc: The APIStatusError to inspect.
+
+    Returns:
+        One of ``"litellm_proxy"``, ``"upstream_model"``, or ``"unknown"``.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return "unknown"
+    error = body.get("error", {})
+    if not isinstance(error, dict):
+        return "unknown"
+    msg = str(error.get("message", "")).lower()
+    err_type = str(error.get("type", "")).lower()
+    if "litellm" in msg or err_type in ("none", ""):
+        return "litellm_proxy"
+    # Anthropic upstream signals: overloaded_error, api_error; OpenAI: server_error
+    if err_type in ("overloaded_error", "api_error", "server_error"):
+        return "upstream_model"
+    return "unknown"
+
+
+def _extract_response_body(exc: anthropic.APIStatusError, max_chars: int = 2000) -> str:
+    """Extract a human-readable, truncated body string from an APIStatusError.
+
+    Args:
+        exc: The exception to inspect.
+        max_chars: Maximum length of the returned string.
+
+    Returns:
+        Body text, truncated to ``max_chars``.
+    """
+    body = getattr(exc, "body", None)
+    if body is not None:
+        text = str(body)
+    else:
+        response = getattr(exc, "response", None)
+        text = getattr(response, "text", "") or ""
+    return text[:max_chars]
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +190,7 @@ class SDKExecutor:
             envelope: Current task envelope.
             context: Prior conversation turns from Souvenir.
             stream_callback: Optional async callable invoked with each text
-                chunk as it arrives from the model.
+                block as it arrives from the model (per-block, not per-token).
 
         Returns:
             Complete assistant reply (all text blocks across all turns joined).
@@ -142,22 +208,65 @@ class SDKExecutor:
         try:
             async with contextlib.AsyncExitStack() as stack:
                 mcp_tools = await mcp_manager.start_all(stack)
-                all_tools = self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
+                all_tools = self._get_anthropic_tools(mcp_tools)
                 return await self._run_agentic_loop(
                     messages, all_tools, mcp_manager, stream_callback
                 )
-        except (anthropic.RateLimitError, anthropic.InternalServerError):
-            # Transient errors — propagate unwrapped so Atelier returns False,
-            # leaving the message in the PEL for automatic re-delivery (no ACK).
+        except (anthropic.RateLimitError, anthropic.InternalServerError) as exc:
+            # Transient errors — log details then propagate unwrapped so Atelier
+            # returns False, leaving the message in the PEL for re-delivery (no ACK).
+            body_text = _extract_response_body(exc)
+            origin = _classify_api_error(exc)
+            retry_after = None
+            response = getattr(exc, "response", None)
+            if response is not None:
+                retry_after = getattr(response.headers, "get", lambda k, d=None: d)("retry-after")
+            logger.error(
+                "Transient API error %d (origin=%s, retry_after=%s): %s | body: %s",
+                exc.status_code,
+                origin,
+                retry_after,
+                exc.message,
+                body_text,
+            )
             raise
         except anthropic.APIStatusError as exc:
             # Non-retriable: bad request, auth error, quota exceeded, etc.
+            body_text = _extract_response_body(exc)
+            origin = _classify_api_error(exc)
+            logger.error(
+                "Non-retriable API error %d (origin=%s): %s | body: %s",
+                exc.status_code,
+                origin,
+                exc.message,
+                body_text,
+            )
             raise SDKExecutionError(
-                f"Anthropic API error {exc.status_code}: {exc.message}"
+                f"Anthropic API error {exc.status_code}: {exc.message}",
+                response_body=_extract_response_body(exc, max_chars=4000),
             ) from exc
         # anthropic.APIConnectionError is intentionally NOT caught here.
         # It propagates to Atelier._handle_message which returns False,
         # leaving the message in the PEL for re-delivery.
+
+    # ------------------------------------------------------------------
+    # Tool schema assembly
+    # ------------------------------------------------------------------
+
+    def _get_anthropic_tools(self, mcp_tools: list[dict]) -> list[dict]:
+        """Merge internal and MCP tool schemas into a single Anthropic-format list.
+
+        Internal tools are never capped. MCP tools are limited to
+        ``profile.mcp_max_tools`` entries (0 = no MCP tools exposed).
+
+        Args:
+            mcp_tools: Tool definitions collected from MCP servers, already in
+                Anthropic format (``{name, description, input_schema}``).
+
+        Returns:
+            Merged list ready to pass as ``tools=`` to the Anthropic API.
+        """
+        return self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
 
     # ------------------------------------------------------------------
     # Agentic loop
@@ -172,12 +281,21 @@ class SDKExecutor:
     ) -> str:
         """Multi-turn agentic loop handling tool use transparently.
 
+        Uses ``client.messages.create()`` (non-streaming) for every turn so
+        that ``block.input`` in ``tool_use`` blocks is always fully populated.
+        Streaming via LiteLLM proxy loses ``input_json_delta`` SSE events,
+        causing ``block.input == {}``. See module docstring for full rationale.
+
+        ``stream_callback`` is invoked synchronously (from the caller's
+        perspective) once per ``text`` block after each API call returns.
+        This is sufficient for real-time Discord/Telegram rendering.
+
         Args:
             messages: Structured message list to start from.
-            all_tools: Merged tool definitions (internal + MCP) in Anthropic format,
-                already assembled by the caller.
+            all_tools: Merged tool definitions (internal + MCP) in Anthropic
+                format, already assembled by the caller.
             mcp_manager: Active MCP session manager for tool dispatch.
-            stream_callback: Optional chunk callback for streaming-capable channels.
+            stream_callback: Optional async callable for per-block text output.
 
         Returns:
             Accumulated text reply across all turns.
@@ -194,25 +312,39 @@ class SDKExecutor:
             if all_tools:
                 kwargs["tools"] = all_tools
 
-            async with self._client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    full_reply += text
-                    if stream_callback is not None:
-                        await stream_callback(text)
-                final_msg = await stream.get_final_message()
+            _log = logger.info if turn == 0 else logger.debug
+            _log(
+                "API call turn %d/%d: model=%s messages=%d tools=%d system_len=%d",
+                turn + 1,
+                self._profile.max_turns,
+                self._profile.model,
+                len(messages),
+                len(all_tools),
+                len(self._soul_prompt),
+            )
 
-            if final_msg.stop_reason == "max_tokens":
+            # Non-streaming call: block.input is fully populated in the response.
+            response = await self._client.messages.create(**kwargs)
+
+            # Emit text blocks and accumulate reply.
+            for block in response.content:
+                if block.type == "text":
+                    full_reply += block.text
+                    if stream_callback is not None:
+                        await stream_callback(block.text)
+
+            if response.stop_reason == "max_tokens":
                 logger.warning(
                     "Model hit max_tokens limit (%d) — reply may be truncated",
                     self._profile.max_tokens,
                 )
                 break
-            elif final_msg.stop_reason != "tool_use":
+            elif response.stop_reason != "tool_use":
                 break
 
-            # Build assistant turn from all content blocks
+            # Build assistant turn from all content blocks.
             assistant_content = []
-            for block in final_msg.content:
+            for block in response.content:
                 if block.type == "text":
                     assistant_content.append({"type": "text", "text": block.text})
                 elif block.type == "tool_use":
@@ -220,13 +352,13 @@ class SDKExecutor:
                         "type": "tool_use",
                         "id": block.id,
                         "name": block.name,
-                        "input": block.input,
+                        "input": block.input,  # always populated via create()
                     })
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Execute each tool call and collect results
+            # Execute each tool call and collect results.
             tool_results = []
-            for block in final_msg.content:
+            for block in response.content:
                 if block.type != "tool_use":
                     continue
                 result_text = await self._call_tool(block.name, block.input, mcp_manager)
@@ -295,7 +427,7 @@ class SDKExecutor:
             context: Prior conversation turns from Souvenir.
 
         Returns:
-            List of ``{role, content}`` dicts ready for ``messages.stream()``.
+            List of ``{role, content}`` dicts ready for ``messages.create()``.
         """
         messages: list[dict] = []
 

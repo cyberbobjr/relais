@@ -1,4 +1,10 @@
-"""Unit tests for atelier.sdk_executor — uses anthropic.AsyncAnthropic mocks."""
+"""Unit tests for atelier.sdk_executor — uses anthropic.AsyncAnthropic mocks.
+
+Architecture note: SDKExecutor uses messages.create() (non-streaming) for ALL
+turns of the agentic loop. This avoids a LiteLLM proxy bug where input_json_delta
+SSE events are dropped during streaming, causing block.input == {} for tool_use
+blocks. The stream_callback is fed manually from the complete response text.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +43,7 @@ class FakeToolUseBlock:
 
 
 class FakeFinalMessage:
-    """Fake final message returned by stream.get_final_message()."""
+    """Fake Message returned by messages.create()."""
 
     def __init__(self, stop_reason: str, content: list | None = None) -> None:
         self.stop_reason = stop_reason
@@ -69,36 +75,20 @@ def _make_envelope(content: str = "Hello") -> Envelope:
     )
 
 
-def _make_stream_cm(
-    chunks: list[str],
+def _make_create_response(
     stop_reason: str = "end_turn",
     content: list | None = None,
-):
-    """Build an async context manager that mimics client.messages.stream().
+) -> FakeFinalMessage:
+    """Build a fake Message returned directly by client.messages.create().
 
     Args:
-        chunks: Text chunks yielded by text_stream.
-        stop_reason: Value of final_message.stop_reason.
-        content: List of blocks in final_message.content.
+        stop_reason: Value of message.stop_reason.
+        content: List of content blocks in the message.
 
     Returns:
-        Async context manager mock yielding a stream_obj with text_stream
-        and get_final_message().
+        FakeFinalMessage instance usable as AsyncMock return_value.
     """
-    async def _text_stream():
-        for c in chunks:
-            yield c
-
-    stream_obj = MagicMock()
-    stream_obj.text_stream = _text_stream()
-    stream_obj.get_final_message = AsyncMock(
-        return_value=FakeFinalMessage(stop_reason, content or [])
-    )
-
-    cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(return_value=stream_obj)
-    cm.__aexit__ = AsyncMock(return_value=False)
-    return cm
+    return FakeFinalMessage(stop_reason, content or [])
 
 
 def _make_executor(mock_client=None, profile=None, tools=None, mcp_servers=None):
@@ -133,10 +123,12 @@ def _make_executor(mock_client=None, profile=None, tools=None, mcp_servers=None)
 
 @pytest.mark.asyncio
 async def test_execute_returns_text_reply() -> None:
-    """execute() returns concatenated text from the stream."""
+    """execute() returns concatenated text from the response."""
     mock_client = MagicMock()
-    mock_client.messages.stream.return_value = _make_stream_cm(
-        ["Hello", " world"], stop_reason="end_turn"
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_create_response(
+            "end_turn", [FakeTextBlock("Hello"), FakeTextBlock(" world")]
+        )
     )
 
     with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
@@ -151,10 +143,12 @@ async def test_execute_returns_text_reply() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_calls_stream_callback() -> None:
-    """execute() calls stream_callback for each text chunk."""
+    """execute() calls stream_callback once per text block in the response."""
     mock_client = MagicMock()
-    mock_client.messages.stream.return_value = _make_stream_cm(
-        ["chunk1", "chunk2"], stop_reason="end_turn"
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_create_response(
+            "end_turn", [FakeTextBlock("chunk1"), FakeTextBlock("chunk2")]
+        )
     )
 
     callback_calls: list[str] = []
@@ -178,8 +172,8 @@ async def test_execute_calls_stream_callback() -> None:
 async def test_execute_no_stream_callback_works() -> None:
     """execute() works correctly when stream_callback is None."""
     mock_client = MagicMock()
-    mock_client.messages.stream.return_value = _make_stream_cm(
-        ["answer"], stop_reason="end_turn"
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_create_response("end_turn", [FakeTextBlock("answer")])
     )
 
     with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
@@ -196,13 +190,12 @@ async def test_execute_no_stream_callback_works() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_uses_profile_model_and_max_tokens() -> None:
-    """messages.stream() receives model and max_tokens from ProfileConfig."""
+    """messages.create() receives model and max_tokens from ProfileConfig."""
     mock_client = MagicMock()
-    mock_client.messages.stream.return_value = _make_stream_cm(
-        [], stop_reason="end_turn"
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_create_response("end_turn")
     )
 
-    profile = _make_profile(model="claude-haiku-4-5")
     profile = ProfileConfig(
         model="claude-haiku-4-5",
         temperature=0.5,
@@ -218,7 +211,7 @@ async def test_execute_uses_profile_model_and_max_tokens() -> None:
         )
         await executor.execute(envelope=_make_envelope(), context=[])
 
-    kwargs = mock_client.messages.stream.call_args.kwargs
+    kwargs = mock_client.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-haiku-4-5"
     assert kwargs["max_tokens"] == 512
 
@@ -242,10 +235,7 @@ async def test_execute_raises_sdk_error_on_api_status_error() -> None:
     api_err = _anthropic.APIStatusError("server error", response=mock_response, body=None)
 
     mock_client = MagicMock()
-    cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(side_effect=api_err)
-    cm.__aexit__ = AsyncMock(return_value=False)
-    mock_client.messages.stream.return_value = cm
+    mock_client.messages.create = AsyncMock(side_effect=api_err)
 
     with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
         from atelier.sdk_executor import SDKExecutor
@@ -271,10 +261,7 @@ async def test_execute_propagates_connection_error_unwrapped() -> None:
     conn_err = _anthropic.APIConnectionError(request=MagicMock())
 
     mock_client = MagicMock()
-    cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(side_effect=conn_err)
-    cm.__aexit__ = AsyncMock(return_value=False)
-    mock_client.messages.stream.return_value = cm
+    mock_client.messages.create = AsyncMock(side_effect=conn_err)
 
     with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
         from atelier.sdk_executor import SDKExecutor
@@ -297,10 +284,10 @@ async def test_execute_exits_after_max_turns() -> None:
 
     tool_block = FakeToolUseBlock("t-loop", "list_skills", {})
     # Every turn: stop_reason=tool_use — loop would run forever without the cap
-    loop_cm = _make_stream_cm(["partial "], stop_reason="tool_use", content=[tool_block])
-
-    mock_client.messages.stream.return_value = loop_cm
-    # side_effect is not set: always returns the same tool_use mock
+    loop_response = _make_create_response(
+        "tool_use", [FakeTextBlock("partial "), tool_block]
+    )
+    mock_client.messages.create = AsyncMock(return_value=loop_response)
 
     tool = InternalTool(
         name="list_skills",
@@ -318,10 +305,10 @@ async def test_execute_exits_after_max_turns() -> None:
             mcp_servers={},
             tools=[tool],
         )
-        # Must return without raising; stream is called exactly max_turns times
+        # Must return without raising; create is called exactly max_turns times
         result = await executor.execute(envelope=_make_envelope(), context=[])
 
-    assert mock_client.messages.stream.call_count == max_turns
+    assert mock_client.messages.create.call_count == max_turns
     assert "partial" in result  # text accumulated across turns
 
 
@@ -336,14 +323,12 @@ async def test_execute_handles_tool_use_loop() -> None:
     mock_client = MagicMock()
 
     tool_block = FakeToolUseBlock("tool-1", "list_skills", {})
-    turn1_content = [FakeTextBlock("thinking..."), tool_block]
-
-    turn1_cm = _make_stream_cm(
-        ["thinking..."], stop_reason="tool_use", content=turn1_content
+    turn1 = _make_create_response(
+        "tool_use", [FakeTextBlock("thinking..."), tool_block]
     )
-    turn2_cm = _make_stream_cm(["Final answer"], stop_reason="end_turn")
+    turn2 = _make_create_response("end_turn", [FakeTextBlock("Final answer")])
 
-    mock_client.messages.stream.side_effect = [turn1_cm, turn2_cm]
+    mock_client.messages.create = AsyncMock(side_effect=[turn1, turn2])
 
     tool = InternalTool(
         name="list_skills",
@@ -363,7 +348,7 @@ async def test_execute_handles_tool_use_loop() -> None:
         result = await executor.execute(envelope=_make_envelope(), context=[])
 
     assert "Final answer" in result
-    assert mock_client.messages.stream.call_count == 2
+    assert mock_client.messages.create.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -372,11 +357,10 @@ async def test_execute_injects_tool_result_into_messages() -> None:
     mock_client = MagicMock()
 
     tool_block = FakeToolUseBlock("t-1", "list_skills", {})
-    turn1_content = [tool_block]
-    turn1_cm = _make_stream_cm([], stop_reason="tool_use", content=turn1_content)
-    turn2_cm = _make_stream_cm(["done"], stop_reason="end_turn")
+    turn1 = _make_create_response("tool_use", [tool_block])
+    turn2 = _make_create_response("end_turn", [FakeTextBlock("done")])
 
-    mock_client.messages.stream.side_effect = [turn1_cm, turn2_cm]
+    mock_client.messages.create = AsyncMock(side_effect=[turn1, turn2])
 
     tool = InternalTool(
         name="list_skills",
@@ -384,13 +368,6 @@ async def test_execute_injects_tool_result_into_messages() -> None:
         input_schema={"type": "object", "properties": {}, "required": []},
         handler=lambda: "- skill_a",
     )
-
-    captured_messages: list = []
-
-    def capture_stream(**kwargs):
-        captured_messages.extend(kwargs.get("messages", []))
-        # Return the appropriate mock based on call count
-        return mock_client.messages.stream.side_effect[0]
 
     with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
         from atelier.sdk_executor import SDKExecutor
@@ -402,8 +379,8 @@ async def test_execute_injects_tool_result_into_messages() -> None:
         )
         await executor.execute(envelope=_make_envelope(), context=[])
 
-    # Second call to messages.stream must include tool_result in messages
-    second_call_messages = mock_client.messages.stream.call_args_list[1].kwargs["messages"]
+    # Second call to messages.create must include tool_result in messages
+    second_call_messages = mock_client.messages.create.call_args_list[1].kwargs["messages"]
     tool_result_msgs = [
         m for m in second_call_messages
         if m.get("role") == "user"
@@ -411,6 +388,114 @@ async def test_execute_injects_tool_result_into_messages() -> None:
         and any(b.get("type") == "tool_result" for b in m["content"])
     ]
     assert len(tool_result_msgs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression: tool_use block.input must not be empty (LiteLLM streaming bug)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_tool_use_block_input_populated_not_empty() -> None:
+    """block.input for tool_use blocks must contain the expected arguments.
+
+    Regression: using messages.stream() via LiteLLM drops input_json_delta SSE
+    events, causing block.input == {} even when the model passes arguments.
+    After the fix (messages.create()), block.input is fully populated and the
+    handler receives the correct kwargs.
+    """
+    mock_client = MagicMock()
+
+    tool_block = FakeToolUseBlock(
+        "t-read", "read_skill", {"skill_name": "python-patterns"}
+    )
+    turn1 = _make_create_response("tool_use", [tool_block])
+    turn2 = _make_create_response("end_turn", [FakeTextBlock("Here is the skill.")])
+
+    mock_client.messages.create = AsyncMock(side_effect=[turn1, turn2])
+
+    captured_skill_names: list[str] = []
+
+    def _read_skill(skill_name: str) -> str:
+        captured_skill_names.append(skill_name)
+        return f"# {skill_name} content"
+
+    tool = InternalTool(
+        name="read_skill",
+        description="Read a skill by name.",
+        input_schema={
+            "type": "object",
+            "properties": {"skill_name": {"type": "string"}},
+            "required": ["skill_name"],
+        },
+        handler=_read_skill,
+    )
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(max_turns=5),
+            soul_prompt="soul",
+            mcp_servers={},
+            tools=[tool],
+        )
+        result = await executor.execute(envelope=_make_envelope(), context=[])
+
+    assert captured_skill_names == ["python-patterns"], (
+        "read_skill handler called with empty input — messages.create() fix not applied"
+    )
+    assert "Here is the skill." in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_tool_use_input_forwarded_to_handler_as_kwargs() -> None:
+    """Tool handler receives block.input unpacked as kwargs, not as a dict.
+
+    Ensures _call_tool does handler(**tool_input), not handler(tool_input).
+    """
+    mock_client = MagicMock()
+
+    tool_block = FakeToolUseBlock(
+        "t-echo", "echo_tool", {"msg": "hello", "repeat": 2}
+    )
+    turn1 = _make_create_response("tool_use", [tool_block])
+    turn2 = _make_create_response("end_turn", [FakeTextBlock("done")])
+
+    mock_client.messages.create = AsyncMock(side_effect=[turn1, turn2])
+
+    received_kwargs: dict = {}
+
+    def _echo(msg: str, repeat: int) -> str:
+        received_kwargs.update({"msg": msg, "repeat": repeat})
+        return msg * repeat
+
+    tool = InternalTool(
+        name="echo_tool",
+        description="Echo",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "msg": {"type": "string"},
+                "repeat": {"type": "integer"},
+            },
+            "required": ["msg", "repeat"],
+        },
+        handler=_echo,
+    )
+
+    with patch("atelier.sdk_executor.anthropic.AsyncAnthropic", return_value=mock_client):
+        from atelier.sdk_executor import SDKExecutor
+        executor = SDKExecutor(
+            profile=_make_profile(max_turns=5),
+            soul_prompt="soul",
+            mcp_servers={},
+            tools=[tool],
+        )
+        await executor.execute(envelope=_make_envelope(), context=[])
+
+    assert received_kwargs == {"msg": "hello", "repeat": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -745,8 +830,8 @@ async def test_execute_logs_warning_on_max_tokens(caplog) -> None:
     import logging
 
     mock_client = MagicMock()
-    mock_client.messages.stream.return_value = _make_stream_cm(
-        ["truncated reply"], stop_reason="max_tokens"
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_create_response("max_tokens", [FakeTextBlock("truncated reply")])
     )
 
     profile = ProfileConfig(
@@ -820,3 +905,36 @@ def test_read_skill_returns_content_for_valid_skill(tmp_path) -> None:
     result = read_tool.handler(skill_name="my-skill")
     assert "My Skill" in result
     assert "Some content" in result
+
+
+@pytest.mark.unit
+def test_read_skill_finds_skill_in_subdirectory(tmp_path) -> None:
+    """read_skill finds a skill nested under a subdirectory (e.g. auto/ or manual/)."""
+    from atelier.skills_tools import make_skills_tools
+
+    auto_dir = tmp_path / "auto" / "test-hello"
+    auto_dir.mkdir(parents=True)
+    (auto_dir / "SKILL.md").write_text("# Test Hello\nHello from auto.")
+
+    tools = make_skills_tools(tmp_path)
+    read_tool = next(t for t in tools if t.name == "read_skill")
+    result = read_tool.handler(skill_name="test-hello")
+    assert "Test Hello" in result
+    assert "Hello from auto" in result
+
+
+@pytest.mark.unit
+def test_list_skills_includes_skills_from_subdirectories(tmp_path) -> None:
+    """list_skills lists skills from both auto/ and manual/ subdirectories."""
+    from atelier.skills_tools import make_skills_tools
+
+    (tmp_path / "auto" / "skill-a").mkdir(parents=True)
+    (tmp_path / "auto" / "skill-a" / "SKILL.md").write_text("# Skill A")
+    (tmp_path / "manual" / "skill-b").mkdir(parents=True)
+    (tmp_path / "manual" / "skill-b" / "SKILL.md").write_text("# Skill B")
+
+    tools = make_skills_tools(tmp_path)
+    list_tool = next(t for t in tools if t.name == "list_skills")
+    result = list_tool.handler()
+    assert "skill-a" in result
+    assert "skill-b" in result

@@ -23,12 +23,19 @@ DEFAULT_FILES = [
     ("prompts/vacation.md",          "prompts/vacation.md"),
 ]
 
-def initialize_user_dir(system_install_path: Path):
+def initialize_user_dir(system_install_path: Path | None = None):
+    """Creates the RELAIS working directory structure on first run.
+
+    Copies default templates from the system installation into the RELAIS home
+    directory.  NEVER overwrites existing user files — safe to call on every
+    startup.
+
+    Args:
+        system_install_path: Root of the system installation where template
+            files live.  Defaults to the project root (parent of ``common/``).
     """
-    Creates ~/.relais/ structure on first run.
-    Copies default templates from system installation.
-    NEVER overwrites existing user files — safe to call on every startup.
-    """
+    if system_install_path is None:
+        system_install_path = Path(__file__).parent.parent
     home = get_relais_home()
 
     # Create directory structure

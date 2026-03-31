@@ -61,14 +61,16 @@ def make_skills_tools(skills_dir: Path) -> list[InternalTool]:
             return f"Error: invalid skill name '{skill_name}'."
         if not skills_dir.exists():
             return f"Error: skills directory '{skills_dir}' does not exist."
-        candidate = (skills_dir / skill_name / "SKILL.md").resolve()
         skills_dir_resolved = skills_dir.resolve()
-        # Ensure the resolved path stays inside skills_dir (catches symlink attacks).
-        if not str(candidate).startswith(str(skills_dir_resolved) + "/"):
-            return f"Error: skill '{skill_name}' not found."
-        if not candidate.exists():
-            return f"Error: skill '{skill_name}' not found in {skills_dir}."
-        return candidate.read_text(encoding="utf-8")
+        # Search recursively so skills can live under subdirectories like
+        # auto/ or manual/ (e.g. skills/auto/test-hello/SKILL.md).
+        for skill_file in skills_dir_resolved.rglob("SKILL.md"):
+            if skill_file.parent.name == skill_name:
+                # Ensure resolved path stays inside skills_dir (symlink guard).
+                if not str(skill_file.resolve()).startswith(str(skills_dir_resolved) + "/"):
+                    continue
+                return skill_file.read_text(encoding="utf-8")
+        return f"Error: skill '{skill_name}' not found in {skills_dir}."
 
     list_tool = InternalTool(
         name="list_skills",

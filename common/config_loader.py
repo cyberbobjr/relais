@@ -6,14 +6,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_relais_home() -> Path:
-    """
-    Returns the RELAIS user directory.
-    Override via RELAIS_HOME environment variable.
+    """Returns the RELAIS working directory.
+
+    Defaults to ``<project_root>/.relais`` where project root is the parent of
+    the ``common/`` package.  Override via the ``RELAIS_HOME`` environment
+    variable for system-wide installations or containerised deployments.
+
+    Returns:
+        Absolute, resolved path to the RELAIS home directory.
     """
     custom = os.environ.get("RELAIS_HOME")
     if custom:
         return Path(custom).expanduser().resolve()
-    return (Path.home() / ".relais").resolve()
+    return (Path(__file__).parent.parent / ".relais").resolve()
 
 # Search path — user config always takes priority
 CONFIG_SEARCH_PATH = [

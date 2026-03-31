@@ -229,6 +229,7 @@ Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (ut
 │   ├── profiles.yaml        Profils LLM (température, tokens, résilience)
 │   ├── users.yaml           Registre des utilisateurs et ACL
 │   ├── reply_policy.yaml    Politique de réponse automatique
+│   ├── channels.yaml        Canaux actifs, streaming, redémarrages (Aiguilleur + Atelier)
 │   ├── mcp_servers.yaml     Serveurs MCP (outils externes)
 │   └── HEARTBEAT.md         Tâches CRON planifiées
 ├── soul/
@@ -488,7 +489,7 @@ channels:
 
 **Paramètres :**
 - `enabled` — active/désactive le canal sans redémarrage du processus AIGUILLEUR
-- `streaming` — indique si le canal supporte le streaming progressif (utilisé par Atelier)
+- `streaming` — indique si le canal supporte le streaming progressif ; lu par **Atelier au démarrage** — un changement de cette valeur nécessite `supervisorctl restart atelier` (et `restart aiguilleur`)
 - `type` — `native` (adaptateur Python thread+asyncio) ou `external` (subprocess)
 - `class_path` — override optionnel du chemin de la classe adaptateur
 - `max_restarts` — limite de redémarrages automatiques (exponential backoff `min(2^count, 30)` secondes)

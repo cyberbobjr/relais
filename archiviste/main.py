@@ -233,9 +233,8 @@ class Archiviste:
             logger.info("Archiviste stopped gracefully")
 
 if __name__ == "__main__":
-    from pathlib import Path
     from common.init import initialize_user_dir
-    initialize_user_dir(Path(__file__).parent.parent)
+    initialize_user_dir()
     archiviste = Archiviste()
     try:
         asyncio.run(archiviste.start())

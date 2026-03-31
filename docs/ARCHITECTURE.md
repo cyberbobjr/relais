@@ -175,9 +175,13 @@ SORTANT (Canaux externes)
 
 ### Déduplication streaming Discord
 
-Pour les canaux dans `STREAMING_CAPABLE_CHANNELS` (`discord`, `telegram`, `tui`), Atelier publie à la fois :
+Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à la fois :
 - les chunks progressifs sur `relais:messages:streaming:{channel}:{correlation_id}` (rendu live)
 - l'enveloppe finale sur `relais:messages:outgoing:{channel}` (confirmé)
+
+> **Note :** Atelier lit `channels.yaml` **une seule fois au démarrage** pour construire la liste des canaux
+> streaming-capable. Tout changement du champ `streaming:` dans ce fichier nécessite un redémarrage
+> d'Atelier (`supervisorctl restart atelier`) pour être pris en compte — en plus du redémarrage d'Aiguilleur.
 
 Sans mécanisme de déduplication, Aiguilleur Discord enverrait deux messages identiques. Le mécanisme Option C résout ce problème :
 
@@ -731,30 +735,42 @@ class SDKExecutor:
         mcp_manager = McpSessionManager(self._profile, self._mcp_servers)
         async with contextlib.AsyncExitStack() as stack:
             mcp_tools = await mcp_manager.start_all(stack)
-            # Point d'assemblage unique : schémas internes + MCP capés
-            all_tools = self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
+            all_tools = self._get_anthropic_tools(mcp_tools)
             return await self._run_agentic_loop(
                 messages, all_tools, mcp_manager, stream_callback
             )
 
+    def _get_anthropic_tools(self, mcp_tools: list[dict]) -> list[dict]:
+        # Outils internes (jamais capés) + outils MCP limités à mcp_max_tools
+        return self._tool_schemas + mcp_tools[: self._profile.mcp_max_tools]
+
     async def _run_agentic_loop(self, messages, all_tools, mcp_manager, stream_callback):
-        # all_tools est déjà assemblé par execute() — la boucle le reçoit prêt à l'emploi
         full_reply = ""
         for turn in range(self._profile.max_turns):
-            async with self._client.messages.stream(
+            # messages.create() (non-streaming) — block.input toujours complet
+            response = await self._client.messages.create(
                 model=self._profile.model, max_tokens=self._profile.max_tokens,
                 system=self._soul_prompt, messages=messages, tools=all_tools
-            ) as stream:
-                async for text in stream.text_stream:
-                    full_reply += text
+            )
+            for block in response.content:
+                if block.type == "text":
+                    full_reply += block.text
                     if stream_callback:
-                        await stream_callback(text)
-                final_msg = await stream.get_final_message()
-            if final_msg.stop_reason != "tool_use":
+                        await stream_callback(block.text)   # par bloc, pas par token
+            if response.stop_reason != "tool_use":
                 break
             # Inject tool results and continue loop...
         return full_reply
 ```
+
+> **Pourquoi `messages.create()` et non `messages.stream()` ?**
+> Le proxy LiteLLM ne relaie pas fidèlement les événements SSE `input_json_delta`
+> lors d'un appel streaming. En conséquence, `get_final_message()` reconstruit des
+> blocs `tool_use` avec `block.input == {}` — les arguments de l'outil (ex. `skill_name`
+> pour `read_skill`) n'arrivent jamais. `messages.create()` retourne le JSON complet
+> d'un coup ; `block.input` est toujours intégralement populé. Le `stream_callback`
+> est préservé : chaque bloc `text` est émis au callback après l'appel — par bloc
+> plutôt que par token, ce qui est suffisant pour le rendu Discord/Telegram en temps réel.
 
 Le client est initialisé avec `base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000")` pour le routage via le proxy LiteLLM.
 
@@ -765,7 +781,7 @@ Le client est initialisé avec `base_url=os.environ.get("ANTHROPIC_BASE_URL", "h
 - **`InternalTool`** — dataclass `(name, description, input_schema, handler)` ; handler sync ou async
 - **`make_skills_tools(skills_dir)`** — expose `list_skills` et `read_skill` pour découverte des SKILL.md
 - Les schémas Anthropic (`_tool_schemas`) sont calculés une seule fois dans `__init__` et réutilisés
-- La fusion internal + MCP est faite dans `execute()` avant d'entrer dans `_run_agentic_loop`
+- La fusion internal + MCP est déléguée à `_get_anthropic_tools(mcp_tools)` appelé dans `execute()`
 - Les outils internes sont prioritaires sur les outils MCP en cas de nom identique
 
 ### Streaming Progressif
@@ -807,11 +823,12 @@ Atelier → SDKExecutor.execute(envelope, context)
   ↓
 McpSessionManager.start_all(stack) → mcp_tools (schémas Anthropic)
   ↓
-all_tools = _tool_schemas + mcp_tools[:mcp_max_tools]   ← assemblage unique ici
+all_tools = _get_anthropic_tools(mcp_tools)   ← assemblage unique ici
   ↓
 _run_agentic_loop(messages, all_tools, mcp_manager, ...)
   ↓
-anthropic.AsyncAnthropic.messages.stream(model, system, messages, tools=all_tools)
+anthropic.AsyncAnthropic.messages.create(model, system, messages, tools=all_tools)
+  (non-streaming — block.input toujours complet, pas affecté par le bug LiteLLM input_json_delta)
   ↓
 stop_reason == "tool_use" → _call_tool()
   → InternalTool.handler()  (outils Python natifs)

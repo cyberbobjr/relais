@@ -229,14 +229,14 @@ class Atelier:
             cid = envelope.correlation_id if envelope else message_id
             sid = envelope.sender_id if envelope else ""
             logger.error("[%s] SDK execution error, routing to DLQ: %s", cid, exc)
-            await redis_conn.xadd(
-                "relais:tasks:failed",
-                {
-                    "payload": payload,
-                    "reason": str(exc),
-                    "failed_at": str(time.time()),
-                },
-            )
+            dlq_entry: dict = {
+                "payload": payload,
+                "reason": str(exc),
+                "failed_at": str(time.time()),
+            }
+            if exc.response_body:
+                dlq_entry["error_detail"] = exc.response_body[:4000]
+            await redis_conn.xadd("relais:tasks:failed", dlq_entry)
             await redis_conn.xadd("relais:logs", {
                 "level": "ERROR",
                 "brick": "atelier",
@@ -251,7 +251,19 @@ class Atelier:
             # Unknown transient or permanent error — leave in PEL for re-delivery
             cid = envelope.correlation_id if envelope else message_id
             sid = envelope.sender_id if envelope else ""
-            logger.error("[%s] Unhandled exception, leaving in PEL: %s", cid, exc, exc_info=True)
+            if isinstance(exc, anthropic.APIStatusError):
+                body_text = (
+                    str(getattr(exc, "body", None) or "")
+                    or getattr(getattr(exc, "response", None), "text", "")
+                )[:2000]
+                logger.error(
+                    "[%s] Unhandled API error %d, leaving in PEL: %s | body: %s",
+                    cid, exc.status_code, exc, body_text, exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[%s] Unhandled exception, leaving in PEL: %s", cid, exc, exc_info=True
+                )
             await redis_conn.xadd("relais:logs", {
                 "level": "ERROR",
                 "brick": "atelier",
@@ -317,7 +329,7 @@ class Atelier:
                             last_id = msg_id
                             res = json.loads(data.get("payload", "{}"))
                             if res.get("correlation_id") == correlation_id:
-                                return res.get("history", [])
+                                return res.get("messages", [])
             except Exception as exc:
                 logger.warning("Error reading memory response: %s", exc)
                 break
@@ -431,7 +443,7 @@ def _xadd_id_to_xread_start(xadd_id: str) -> str:
 if __name__ == "__main__":
     from common.init import initialize_user_dir
 
-    initialize_user_dir(Path(__file__).parent.parent)
+    initialize_user_dir()
     atelier = Atelier()
     try:
         asyncio.run(atelier.start())

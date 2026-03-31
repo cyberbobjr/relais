@@ -153,9 +153,8 @@ class Sentinelle:
 
 
 if __name__ == "__main__":
-    from pathlib import Path
     from common.init import initialize_user_dir
-    initialize_user_dir(Path(__file__).parent.parent)
+    initialize_user_dir()
     sentinelle = Sentinelle()
     try:
         asyncio.run(sentinelle.start())
