@@ -26,7 +26,7 @@ from atelier.profile_loader import ProfileConfig, ResilienceConfig
 # ---------------------------------------------------------------------------
 
 
-def _make_profile(model: str = "test-model") -> ProfileConfig:
+def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> ProfileConfig:
     """Return a minimal ProfileConfig for mock use.
 
     Args:
@@ -53,46 +53,51 @@ def test_souvenir_uses_memory_extractor_profile_model() -> None:
     """Souvenir.__init__ must pass the memory_extractor profile's model to MemoryExtractor.
 
     When load_profiles() returns a dict containing a 'memory_extractor' profile
-    with model='test-model', Souvenir._extractor._model must equal 'test-model'.
+    with model='anthropic:claude-haiku-4-5', Souvenir._extractor._model_name
+    must equal that model string.
     """
-    test_profile = _make_profile(model="test-model")
+    test_profile = _make_profile(model="anthropic:claude-haiku-4-5")
     mock_profiles = {"memory_extractor": test_profile}
 
     with (
         patch("souvenir.main.load_profiles", return_value=mock_profiles),
         patch("souvenir.main.RedisClient"),
         patch("souvenir.main.LongTermStore"),
+        patch("souvenir.memory_extractor.init_chat_model") as mock_init_chat,
     ):
+        mock_init_chat.return_value = MagicMock()
         from souvenir.main import Souvenir
 
         souvenir = Souvenir()
 
-    assert souvenir._extractor._model == "test-model"
+    assert souvenir._extractor._model_name == "anthropic:claude-haiku-4-5"
 
 
 # ---------------------------------------------------------------------------
-# 2. Souvenir falls back to glm-4.7-flash when profile loading fails
+# 2. Souvenir falls back to anthropic:claude-haiku-4-5 when profile loading fails
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_souvenir_falls_back_to_glm_on_profile_load_failure() -> None:
+def test_souvenir_falls_back_to_haiku_on_profile_load_failure() -> None:
     """Souvenir.__init__ must not crash when load_profiles() raises FileNotFoundError.
 
     The fallback model must be the _FALLBACK_EXTRACTION_MODEL constant
-    ('glm-4.7-flash'). A WARNING must be logged but no exception is raised.
+    ('anthropic:claude-haiku-4-5'). A WARNING must be logged but no exception is raised.
     """
     with (
         patch("souvenir.main.load_profiles", side_effect=FileNotFoundError("no file")),
         patch("souvenir.main.RedisClient"),
         patch("souvenir.main.LongTermStore"),
+        patch("souvenir.memory_extractor.init_chat_model") as mock_init_chat,
     ):
+        mock_init_chat.return_value = MagicMock()
         from souvenir.main import Souvenir, _FALLBACK_EXTRACTION_MODEL
 
         souvenir = Souvenir()
 
-    assert souvenir._extractor._model == _FALLBACK_EXTRACTION_MODEL
-    assert _FALLBACK_EXTRACTION_MODEL == "glm-4.7-flash"
+    assert souvenir._extractor._model_name == _FALLBACK_EXTRACTION_MODEL
+    assert _FALLBACK_EXTRACTION_MODEL == "anthropic:claude-haiku-4-5"
 
 
 # ---------------------------------------------------------------------------
@@ -147,14 +152,14 @@ def test_souvenir_init_load_profiles_respects_relais_home(
     minimal_yaml = {
         "profiles": {
             "default": {
-                "model": "default-model",
+                "model": "anthropic:claude-haiku-4-5",
                 "temperature": 0.7,
                 "max_tokens": 1024,
                 "max_turns": 10,
                 "resilience": {"retry_attempts": 3, "retry_delays": [1, 2, 4]},
             },
             "memory_extractor": {
-                "model": "custom-home-model",
+                "model": "anthropic:claude-haiku-4-5",
                 "temperature": 0.1,
                 "max_tokens": 512,
                 "max_turns": 5,
@@ -178,9 +183,11 @@ def test_souvenir_init_load_profiles_respects_relais_home(
     with (
         patch("souvenir.main.RedisClient"),
         patch("souvenir.main.LongTermStore"),
+        patch("souvenir.memory_extractor.init_chat_model") as mock_init_chat,
     ):
+        mock_init_chat.return_value = MagicMock()
         import souvenir.main as sm
         importlib.reload(sm)
         souvenir = sm.Souvenir()
 
-    assert souvenir._extractor._model == "custom-home-model"
+    assert souvenir._extractor._model_name == "anthropic:claude-haiku-4-5"

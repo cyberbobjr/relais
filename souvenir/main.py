@@ -10,7 +10,6 @@ Architecture dual-stream :
 import asyncio
 import json
 import logging
-import os
 import sys
 from typing import Any
 
@@ -33,7 +32,7 @@ logger = logging.getLogger("souvenir")
 _DEFAULT_CHANNELS = ["discord", "telegram"]
 
 # Modèle de secours si le profil memory_extractor ne peut pas être chargé.
-_FALLBACK_EXTRACTION_MODEL = "glm-4.7-flash"
+_FALLBACK_EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
 
 
 class Souvenir:
@@ -55,7 +54,6 @@ class Souvenir:
         self.group_name = "souvenir_group"
         self.consumer_name = "souvenir_1"
         self._long_term = LongTermStore()
-        litellm_url = os.environ.get("LITELLM_BASE_URL", "http://localhost:4000")
         try:
             _profiles = load_profiles()
             _extraction_profile = resolve_profile(_profiles, "memory_extractor")
@@ -68,7 +66,7 @@ class Souvenir:
                 exc,
             )
             extraction_model = _FALLBACK_EXTRACTION_MODEL
-        self._extractor = MemoryExtractor(litellm_url=litellm_url, model=extraction_model)
+        self._extractor = MemoryExtractor(model=extraction_model)
         self._channels: list[str] = _DEFAULT_CHANNELS
 
     # ------------------------------------------------------------------

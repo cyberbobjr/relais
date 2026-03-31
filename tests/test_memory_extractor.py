@@ -3,7 +3,6 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from common.envelope import Envelope
@@ -33,23 +32,21 @@ def _make_envelope(user_message: str = "bonjour", content: str = "salut") -> Env
     )
 
 
-def _mock_httpx_response(facts: list[dict]) -> MagicMock:
-    """Return a mock httpx Response whose JSON contains a choices list.
+def _mock_llm(content_str: str) -> MagicMock:
+    """Return a mock LLM whose ainvoke returns an object with .content = content_str.
 
     Args:
-        facts: List of fact dicts that the LLM would return.
+        content_str: The string the mock LLM should return as response content.
 
     Returns:
-        MagicMock simulating httpx.Response.
+        A MagicMock simulating the return value of init_chat_model(), with
+        an ``ainvoke`` AsyncMock that returns an object carrying ``.content``.
     """
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.json.return_value = {
-        "choices": [
-            {"message": {"content": json.dumps(facts)}}
-        ]
-    }
-    return resp
+    response = MagicMock()
+    response.content = content_str
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(return_value=response)
+    return llm
 
 
 # ---------------------------------------------------------------------------
@@ -59,23 +56,17 @@ def _mock_httpx_response(facts: list[dict]) -> MagicMock:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_extract_calls_litellm_proxy() -> None:
-    """extract() doit appeler le proxy LiteLLM et retourner les faits extraits."""
+async def test_extract_calls_llm_and_returns_facts() -> None:
+    """extract() must call init_chat_model LLM and return extracted facts."""
     from souvenir.memory_extractor import MemoryExtractor
 
     facts = [{"fact": "likes cats", "category": "preference", "confidence": 0.9}]
     env = _make_envelope(user_message="j'adore les chats", content="c'est bien")
 
-    mock_resp = _mock_httpx_response(facts)
+    mock_llm = _mock_llm(json.dumps(facts))
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=mock_resp)
-        mock_client_cls.return_value = mock_client
-
-        extractor = MemoryExtractor(litellm_url="http://localhost:4000", model="gpt-3.5-turbo")
+    with patch("souvenir.memory_extractor.init_chat_model", return_value=mock_llm):
+        extractor = MemoryExtractor(model="anthropic:claude-haiku-4-5")
         result = await extractor.extract(env)
 
     assert len(result) == 1
@@ -85,7 +76,7 @@ async def test_extract_calls_litellm_proxy() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_extract_filters_low_confidence() -> None:
-    """extract() doit exclure les faits dont la confidence est <= 0.7."""
+    """extract() must exclude facts whose confidence is <= 0.7."""
     from souvenir.memory_extractor import MemoryExtractor
 
     facts = [
@@ -94,16 +85,10 @@ async def test_extract_filters_low_confidence() -> None:
         {"fact": "lives in Paris", "category": "location", "confidence": 0.8},
     ]
     env = _make_envelope()
-    mock_resp = _mock_httpx_response(facts)
+    mock_llm = _mock_llm(json.dumps(facts))
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=mock_resp)
-        mock_client_cls.return_value = mock_client
-
-        extractor = MemoryExtractor(litellm_url="http://localhost:4000", model="gpt-3.5-turbo")
+    with patch("souvenir.memory_extractor.init_chat_model", return_value=mock_llm):
+        extractor = MemoryExtractor(model="anthropic:claude-haiku-4-5")
         result = await extractor.extract(env)
 
     assert len(result) == 2
@@ -116,25 +101,14 @@ async def test_extract_filters_low_confidence() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_extract_handles_invalid_json_gracefully() -> None:
-    """extract() doit retourner [] si le LLM retourne un JSON invalide."""
+    """extract() must return [] if the LLM returns invalid JSON."""
     from souvenir.memory_extractor import MemoryExtractor
 
     env = _make_envelope()
+    mock_llm = _mock_llm("not valid json {{{")
 
-    mock_resp = MagicMock()
-    mock_resp.raise_for_status = MagicMock()
-    mock_resp.json.return_value = {
-        "choices": [{"message": {"content": "not valid json {{{"}}]
-    }
-
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=mock_resp)
-        mock_client_cls.return_value = mock_client
-
-        extractor = MemoryExtractor(litellm_url="http://localhost:4000", model="gpt-3.5-turbo")
+    with patch("souvenir.memory_extractor.init_chat_model", return_value=mock_llm):
+        extractor = MemoryExtractor(model="anthropic:claude-haiku-4-5")
         result = await extractor.extract(env)
 
     assert result == []
@@ -142,22 +116,17 @@ async def test_extract_handles_invalid_json_gracefully() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_extract_handles_http_error_gracefully() -> None:
-    """extract() doit retourner [] sans lever d'exception si HTTP échoue."""
+async def test_extract_handles_llm_error_gracefully() -> None:
+    """extract() must return [] without raising if the LLM call raises."""
     from souvenir.memory_extractor import MemoryExtractor
 
     env = _make_envelope()
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(
-            side_effect=httpx.ConnectError("Connection refused")
-        )
-        mock_client_cls.return_value = mock_client
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
 
-        extractor = MemoryExtractor(litellm_url="http://localhost:4000", model="gpt-3.5-turbo")
+    with patch("souvenir.memory_extractor.init_chat_model", return_value=llm):
+        extractor = MemoryExtractor(model="anthropic:claude-haiku-4-5")
         result = await extractor.extract(env)
 
     assert result == []
@@ -165,47 +134,35 @@ async def test_extract_handles_http_error_gracefully() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_extract_uses_fast_profile() -> None:
-    """extract() doit envoyer le modèle configuré dans la requête HTTP."""
+async def test_extract_uses_configured_model() -> None:
+    """MemoryExtractor._model_name must reflect the model passed to __init__."""
     from souvenir.memory_extractor import MemoryExtractor
 
-    env = _make_envelope()
-    mock_resp = _mock_httpx_response([])
+    with patch("souvenir.memory_extractor.init_chat_model") as mock_init:
+        mock_init.return_value = _mock_llm("[]")
+        extractor = MemoryExtractor(model="anthropic:claude-haiku-4-5")
 
-    captured_payload: dict = {}
-
-    async def _capture_post(url: str, **kwargs: object) -> MagicMock:
-        captured_payload.update(kwargs.get("json", {}))
-        return mock_resp
-
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = _capture_post
-        mock_client_cls.return_value = mock_client
-
-        extractor = MemoryExtractor(litellm_url="http://localhost:4000", model="fast-model")
-        await extractor.extract(env)
-
-    assert captured_payload.get("model") == "fast-model"
+    assert extractor._model_name == "anthropic:claude-haiku-4-5"
+    mock_init.assert_called_once_with(
+        "anthropic:claude-haiku-4-5", temperature=0.1, max_tokens=512
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_extract_skips_empty_user_message() -> None:
-    """extract() doit retourner [] immédiatement si user_message est vide."""
+    """extract() must return [] immediately if user_message is blank."""
     from souvenir.memory_extractor import MemoryExtractor
 
     env = _make_envelope(user_message="  ", content="quelque chose")
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client_cls.return_value = mock_client
+    with patch("souvenir.memory_extractor.init_chat_model") as mock_init:
+        mock_llm_instance = _mock_llm("[]")
+        mock_init.return_value = mock_llm_instance
 
-        extractor = MemoryExtractor(litellm_url="http://localhost:4000")
+        extractor = MemoryExtractor(model="anthropic:claude-haiku-4-5")
         result = await extractor.extract(env)
 
-    # Should return early without making any HTTP call
-    mock_client.post.assert_not_called()
+    # Should return early without making any LLM call
+    mock_llm_instance.ainvoke.assert_not_called()
     assert result == []

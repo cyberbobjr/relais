@@ -2,9 +2,9 @@
 
 import json
 import logging
-import os
 
-import httpx
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from common.envelope import Envelope
 
@@ -22,7 +22,7 @@ _CONFIDENCE_THRESHOLD = 0.7
 
 
 class MemoryExtractor:
-    """Extrait des faits durables sur l'utilisateur via un appel LLM.
+    """Extrait des faits durables sur l'utilisateur via un appel LLM LangChain.
 
     Conçu pour être utilisé en mode "fire-and-forget" : toute exception est
     capturée et journalisée — jamais propagée. La valeur de retour est toujours
@@ -31,23 +31,22 @@ class MemoryExtractor:
 
     def __init__(
         self,
-        litellm_url: str = "http://localhost:4000",
-        model: str = "gpt-3.5-turbo",
+        model: str = "anthropic:claude-haiku-4-5",
     ) -> None:
-        """Initialise l'extracteur.
+        """Initialise l'extracteur avec un modèle LangChain via init_chat_model.
 
         Args:
-            litellm_url: URL de base du proxy LiteLLM (sans trailing slash).
-            model: Identifiant du modèle à utiliser pour l'extraction.
+            model: Identifiant du modèle au format ``"provider:model-id"``
+                (ex: ``"anthropic:claude-haiku-4-5"``).
         """
-        self._url = litellm_url.rstrip("/") + "/chat/completions"
-        self._model = model
+        self._model_name = model
+        self._llm = init_chat_model(model, temperature=0.1, max_tokens=512)
 
     async def extract(self, envelope: Envelope) -> list[dict]:
         """Extrait les faits durables depuis un échange.
 
-        Fire-and-forget safe : retourne ``[]`` sur toute erreur (HTTP, JSON,
-        connexion, etc.) sans propager d'exception.
+        Fire-and-forget safe : retourne ``[]`` sur toute erreur (LLM, JSON,
+        réseau, etc.) sans propager d'exception.
 
         Args:
             envelope: L'enveloppe du message sortant. Le message utilisateur
@@ -65,40 +64,21 @@ class MemoryExtractor:
         if not user_message.strip():
             return []
 
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": EXTRACTION_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Utilisateur: {user_message}\n\nAssistant: {assistant_reply}"
-                    ),
-                },
-            ],
-            "max_tokens": 512,
-            "temperature": 0.1,
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    self._url,
-                    json=payload,
-                    headers={
-                        "Authorization": (
-                            f"Bearer {os.environ.get('LITELLM_MASTER_KEY', '')}"
-                        )
-                    },
-                )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
-                facts = json.loads(content)
-                if not isinstance(facts, list):
-                    return []
-                return [
-                    f for f in facts if f.get("confidence", 0) > _CONFIDENCE_THRESHOLD
+            response = await self._llm.ainvoke(
+                [
+                    SystemMessage(content=EXTRACTION_PROMPT),
+                    HumanMessage(
+                        content=f"Utilisateur: {user_message}\n\nAssistant: {assistant_reply}"
+                    ),
                 ]
+            )
+            facts = json.loads(response.content)
+            if not isinstance(facts, list):
+                return []
+            return [
+                f for f in facts if f.get("confidence", 0) > _CONFIDENCE_THRESHOLD
+            ]
         except Exception as exc:
             logger.debug("Memory extraction failed (non-blocking): %s", exc)
             return []

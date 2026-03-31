@@ -16,12 +16,11 @@
 - **Variable `RELAIS_HOME`** — override explicite du répertoire utilisateur
 - **Initialisation au premier lancement** — création automatique de `~/.relais/` avec les fichiers par défaut
 
-### Phase 5 — InternalTools + MCP stdio
+### Phase 5 — Outils internes + MCP stdio
 
-- **`InternalTool`** — frozen dataclass dans `atelier/internal_tool.py` : `name`, `description`, `input_schema`, `handler` (callable sync ou async)
-- **`make_skills_tools(skills_dir)`** — construit deux outils internes : `list_skills` (catalogue) et `read_skill` (lecture complète d'un `SKILL.md`)
-- **`load_for_sdk(profile)`** — lit `mcp_servers.yaml`, filtre par `enabled` et profil, retourne un `dict[str, {command, args, env}]` prêt pour `SDKExecutor`
-- **`SDKExecutor`** — démarre les serveurs MCP via `AsyncExitStack` + `mcp.client.stdio.stdio_client`, préfixe les outils MCP `{server}__{tool}`, gère la boucle agentique explicite (`stop_reason == "tool_use"` → injection `tool_result` → rebouclage)
+- **Outils internes** — outils Python natifs exposés dans la boucle agentique : `list_skills` (catalogue) et `read_skill` (lecture complète d'un `SKILL.md`)
+- **`load_for_sdk(profile)`** — lit `mcp_servers.yaml`, filtre par `enabled` et profil, retourne un dict de configuration prêt pour l'exécuteur agentique
+- **Exécuteur agentique** — démarre les serveurs MCP, préfixe les outils MCP `{server}__{tool}`, gère la boucle agentique multi-tour jusqu'à `end_turn` ou `max_turns`
 
 ---
 
@@ -765,7 +764,7 @@ user default    off
 ```
 STREAMS (at-least-once — perte inacceptable)
   relais:tasks                          Portail/Veilleur → Atelier
-  relais:tasks:failed                   Atelier → DLQ (SDKExecutionError exhausted)
+  relais:tasks:failed                   Atelier → DLQ (AgentExecutionError exhausted)
   relais:memory:request                 Atelier → Souvenir
   relais:memory:response                Souvenir → Atelier
   relais:messages:incoming:{channel}    Aiguilleur → Portail
@@ -1123,7 +1122,7 @@ channels:
 
 ## 11. L'Atelier — exécution des agents, résilience LLM, outils internes
 
-**Updated 2026-03-30:** L'Atelier utilise désormais le SDK Python natif `anthropic` (AsyncAnthropic) avec une boucle agentique tool-use explicite. La dépendance `claude-agent-sdk` et le binaire CLI Node.js `claude` sont supprimés. Les serveurs MCP stdio restent supportés via le SDK Python `mcp`.
+**Updated 2026-03-30:** L'Atelier utilise une boucle agentique multi-tour avec gestion explicite des outils. La dépendance `claude-agent-sdk` et le binaire CLI Node.js `claude` sont supprimés. Les serveurs MCP stdio et SSE restent supportés.
 
 ### Architecture générale
 
@@ -1140,12 +1139,11 @@ Assemble system prompt (SOUL + role + channel + policy + user_facts)
   ↓
 Load MCP servers for profile (mcp_loader.load_for_sdk)
   ↓
-Build InternalTool list (make_skills_tools)
+Build internal tools list (make_skills_tools)
   ↓
-Execute via SDKExecutor (anthropic.AsyncAnthropic + explicit tool-use loop)
-  ├─ base_url=ANTHROPIC_BASE_URL (LiteLLM proxy — direct, no CLI wrapper)
-  ├─ Start MCP stdio servers via mcp Python SDK + AsyncExitStack
-  ├─ Merge InternalTool + MCP tools → Anthropic tools list
+Execute via exécuteur agentique (boucle multi-tour explicite)
+  ├─ Start MCP servers (stdio/SSE)
+  ├─ Merge internal tools + MCP tools
   └─ Loop: stream → tool calls → results → next turn, until end_turn or max_turns
   ↓
 If streaming capable (Discord/Telegram): publish chunks to relais:messages:streaming:{channel}:{correlation_id}
@@ -1159,161 +1157,51 @@ Conditional XACK (success or DLQ) — never lose messages on retry
 
 | Composant | Ancienne approche | Nouvelle approche |
 |-----------|------------------|------------------|
-| Appels LLM | `claude-agent-sdk` → spawn CLI `claude` | `anthropic.AsyncAnthropic` direct |
-| `ANTHROPIC_BASE_URL` | Workaround Bug #677 (cli_path) | Supporté nativement via `base_url=` |
+| Appels LLM | `claude-agent-sdk` → spawn CLI `claude` | Exécuteur agentique Python pur |
+| `ANTHROPIC_BASE_URL` | Workaround Bug #677 (cli_path) | Supporté nativement |
 | Dépendance externe | Binaire Node.js `claude` obligatoire | Python pur, aucun binaire requis |
-| Boucle tool-use | Gérée par le CLI (opaque) | Explicite dans `_run_agentic_loop()` |
-| Serveurs MCP | Via `ClaudeAgentOptions.mcp_servers` | `mcp` Python SDK + `stdio_client` |
-| Outils natifs | AgentDefinition (abandonné) | `InternalTool` avec handler Python |
-
-**Dépendances pip :** `anthropic`, `mcp` (remplacent `claude-agent-sdk`)
+| Boucle tool-use | Gérée par le CLI (opaque) | Explicite, multi-tour |
+| Serveurs MCP | Via `ClaudeAgentOptions.mcp_servers` | Lifecycle géré par `McpSessionManager` |
+| Outils natifs | AgentDefinition (abandonné) | Outils Python natifs avec handler |
 
 ### Modules — atelier/
 
 ```
 atelier/
-├── main.py            # Brique principale — loop Redis, dispatch
-├── sdk_executor.py    # SDKExecutor : AsyncAnthropic + boucle agentique
-├── internal_tool.py   # Dataclass InternalTool (outil natif Python)
-├── skills_tools.py    # make_skills_tools() → list_skills + read_skill
-├── mcp_loader.py      # Chargement config MCP servers (inchangé)
-├── profile_loader.py  # ProfileConfig, ResilienceConfig (inchangé)
-├── soul_assembler.py  # Assemblage prompt système (inchangé)
+├── main.py             # Brique principale — loop Redis, dispatch
+├── agent_executor.py   # AgentExecutor : boucle agentique multi-tour
+├── mcp_adapter.py      # make_mcp_tools() → outils MCP via langchain-mcp-adapters
+├── mcp_session_manager.py  # Cycle de vie des serveurs MCP
+├── skills_tools.py     # make_skills_tools() → list_skills + read_skill
+├── mcp_loader.py       # Chargement config MCP servers (inchangé)
+├── profile_loader.py   # ProfileConfig, ResilienceConfig (inchangé)
+├── soul_assembler.py   # Assemblage prompt système (inchangé)
 └── stream_publisher.py # Publication chunks Redis (inchangé)
 ```
 
-### SDK integration — anthropic.AsyncAnthropic
+### Boucle agentique
 
-```python
-# atelier/sdk_executor.py
-import anthropic
-import contextlib
+L'exécuteur agentique gère un cycle multi-tour :
+1. Construction des messages (contexte court-terme + envelope)
+2. Démarrage des serveurs MCP et chargement des outils
+3. Appel LLM avec streaming token-by-token
+4. Dispatch des tool calls ; injection des résultats (`tool_result`)
+5. Rebouclage jusqu'à `end_turn` ou `max_turns`
 
-class SDKExecutor:
-    def __init__(self, profile, soul_prompt, mcp_servers, tools=None):
-        self._client = anthropic.AsyncAnthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY", ...),
-            base_url=os.environ.get("ANTHROPIC_BASE_URL", "http://localhost:4000"),
-        )
-        self._internal_tools = {t.name: t for t in (tools or [])}
+### Outils natifs — make_skills_tools()
 
-    async def execute(self, envelope, context, stream_callback=None) -> str:
-        messages = self._build_messages(envelope, context)
-        async with contextlib.AsyncExitStack() as stack:
-            mcp_tools, mcp_sessions = await self._start_mcp_servers(stack)
-            return await self._run_agentic_loop(messages, mcp_tools, mcp_sessions, stream_callback)
-```
-
-### Boucle agentique — _run_agentic_loop()
-
-```python
-async def _run_agentic_loop(self, messages, mcp_tools, mcp_sessions, stream_callback):
-    all_tools = self._get_anthropic_tools(mcp_tools)  # internal + MCP
-    full_reply = ""
-
-    for turn in range(self._profile.max_turns):
-        async with self._client.messages.stream(
-            model=self._profile.model,
-            max_tokens=self._profile.max_tokens,
-            system=self._soul_prompt,
-            messages=messages,
-            tools=all_tools or None,
-        ) as stream:
-            async for text in stream.text_stream:
-                full_reply += text
-                if stream_callback:
-                    await stream_callback(text)   # streaming temps réel Discord/Telegram
-            final_msg = await stream.get_final_message()
-
-        if final_msg.stop_reason != "tool_use":
-            break  # end_turn, max_tokens, stop_sequence → fin
-
-        # Construire le tour assistant (text + tool_use blocks)
-        assistant_content = [{"type": b.type, ...} for b in final_msg.content]
-        messages.append({"role": "assistant", "content": assistant_content})
-
-        # Exécuter les outils et injecter les résultats
-        tool_results = []
-        for block in final_msg.content:
-            if block.type == "tool_use":
-                result = await self._call_tool(block.name, block.input, mcp_sessions)
-                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
-        messages.append({"role": "user", "content": tool_results})
-
-    return full_reply
-```
-
-### InternalTool — outils natifs Python
-
-`InternalTool` (dataclass frozen dans `atelier/internal_tool.py`) expose des outils Python directement dans la boucle agentique, sans serveur MCP.
-
-```python
-@dataclass(frozen=True)
-class InternalTool:
-    name: str           # identifiant envoyé à l'API Anthropic
-    description: str    # aide le modèle à choisir l'outil
-    input_schema: dict  # JSON Schema {"type": "object", "properties": {...}}
-    handler: Callable[..., str | Awaitable[str]]  # sync ou async
-```
-
-**Dispatch dans `_call_tool()` :**
-1. Si `tool_name in self._internal_tools` → appel du handler Python (sync ou async)
-2. Sinon → `_call_mcp_tool(tool_name, tool_input, mcp_sessions)` (format `server__tool`)
-
-### Skills InternalTools — make_skills_tools()
-
-`atelier/skills_tools.py` expose deux `InternalTool` pour la gestion des skills :
+`atelier/skills_tools.py` expose deux outils pour la gestion des skills :
 
 | Outil | Description |
 |-------|-------------|
 | `list_skills` | Scanne `skills_dir` récursivement pour les `SKILL.md`, retourne un catalogue `"- {nom}: {première ligne}"` |
 | `read_skill(skill_name)` | Lit et retourne le contenu complet du `SKILL.md` correspondant |
 
-```python
-# atelier/main.py — dans _handle_message()
-tools = make_skills_tools(self._skills_dir)
-sdk_executor = SDKExecutor(profile=profile, ..., tools=tools)
-```
-
 `self._skills_dir` est chargé au démarrage depuis `Path(__file__).parent.parent / "skills"`.
 
-### Serveurs MCP — _start_mcp_servers()
+### Serveurs MCP — McpSessionManager
 
-`SDKExecutor._start_mcp_servers()` prend en charge deux transports :
-
-```python
-async def _start_mcp_servers(self, stack: AsyncExitStack):
-    for server_name, cfg in self._mcp_servers.items():
-        transport = cfg.get("type", "stdio")
-
-        if transport == "stdio":
-            params = StdioServerParameters(
-                command=cfg["command"], args=cfg.get("args", []), env=cfg.get("env") or None
-            )
-            read, write = await stack.enter_async_context(stdio_client(params))
-
-        elif transport == "sse":
-            # mcp.client.sse est optionnel — guard _SSE_AVAILABLE
-            if not _SSE_AVAILABLE:
-                logger.warning("sse_client non disponible, serveur '%s' ignoré", server_name)
-                continue
-            read, write = await stack.enter_async_context(sse_client(cfg["url"]))
-
-        else:
-            logger.warning("Transport inconnu '%s' pour '%s', ignoré", transport, server_name)
-            continue
-
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        tool_list = await session.list_tools()
-        # Préfixe {server_name}__{tool_name} pour éviter les collisions
-        for tool in tool_list.tools:
-            tools.append({"name": f"{server_name}__{tool.name}", ...})
-        sessions[server_name] = session
-    return tools, sessions
-```
-
-**Import conditionnel :** si le package `mcp` est absent, `_start_mcp_servers()` loggue un warning et retourne `([], {})` sans crash. `_SSE_AVAILABLE` est levé à `False` si `mcp.client.sse` est absent. Les InternalTools restent fonctionnels dans les deux cas.
+`McpSessionManager` prend en charge deux transports : `stdio` (sous-processus) et `sse` (connexion HTTP). Si le package MCP est absent, le manager loggue un warning et retourne des listes vides sans crash — les outils internes restent fonctionnels dans tous les cas.
 
 **Format retourné par `mcp_loader.load_for_sdk()` :**
 ```python
@@ -1331,21 +1219,21 @@ async def _start_mcp_servers(self, stack: AsyncExitStack):
 # atelier/profile_loader.py
 @dataclass(frozen=True)
 class ProfileConfig:
-    model: str
+    model: str               # format provider:model-id (ex. anthropic:claude-sonnet-4-6)
     temperature: float
-    max_tokens: int              # ← Passé à AsyncAnthropic.messages.stream()
+    max_tokens: int
     resilience: ResilienceConfig
-    max_turns: int = 20          # ← Nombre max de tours de la boucle agentique
-    mcp_timeout: int = 10        # ← Timeout (s) par appel outil MCP (asyncio.wait_for)
-    mcp_max_tools: int = 20      # ← Max outils MCP exposés au modèle (0 = aucun)
+    max_turns: int = 20      # ← Nombre max de tours de la boucle agentique
+    mcp_timeout: int = 10    # ← Timeout (s) par appel outil MCP
+    mcp_max_tools: int = 20  # ← Max outils MCP exposés au modèle (0 = aucun)
     # … autres champs : allowed_tools, allowed_mcp, guardrails, memory_scope, fallback_model
 ```
 
-`max_turns` contrôle le nombre d'itérations de la boucle `_run_agentic_loop()`.
+`max_turns` contrôle le nombre d'itérations de la boucle agentique.
 
-`mcp_timeout` est appliqué via `asyncio.wait_for(session.call_tool(...), timeout=profile.mcp_timeout)` dans `_call_mcp_tool()`. Un `TimeoutError` retourne une chaîne d'erreur au modèle sans interrompre la boucle.
+`mcp_timeout` annule un appel outil MCP dépassant le délai imparti. Un timeout retourne une chaîne d'erreur au modèle sans interrompre la boucle.
 
-`mcp_max_tools` tronque la liste des outils MCP dans `_get_anthropic_tools()` : `mcp_tools[:profile.mcp_max_tools]`. Les outils internes (`InternalTool`) ne sont pas comptés dans cette limite. La valeur `0` est utilisée par le profil `memory_extractor` pour désactiver complètement les outils MCP.
+`mcp_max_tools` tronque la liste des outils MCP. Les outils internes ne sont pas comptés dans cette limite. La valeur `0` est utilisée par le profil `memory_extractor` pour désactiver complètement les outils MCP.
 
 ### Profil `memory_extractor` — extraction légère de faits utilisateur (Axe C)
 
@@ -1406,7 +1294,7 @@ Ce chargement dynamique permet de changer le modèle d'extraction via configurat
 
 ### Résilience LLM — pattern XACK
 
-Si le backend LLM (LiteLLM proxy) est indisponible, `SDKExecutor.execute()` lève `SDKExecutionError` (wrapping `APIStatusError` et `APIConnectionError`). L'appelant route vers la DLQ et ACK. Les erreurs transientes non catchées restent en PEL pour re-livraison.
+Si le backend LLM est indisponible, l'exécuteur agentique lève `AgentExecutionError`. L'appelant route vers la DLQ et ACK. Les erreurs transientes non catchées restent en PEL pour re-livraison.
 
 ```yaml
 # config/profiles.yaml — section résilience dans chaque profil
@@ -1424,9 +1312,9 @@ default:
 **Pattern XACK dans `atelier/main.py`** :
 
 ```python
-# SDKExecutionError → DLQ + ACK (non-retriable)
+# AgentExecutionError → DLQ + ACK (non-retriable)
 # Exception générique → laisse en PEL (transient, re-delivery automatique)
-except SDKExecutionError as exc:
+except AgentExecutionError as exc:
     await redis_conn.xadd("relais:tasks:failed", {"payload": payload, "reason": str(exc), ...})
     return True  # ACK — dans DLQ, pas perdu
 except Exception as exc:

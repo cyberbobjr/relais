@@ -400,19 +400,17 @@ class TestEventPublisher:
 
     @pytest.mark.asyncio
     async def test_emit_fire_and_forget_redis_down(self) -> None:
-        """emit() raises the exception from Redis (fire-and-forget at caller level).
+        """emit() swallows Redis errors and logs a warning (fire-and-forget semantics).
 
-        Note: the current implementation does not swallow Redis errors — callers
-        that need fire-and-forget semantics should wrap emit() in try/except.
-        This test verifies the exception propagates so callers are aware.
+        EventPublisher publishes observability events only — callers must not be
+        interrupted if the event bus is temporarily unavailable.
         """
         mock_redis = AsyncMock()
         mock_redis.publish = AsyncMock(side_effect=Exception("Connection refused"))
 
         publisher = EventPublisher(mock_redis)
-        # The current implementation propagates the exception — document this behaviour.
-        with pytest.raises(Exception, match="Connection refused"):
-            await publisher.emit("task_received", {"session_id": "abc"})
+        # Must not raise — fire-and-forget means the caller is never interrupted.
+        await publisher.emit("task_received", {"session_id": "abc"})
 
 
 # ---------------------------------------------------------------------------

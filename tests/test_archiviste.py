@@ -413,9 +413,9 @@ async def test_process_stream_writes_event_and_acks(tmp_path: Path) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_process_stream_logs_stream_log_to_stdout(
-    tmp_path: Path, capsys: pytest.CaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Messages on relais:logs must be printed to stdout with level and brick."""
+    """Messages on relais:logs must be logged with level and brick."""
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
@@ -424,13 +424,12 @@ async def test_process_stream_logs_stream_log_to_stdout(
         asyncio.CancelledError(),
     ]
 
-    with pytest.raises(asyncio.CancelledError):
+    import logging
+    with caplog.at_level(logging.DEBUG), pytest.raises(asyncio.CancelledError):
         await arc._process_stream(conn)
 
-    captured = capsys.readouterr()
-    assert "[DEBUG]" in captured.out
-    assert "portail" in captured.out
-    assert "hello world" in captured.out
+    assert "hello world" in caplog.text
+    assert "portail" in caplog.text
 
 
 @pytest.mark.unit
