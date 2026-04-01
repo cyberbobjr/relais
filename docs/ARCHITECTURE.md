@@ -135,8 +135,10 @@ PIPELINE CORE
 │ PORTAIL (consumer)
 │ ├─ Valide format (Envelope)
 │ ├─ Résout utilisateur (UserRegistry)
-│ ├─ Stamp métadonnées : user_role, display_name, llm_profile, custom_prompt_path
-│ ├─ Applique reply_policy
+│ ├─ Stamp métadonnées : user_role, display_name, llm_profile, custom_prompt_path,
+│ │   skills_dirs, allowed_mcp_tools (depuis RoleRegistry)
+│ ├─ Applique unknown_user_policy (deny / guest / pending)
+│ │   └─ [pending] publie dans relais:admin:pending_users, puis drop
 │ └─ Publie si accepté
 │   ▼
 │ relais:security (enriched messages)
@@ -189,7 +191,7 @@ Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à l
 
 **Métadonnées du stream `relais:messages:outgoing_pending`:**
 
-Hérités de `relais:security` : `llm_profile`, `user_role`, `display_name`, `custom_prompt_path` (optionnel)
+Hérités de `relais:security` : `llm_profile`, `user_role`, `display_name`, `custom_prompt_path` (optionnel), `skills_dirs`, `allowed_mcp_tools`
 Ajoutés par Atelier : `user_message`, `traces`
 
 > **Note :** Atelier lit `channels.yaml` **une seule fois au démarrage** pour construire la liste des canaux
@@ -248,11 +250,12 @@ Ce champ est présent sur toutes les enveloppes enrichies. L'Atelier le lit via 
 | `relais:messages:outgoing:slack` | Sentinelle | Aiguilleur/slack, Souvenir | Message validé, formaté Slack |
 | `relais:messages:outgoing:rest` | Sentinelle | Aiguilleur/rest, Souvenir | Message validé, JSON payload |
 
-### Streams d'erreur et monitoring
+### Streams d'erreur et admin
 
 | Stream | Producteur | Consommateur | Contenu |
 |--------|-----------|--------------|---------|
 | `relais:tasks:failed` | Atelier | Archiviste/Veilleur | Message + raison d'erreur |
+| `relais:admin:pending_users` | Portail | Admin (manuel) | Enveloppe d'un utilisateur inconnu en attente de validation (`unknown_user_policy=pending`) |
 | `relais:events:{brick}` | Tout brick | Scrutateur/Vigile | Événement (Pub/Sub) |
 | `relais:notifications:{role}` | Crieur | Aiguilleur cibles | Notification urgente |
 | `relais:push:{urgency}` | Crieur | Aiguilleur cibles | Push proactif |
@@ -370,7 +373,7 @@ Chaque brick charge config.yaml en ce ordre:
 
 | Brick | Config fichiers |
 |-------|-----------------|
-| Portail | `config.yaml`, `reply_policy.yaml`, `prompts/*.md` |
+| Portail | `config.yaml`, `users.yaml` (via `UserRegistry` + `RoleRegistry`) |
 | Sentinelle | `config.yaml`, `users.yaml`, `guardrails.yaml` |
 | Atelier | `config.yaml`, `profiles.yaml`, `soul/SOUL.md`, `mcp_servers.yaml` |
 | Souvenir | `config.yaml`, `~/.relais/storage/memory.db` (SQLite via Alembic) |
@@ -433,9 +436,9 @@ if __name__ == "__main__":
 ```
 
 **Fichiers créés automatiquement:**
-- `config/*.yaml` (config, profiles, users, reply_policy, mcp_servers, HEARTBEAT)
+- `config/*.yaml` (config, profiles, users, mcp_servers, HEARTBEAT)
 - `soul/SOUL.md` et variants (`SOUL_concise.md`, `SOUL_professional.md`)
-- **Prompt templates** (`whatsapp_default.md`, `telegram_default.md`, `out_of_hours.md`, `in_meeting.md`, `vacation.md`)
+- **Prompt templates canaux** (`telegram_default.md`, etc.)
 - Répertoires de stockage: `logs/`, `storage/`, `backup/`, `media/`, `skills/`
 
 **Propriétés critiques:**
@@ -469,31 +472,25 @@ common/
 │   ├── (dépends: asyncio, signal)
 │   └── (uses: logging)
 │
-├── stream_client.py
-│   ├── (dépends: redis.asyncio, asyncio)
-│   └── (uses: redis_client, envelope)
+├── user_registry.py
+│   ├── (dépends: yaml, pathlib)
+│   └── (uses: config_loader)
 │
-├── event_publisher.py
-│   ├── (dépends: redis.asyncio)
-│   └── (uses: redis_client)
-│
-├── health.py
-│   ├── (dépends: asyncio, psutil [opt])
-│   └── (uses: redis_client)
+├── role_registry.py
+│   ├── (dépends: yaml, dataclasses, pathlib)
+│   └── (uses: config_loader, user_registry [users.yaml])
 │
 └── markdown_converter.py
     └── (dépends: re, html2text [opt])
 
 Exports (utilisés par briques)
-├── StreamConsumer
-├── StreamProducer
-├── EventPublisher
-├── health()
 ├── Envelope, PushEnvelope, MediaRef
 ├── AsyncRedis, create_redis_conn()
 ├── GracefulShutdown
 ├── initialize_user_dir()
 ├── ConfigLoader
+├── UserRegistry, UserRecord
+├── RoleRegistry, RoleConfig
 ├── convert_md_to_telegram()
 ├── convert_md_to_slack_mrkdwn()
 ├── strip_markdown()
@@ -505,10 +502,9 @@ Exports (utilisés par briques)
 1. `config_loader` (basique, pas de dépendance)
 2. `envelope` (structures)
 3. `redis_client` (factory)
-4. `stream_client` (dépends redis_client + envelope)
-5. `event_publisher` (dépends redis_client)
-6. `health`, `shutdown`, `markdown_converter` (independantes)
-7. `init` (optionnel, au démarrage)
+4. `user_registry`, `role_registry` (dépendent config_loader)
+5. `shutdown`, `markdown_converter` (indépendantes)
+6. `init` (optionnel, au démarrage)
 
 ---
 
@@ -808,9 +804,9 @@ AgentExecutor.execute(envelope, context, stream_callback?):
 
 `AgentExecutor` accepte une liste de `BaseTool` (LangChain). Les outils internes et MCP sont unifiés sous ce type :
 
-- **`make_skills_tools(skills_dir)`** (`atelier/skills_tools.py`) — retourne des `BaseTool` pour `list_skills` et `read_skill` (découverte des SKILL.md)
+- **`ToolPolicy(base_dir)`** (`atelier/tool_policy.py`) — résout les répertoires de skills par rôle (`resolve_skills`), filtre les outils MCP par pattern (`filter_mcp_tools`) ; les dirs résolus sont passés comme `skills=` à `create_deep_agent()`
 - **`make_mcp_tools(mcp_servers)`** (`atelier/mcp_adapter.py`) — charge les outils MCP via `langchain-mcp-adapters` et retourne des `BaseTool`
-- Les outils internes et MCP sont concaténés avant la construction de l'agent ; pas de plafonnement différencié
+- Les outils MCP sont filtrés par `ToolPolicy.filter_mcp_tools()` avant d'être passés à l'agent
 
 ### Streaming Progressif
 

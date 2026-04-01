@@ -36,7 +36,7 @@ The main pipeline flows through these bricks in order:
 4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `deepagents.create_deep_agent()`
    - Consumes: `relais:tasks`
    - Loads SOUL personality + context, executes agentic loop via `AgentExecutor` (`atelier/agent_executor.py`)
-   - Tools are `list[BaseTool]` (LangChain); `make_skills_tools()` in `atelier/skills_tools.py` exposes `list_skills`/`read_skill`
+   - Tool access controlled by `ToolPolicy` (`atelier/tool_policy.py`); skill dirs resolved per-role and passed as `skills=` to `create_deep_agent()`
    - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by `McpSessionManager`
    - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
@@ -250,7 +250,7 @@ Set required keys:
 
 ### Tools (LangChain `BaseTool`)
 
-All tools exposed to the agentic loop are `langchain_core.tools.BaseTool` instances. `make_skills_tools(skills_dir)` (in `atelier/skills_tools.py`) scans the `skills/` directory and returns two built-in LangChain tools: `list_skills` and `read_skill`.
+All tools exposed to the agentic loop are `langchain_core.tools.BaseTool` instances. Skill directories are resolved per-role by `ToolPolicy` (`atelier/tool_policy.py`) and passed as `skills=` to `create_deep_agent()` — DeepAgents handles `list_skills`/`read_skill` natively. MCP tools are filtered by `ToolPolicy.filter_mcp_tools()` before being passed to the agent.
 
 ### MCP Servers (`mcp_servers.yaml`)
 
@@ -284,7 +284,7 @@ executor = AgentExecutor(
     profile=profile,            # ProfileConfig (model in provider:model-id format, max_turns, …)
     soul_prompt=soul_prompt,    # assembled system prompt string
     mcp_servers=mcp_servers,    # dict from load_for_sdk()
-    tools=tools,                # list[BaseTool] from make_skills_tools()
+    tools=tools,                # list[BaseTool] (MCP tools, filtered by ToolPolicy)
 )
 reply = await executor.execute(envelope, context, stream_callback=...)
 ```

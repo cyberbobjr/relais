@@ -71,7 +71,6 @@ Toute la configuration personnalisée, les skills, les logs et les médias sont 
 │   ├── config.yaml               ← surcharge /opt/relais/config/config.yaml
 │   ├── profiles.yaml             ← profils personnalisés
 │   ├── users.yaml                ← registry utilisateurs
-│   ├── reply_policy.yaml         ← politique de réponse
 │   ├── mcp_servers.yaml          ← MCP servers additionnels
 │   └── HEARTBEAT.md              ← tâches planifiées personnalisées
 │
@@ -122,7 +121,7 @@ Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers
 | Le Forgeron | Lit/écrit dans `~/.relais/skills/auto/` |
 | L'Atelier | Charge les skills depuis `~/.relais/skills/` |
 | Le Souvenir | DB dans `~/.relais/storage/memory.db` |
-| Le Portail | Charge `~/.relais/config/reply_policy.yaml` |
+| Le Portail | Charge `~/.relais/config/users.yaml` (UserRegistry + RoleRegistry) |
 | Le Vigile | Charge `~/.relais/soul/SOUL.md` pour hot reload |
 | Le Veilleur | Lit `~/.relais/config/HEARTBEAT.md` + backup vers `~/.relais/backup/` |
 | Tous | Config chargée via cascade automatique |
@@ -481,7 +480,12 @@ Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier
 
 ### Rôle
 
-Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` (users.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (DND, vacation, in_meeting) et route vers La Sentinelle.
+Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` et `RoleRegistry` (users.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`, `skills_dirs`, `allowed_mcp_tools`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (DND, vacation, in_meeting) et route vers La Sentinelle.
+
+**`unknown_user_policy`** (champ `config.yaml:security:unknown_user_policy`) :
+- `deny` (défaut) : drop silencieux
+- `guest` : stamp identité guest synthétique, rôle `guest` (accès restreint)
+- `pending` : publie l'enveloppe sur `relais:admin:pending_users` pour validation manuelle, puis drop
 
 ### config/reply_policy.yaml
 
@@ -668,7 +672,7 @@ Assemble system prompt (SOUL + role + channel + policy + user_facts)
   ↓
 Load MCP servers for profile (mcp_loader.load_for_sdk)
   ↓
-Build internal tools list (make_skills_tools)
+Build skills list (ToolPolicy.resolve_skills → deepagents skills= natif)
   ↓
 Execute via AgentExecutor (boucle multi-tour explicite)
   ├─ Start MCP servers (stdio/SSE)
@@ -690,7 +694,7 @@ atelier/
 ├── agent_executor.py       # AgentExecutor : boucle agentique multi-tour
 ├── mcp_adapter.py          # make_mcp_tools() → outils MCP via langchain-mcp-adapters
 ├── mcp_session_manager.py  # Cycle de vie des serveurs MCP
-├── tools.py                # make_skills_tools() → list_skills + read_skill
+├── tool_policy.py          # ToolPolicy — résolution skills_dirs + filtrage MCP (fail-closed)
 ├── mcp_loader.py           # Chargement config MCP servers
 ├── profile_loader.py       # ProfileConfig, ResilienceConfig
 ├── soul_assembler.py       # Assemblage prompt système
@@ -706,14 +710,16 @@ L'`AgentExecutor` gère un cycle multi-tour via `deepagents.create_deep_agent()`
 4. Dispatch des tool calls ; injection des résultats (`tool_result`)
 5. Rebouclage jusqu'à `end_turn` ou `max_turns`
 
-### Outils natifs — make_skills_tools()
+### Outils skills — ToolPolicy + deepagents natif
 
-`atelier/tools.py` expose deux outils pour la gestion des skills :
+`atelier/tool_policy.py` centralise l'accès aux skills et aux outils MCP :
 
-| Outil | Description |
-|-------|-------------|
-| `list_skills` | Scanne `skills_dir` récursivement pour les `SKILL.md`, retourne un catalogue `"- {nom}: {première ligne}"` |
-| `read_skill(skill_name)` | Lit et retourne le contenu complet du `SKILL.md` correspondant |
+| Méthode | Description |
+|---------|-------------|
+| `resolve_skills(metadata_value)` | Retourne les chemins absolus des skills_dirs autorisés (guard path traversal) |
+| `filter_mcp_tools(tools, metadata_value)` | Filtre la liste d'outils MCP selon les patterns fnmatch (fail-closed) |
+
+Les chemins resolus sont passés directement à `create_deep_agent(skills=[...])` — deepagents gère nativement la discovery des skills (plus de `list_skills`/`read_skill` explicites).
 
 ### Serveurs MCP — McpSessionManager
 
@@ -727,11 +733,11 @@ L'`AgentExecutor` gère un cycle multi-tour via `deepagents.create_deep_agent()`
 | `temperature` | float | Température LLM |
 | `max_tokens` | int | Tokens max par réponse |
 | `max_turns` | int | Tours max boucle agentique (défaut: 20) |
-| `mcp_timeout` | int | Timeout (s) par appel outil MCP (défaut: 10) |
-| `mcp_max_tools` | int | Max outils MCP exposés au modèle (0 = aucun MCP) |
+| `base_url` | str \| None | Endpoint LLM custom (LM Studio, Ollama, etc.) ; supporte `${VAR}` |
+| `api_key_env` | str \| None | Nom de la variable d'env contenant la clé API |
 | `resilience` | ResilienceConfig | Retries, délais backoff, fallback model |
 
-`mcp_timeout` annule un appel outil MCP dépassant le délai imparti et retourne une chaîne d'erreur au modèle sans interrompre la boucle. `mcp_max_tools` tronque la liste des outils MCP — les outils internes ne sont pas comptés dans cette limite.
+> `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` sont retirés de `ProfileConfig` — voir `users.yaml:roles:` pour le contrôle d'accès par rôle.
 
 ### Profil `memory_extractor` — extraction légère de faits utilisateur
 
@@ -745,10 +751,6 @@ memory_extractor:
   stream: false
   memory:
     short_term_messages: 0
-  allowed_tools: null
-  allowed_mcp: null
-  guardrails: []
-  memory_scope: own
   fallback_model: null
   resilience:
     retry_attempts: 2
@@ -981,25 +983,21 @@ Le Scrutateur expose GET /trace/{correlation_id}.
 
 ### Structure multi-couches des prompts
 
-L'Atelier assemble le system prompt en 6 couches, séparées par `\n\n---\n\n` :
+L'Atelier assemble le system prompt en 4 couches, séparées par `\n\n---\n\n` :
 
 ```
 prompts/
 ├── soul/
 │   └── SOUL.md                    ← Layer 1: Core personality (always attempted)
 ├── roles/
-│   ├── admin.md                   ← Layer 2: Role-specific instructions
+│   ├── admin.md                   ← Layer 2: Role overlay (path depuis users.yaml:roles:prompt_path)
 │   └── user.md
-├── users/                         ← Layer 3: Per-user overrides (created by user)
+├── users/                         ← Layer 3: Per-user override (chemin explicite depuis users.yaml:custom_prompt_path)
 │   └── discord_12345_678.md
-├── channels/
-│   ├── discord_default.md         ← Layer 4: Channel formatting rules
-│   ├── telegram_default.md
-│   └── whatsapp_default.md
-└── policies/
-    ├── in_meeting.md              ← Layer 5: Active reply policy overlay
-    ├── out_of_hours.md
-    └── vacation.md
+└── channels/
+    ├── discord_default.md         ← Layer 4: Channel formatting rules
+    ├── telegram_default.md
+    └── whatsapp_default.md
 ```
 
 **Ordre d'assemblage :**
@@ -1007,11 +1005,11 @@ prompts/
 | Ordre | Source | Fichier | Toujours présent |
 |-------|--------|------|---|
 | 1 | Personality | `soul/SOUL.md` | Oui (erreur si absent) |
-| 2 | Role | `prompts/roles/{role}.md` | Non (optionnel) |
-| 3 | User | `prompts/users/{sender_id}.md` | Non (optionnel) |
+| 2 | Role | `prompts/roles/{role}.md` (via `users.yaml:roles:prompt_path`) | Non (optionnel) |
+| 3 | User | chemin explicite `users.yaml:custom_prompt_path` | Non (optionnel, warning si fichier absent) |
 | 4 | Channel | `prompts/channels/{channel}_default.md` | Non (warning si absent) |
-| 5 | Policy | `prompts/policies/{reply_policy}.md` | Non (optionnel) |
-| 6 | Memory | Faits utilisateur injectés depuis SQLite | Non (optionnel) |
+
+> **Note :** Les couches 5 (reply_policy) et 6 (user_facts) ont été retirées de l'assembleur. La politique de réponse est gérée en amont par le Portail (`reply_policy` dans `users.yaml:users:`) ; les user_facts ne sont plus injectés dans le system prompt.
 
 ### Internationalisation — SOUL.md gère tout
 
@@ -1032,6 +1030,8 @@ Message utilisateur                                      N tokens
 ---
 
 ## 16. Profils — config/profiles.yaml complet
+
+> **Migration architecture (2026-04-01) :** Les champs `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` ont été **retirés de `ProfileConfig`** (profiles.yaml). Ces contraintes d'accès sont désormais définies par **rôle** dans `users.yaml:roles:` (champs `skills_dirs`, `allowed_mcp_tools`, `prompt_path`) et stampées par le Portail via `RoleRegistry`. Les exemples YAML ci-dessous reflètent les profils de conception originale — la structure réelle de `profiles.yaml` ne contient plus ces champs.
 
 ### Règle de résolution du profil
 
@@ -1175,10 +1175,6 @@ profiles:
     stream: false
     memory:
       short_term_messages: 0
-    allowed_tools: null
-    allowed_mcp: null
-    guardrails: []
-    memory_scope: own
     resilience:
       retry_attempts: 2
       retry_delays: [1, 3]
@@ -1355,12 +1351,11 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 ├── common/
 │   ├── envelope.py                    ← Envelope + PushEnvelope + MediaRef
 │   ├── redis_client.py
-│   ├── stream_client.py
-│   ├── event_publisher.py
 │   ├── shutdown.py
-│   ├── health.py
 │   ├── config_loader.py               ← get_relais_home() + resolve_config_path()
 │   ├── init.py                        ← initialize_user_dir()
+│   ├── user_registry.py               ← UserRegistry + UserRecord
+│   ├── role_registry.py               ← RoleRegistry + RoleConfig (skills_dirs, allowed_mcp_tools)
 │   └── markdown_converter.py
 │
 ├── aiguilleur/
@@ -1374,9 +1369,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │       └── rest/adapter.py
 │
 ├── portail/
-│   ├── main.py
-│   ├── reply_policy.py
-│   └── prompt_loader.py
+│   └── main.py
 │
 ├── sentinelle/
 │   ├── main.py
@@ -1388,7 +1381,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── agent_executor.py
 │   ├── mcp_adapter.py
 │   ├── mcp_session_manager.py
-│   ├── tools.py                       ← list_skills + read_skill
+│   ├── tool_policy.py                 ← ToolPolicy — skills + MCP access enforcement
 │   ├── mcp_loader.py
 │   ├── profile_loader.py
 │   ├── soul_assembler.py
@@ -1434,7 +1427,6 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── config.yaml
 │   ├── profiles.yaml
 │   ├── users.yaml
-│   ├── reply_policy.yaml
 │   ├── mcp_servers.yaml
 │   └── HEARTBEAT.md
 │
