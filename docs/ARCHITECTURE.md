@@ -154,12 +154,12 @@ PIPELINE CORE
 │ ├─ Streams output token-by-token → relais:messages:streaming:{channel}:{correlation_id}
 │ ├─ Publie réponse si succès
 │ └─ Publie en DLQ si échec après retries
-│   ├─ relais:messages:outgoing_pending:{channel}  (→ Sentinelle outgoing)
+│   ├─ relais:messages:outgoing_pending  (→ Sentinelle outgoing)
 │   ├─ relais:messages:streaming:{channel}:{correlation_id}
 │   └─ relais:tasks:failed (DLQ)
 │       ▼
 │ SENTINELLE (consumer — flux sortant)
-│ ├─ [SORTANT] Consomme relais:messages:outgoing_pending:{channel}
+│ ├─ [SORTANT] Consomme relais:messages:outgoing_pending
 │ ├─ [SORTANT] Applique guardrails sortants
 │ └─ [SORTANT] Route vers relais:messages:outgoing:{channel}
 │       ▼
@@ -185,9 +185,9 @@ SORTANT (Canaux externes)
 
 Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à la fois :
 - les chunks progressifs sur `relais:messages:streaming:{channel}:{correlation_id}` (rendu live)
-- l'enveloppe finale sur `relais:messages:outgoing_pending:{channel}` (→ Sentinelle outgoing → `outgoing:{channel}`)
+- l'enveloppe finale sur `relais:messages:outgoing_pending` (→ Sentinelle outgoing → `outgoing:{channel}`)
 
-**Métadonnées du stream `relais:messages:outgoing_pending:{channel}`:**
+**Métadonnées du stream `relais:messages:outgoing_pending`:**
 
 Hérités de `relais:security` : `llm_profile`, `user_role`, `display_name`, `custom_prompt_path` (optionnel)
 Ajoutés par Atelier : `user_message`, `traces`
@@ -242,10 +242,7 @@ Ce champ est présent sur toutes les enveloppes enrichies. L'Atelier le lit via 
 
 | Stream | Producteur | Consommateur | Contenu |
 |--------|-----------|--------------|---------|
-| `relais:messages:outgoing_pending:discord` | Atelier | Sentinelle (outgoing) | Message Discord en attente de validation sortante |
-| `relais:messages:outgoing_pending:telegram` | Atelier | Sentinelle (outgoing) | Message Telegram en attente de validation sortante |
-| `relais:messages:outgoing_pending:slack` | Atelier | Sentinelle (outgoing) | Message Slack en attente de validation sortante |
-| `relais:messages:outgoing_pending:rest` | Atelier | Sentinelle (outgoing) | Message REST en attente de validation sortante |
+| `relais:messages:outgoing_pending` | Atelier | Sentinelle (outgoing) | Message tous canaux en attente de validation sortante |
 | `relais:messages:outgoing:discord` | Sentinelle | Aiguilleur/discord, Souvenir | Message validé, formaté Discord |
 | `relais:messages:outgoing:telegram` | Sentinelle | Aiguilleur/telegram, Souvenir | Message validé, formaté Telegram |
 | `relais:messages:outgoing:slack` | Sentinelle | Aiguilleur/slack, Souvenir | Message validé, formaté Slack |
@@ -637,8 +634,8 @@ Chaque brick a mot de passe séparé (`.env`). Atelier a accès aux streams de s
 ```yaml
 # redis.conf
 user portail +@all ~* >$REDIS_PASS_PORTAIL
-user sentinelle +@all ~relais:security ~relais:tasks ~relais:messages:outgoing_pending:* ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SENTINELLE
-user atelier +@all ~relais:tasks ~relais:messages:outgoing_pending:* ~relais:messages:streaming:* ~relais:logs >$REDIS_PASS_ATELIER
+user sentinelle +@all ~relais:security ~relais:tasks ~relais:messages:outgoing_pending ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SENTINELLE
+user atelier +@all ~relais:tasks ~relais:messages:outgoing_pending ~relais:messages:streaming:* ~relais:logs >$REDIS_PASS_ATELIER
 user souvenir +@all ~relais:memory:* ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SOUVENIR
 ```
 
@@ -862,7 +859,7 @@ agent.astream({"messages": ...}, stream_mode="messages")
   → chunks token-by-token → stream_callback → relais:messages:streaming
   → tool calls gérés automatiquement par DeepAgents
   ↓
-Résultat agrégé → relais:messages:outgoing_pending:{channel}  (→ Sentinelle outgoing → outgoing:{channel})
+Résultat agrégé → relais:messages:outgoing_pending  (→ Sentinelle outgoing → outgoing:{channel})
 ```
 
 ### Souvenir — Dual-Stream avec Extracteur Mémoire
