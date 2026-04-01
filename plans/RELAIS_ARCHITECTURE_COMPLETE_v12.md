@@ -927,12 +927,12 @@ Le pipeline normal n'est jamais perturbé : les deux consumer groups sont indép
 
 #### `/clear`
 
-1. Le Commandant publie `{"action": "clear", "session_id": <session_id>}` sur `relais:memory:request`
+1. Le Commandant publie `{"action": "clear", "session_id": <session_id>, "envelope_json": <envelope serialisée>}` sur `relais:memory:request`
 2. Le Souvenir efface :
    - Le contexte Redis court terme (`relais:context:{session_id}`)
    - Les messages SQLite de la session (table `messages`)
    - Les `user_facts` sont **conservés**
-3. Le Commandant répond sur `relais:messages:outgoing:{channel}` : `"Historique effacé."`
+3. Le Souvenir répond sur `relais:messages:outgoing:{channel}` : `"✓ Historique de conversation effacé."` (confirmation envoyée par `ClearHandler` après le vrai nettoyage, si `envelope_json` est présent dans la requête)
 
 #### `/dnd`
 

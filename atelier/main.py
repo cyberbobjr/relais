@@ -312,16 +312,18 @@ class Atelier:
                     count=10,
                     block=block_ms,
                 )
-                if results:
-                    for _, messages in results:
-                        for msg_id, data in messages:
-                            last_id = msg_id
-                            res = json.loads(data.get("payload", "{}"))
-                            if res.get("correlation_id") == correlation_id:
-                                return res.get("messages", [])
             except Exception as exc:
                 logger.warning("Error reading memory response: %s", exc)
                 break
+
+            next_last_id, messages = _extract_matching_memory_messages(
+                results,
+                correlation_id,
+            )
+            if next_last_id is not None:
+                last_id = next_last_id
+            if messages is not None:
+                return messages
 
         logger.warning(
             "[%s] Memory context timeout for session %s",
@@ -427,6 +429,36 @@ def _xadd_id_to_xread_start(xadd_id: str) -> str:
         return f"{int(ts_ms) - 1}-0"
     except (ValueError, AttributeError):
         return "0"
+
+
+def _extract_matching_memory_messages(
+    results: Any,
+    correlation_id: str,
+) -> tuple[str | None, list[dict] | None]:
+    """Extract the newest stream ID and matching memory payload from XREAD data.
+
+    Args:
+        results: Raw Redis XREAD response.
+        correlation_id: Request correlation ID to match.
+
+    Returns:
+        Tuple of (last_seen_id, messages). ``messages`` is None when no
+        matching response is found in the batch.
+    """
+    last_seen_id: str | None = None
+
+    for _, stream_messages in results or []:
+        for msg_id, data in stream_messages:
+            last_seen_id = msg_id
+            try:
+                response = json.loads(data.get("payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if response.get("correlation_id") == correlation_id:
+                return last_seen_id, response.get("messages", [])
+
+    return last_seen_id, None
 
 
 if __name__ == "__main__":
