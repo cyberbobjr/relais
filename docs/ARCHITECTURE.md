@@ -1,7 +1,7 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour:** 2026-03-31
-**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (Outils internes + MCP stdio/SSE), 5c (déduplication streaming Discord)
+**Dernière mise à jour:** 2026-04-01
+**Phases implémentées:** 1, 2, 3 (MVP core loop), 5 (Outils internes + MCP stdio/SSE), 5a.6 (multi-provider LLM — base_url/api_key_env), 5a.7 (Discord typing indicator), 5c (déduplication streaming Discord)
 
 ---
 
@@ -547,6 +547,8 @@ class AiguilleurDiscord(AiguilleurBase):
     - `_resolve_discord_channel(envelope)` — résolution canal/DM avec fallback `fetch_user + create_dm`
     - `_deliver_outgoing_message(data)` — parse + envoi du message final
     - `_consume_outgoing_stream()` — boucle de consommation `relais:messages:outgoing:discord`
+    - `_typing_loop(channel)` — affiche l'indicateur "est en train d'écrire" dès réception d'un message (tâche asyncio, timeout 120 s)
+    - `_cancel_typing()` — annule `_typing_loop` à l'envoi de la réponse
 
 ### Implémentations Phase 5
 
