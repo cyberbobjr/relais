@@ -154,16 +154,16 @@ XADD relais:tasks:failed * payload <original Envelope JSON>
 
 ---
 
-### `relais:messages:outgoing_pending:{channel}`
+### `relais:messages:outgoing_pending`
 
 **Direction**: Atelier → Sentinelle
 **Consumer groups**: `sentinelle_outgoing_group`
 
 Carries completed LLM response envelopes waiting for outgoing validation by Sentinelle before delivery.
-The destination channel is determined by the `{channel}` suffix in the stream key.
+The destination channel is determined by the `channel` field inside the Envelope payload.
 
 ```
-XADD relais:messages:outgoing_pending:discord * payload <Envelope JSON>
+XADD relais:messages:outgoing_pending * payload <Envelope JSON>
 ```
 
 **Metadata added by Atelier**:
@@ -456,7 +456,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:messages:incoming` | `portail_group`, `commandant_group` | Portail, Commandant |
 | `relais:security` | `sentinelle_group` | Sentinelle |
 | `relais:tasks` | `atelier_group` | Atelier |
-| `relais:messages:outgoing_pending:{channel}` | `sentinelle_outgoing_group` | Sentinelle |
+| `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group`, `souvenir_outgoing_group` | Aiguilleur, Souvenir |
 | `relais:memory:request` | `souvenir_group` | Souvenir |
 | `relais:logs` | `archiviste_group` | Archiviste |

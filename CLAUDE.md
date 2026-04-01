@@ -31,7 +31,7 @@ The main pipeline flows through these bricks in order:
 
 3. **Sentinelle** (`sentinelle/`) - Bidirectional security checkpoint
    - **Incoming**: Consumes `relais:security`, ACL validation (users.yaml), produces `relais:tasks` (or refuses if ACL fails)
-   - **Outgoing**: Consumes `relais:messages:outgoing_pending:{channel}` (channel-specific), applies outgoing guardrails, produces `relais:messages:outgoing:{channel}`
+   - **Outgoing**: Consumes `relais:messages:outgoing_pending` (single shared stream), applies outgoing guardrails, produces `relais:messages:outgoing:{channel}`
 
 4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `deepagents.create_deep_agent()`
    - Consumes: `relais:tasks`
@@ -42,7 +42,7 @@ The main pipeline flows through these bricks in order:
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
    - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `profiles.yaml`
-   - Produces: `relais:messages:outgoing_pending:{channel}` (→ consumed by Sentinelle outgoing loop)
+   - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
    - Dual-stream consumer: `relais:memory:request` (Atelier requests) + `relais:messages:outgoing:*` (response observer)

@@ -184,9 +184,9 @@ Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers
 |---|---|---|---|---|
 | 🚦 **L'Aiguilleur** | `aiguilleur/` | Relay | Adaptateur de canaux — processus unifié | ← `outgoing:{ch}` / → `incoming:{ch}` |
 | 🏛️ **Le Portail** | `portail/` | Transformer | Routage, identification, politique | ← `incoming:{ch}` / → `security` |
-| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, profils, guardrails (bidirectionnel) | ← `security` / → `tasks` ; ← `outgoing_pending:{ch}` / → `outgoing:{ch}` |
+| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, profils, guardrails (bidirectionnel) | ← `security` / → `tasks` ; ← `outgoing_pending` / → `outgoing:{ch}` |
 | 📨 **Le Coursier** | Redis | Infrastructure | Bus messages Unix socket | — |
-| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `tasks` / → `outgoing_pending:{ch}`, `tasks:failed` |
+| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `tasks` / → `outgoing_pending`, `tasks:failed` |
 | 💭 **Le Souvenir** | `souvenir/` | Stream Consumer | Mémoire contexte + longue durée | ← `memory:request` + `outgoing:*` / → `memory:response` |
 | 📚 **L'Archiviste** | `archiviste/` | Pure Observer | Logs → JSONL + SQLite | ← `logs` + `events:*` (pubsub) |
 
@@ -294,11 +294,11 @@ user portail    on >${REDIS_PASS_PORTAIL}
   +subscribe +publish +xadd +hset +expire
 
 user sentinelle on >${REDIS_PASS_SENTINELLE}
-  ~relais:security ~relais:tasks ~relais:messages:outgoing_pending:* ~relais:messages:outgoing:* ~relais:logs
+  ~relais:security ~relais:tasks ~relais:messages:outgoing_pending ~relais:messages:outgoing:* ~relais:logs
   +subscribe +publish +xreadgroup +xack +xadd
 
 user atelier    on >${REDIS_PASS_ATELIER}
-  ~relais:tasks ~relais:tasks:failed ~relais:memory:* ~relais:messages:streaming:* ~relais:messages:outgoing_pending:* ~relais:events:* ~relais:logs
+  ~relais:tasks ~relais:tasks:failed ~relais:memory:* ~relais:messages:streaming:* ~relais:messages:outgoing_pending ~relais:events:* ~relais:logs
   +subscribe +publish +xreadgroup +xack +xadd
 
 user souvenir   on >${REDIS_PASS_SOUVENIR}
@@ -345,7 +345,7 @@ STREAMS (at-least-once — perte inacceptable)
   relais:memory:request                 Atelier → Souvenir
   relais:memory:response                Souvenir → Atelier
   relais:messages:incoming:{channel}    Aiguilleur → Portail
-  relais:messages:outgoing_pending:{channel}  Atelier → Sentinelle (outgoing pass-through)
+  relais:messages:outgoing_pending            Atelier → Sentinelle (outgoing pass-through)
   relais:messages:outgoing:{channel}    Sentinelle → Aiguilleur + Souvenir (observer)
   relais:messages:streaming:{ch}:{corr} Atelier → Aiguilleur (progressive chunks)
   relais:security                       Portail ↔ Sentinelle
@@ -571,7 +571,7 @@ overrides:
 
 > **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
 > Elle valide l'ACL en lecture depuis `users.yaml` et transmet l'enveloppe enrichie inchangée vers `relais:tasks` (flux entrant).
-> En flux sortant, elle consomme `relais:messages:outgoing_pending:{channel}`, applique les guardrails sortants, et publie vers `relais:messages:outgoing:{channel}`.
+> En flux sortant, elle consomme `relais:messages:outgoing_pending`, applique les guardrails sortants, et publie vers `relais:messages:outgoing:{channel}`.
 
 ### Les 3 rôles humains
 
@@ -677,7 +677,7 @@ Execute via AgentExecutor (boucle multi-tour explicite)
   ↓
 If streaming capable (Discord/Telegram): publish chunks to relais:messages:streaming:{channel}:{correlation_id}
   ↓
-Publish response to relais:messages:outgoing_pending:{channel}  (→ Sentinelle outgoing → outgoing:{channel})
+Publish response to relais:messages:outgoing_pending  (→ Sentinelle outgoing → outgoing:{channel})
   ↓
 Conditional XACK (success or DLQ) — never lose messages on retry
 ```
@@ -777,7 +777,7 @@ default:
 
 - `AgentExecutionError` → DLQ (`relais:tasks:failed`) + ACK
 - Exception transiente (réseau, timeout) → pas d'ACK → reste en PEL pour re-livraison
-- Succès → ACK après publication dans `relais:messages:outgoing_pending:{channel}`
+- Succès → ACK après publication dans `relais:messages:outgoing_pending`
 
 ---
 

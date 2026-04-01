@@ -58,12 +58,12 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 │             relais:tasks:failed                 (DLQ)           │
 └─────────────────────────────────────────────────────────────────┘
           │                        │                   │
-relais:messages:outgoing_pending:{ch}  │       relais:logs /
+relais:messages:outgoing_pending       │       relais:logs /
           │                   relais:memory:*   relais:events:*
           ▼                        │                   ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ SENTINELLE — flux sortant (guardrails + routage)            │
-│  [SORTANT] Consomme : relais:messages:outgoing_pending:{ch} │
+│  [SORTANT] Consomme : relais:messages:outgoing_pending       │
 │  [SORTANT] Produit  : relais:messages:outgoing:{ch}         │
 └─────────────────────────────────────────────────────────────┘
           │                        ▼
@@ -128,7 +128,7 @@ flowchart TD
         A["AgentExecutor (DeepAgents/LangGraph) — boucle agentique · streaming live\nSOUL system prompt + historique mémoire (Souvenir)\nServeurs MCP : outils externes (stdio · SSE)\nOutils internes : @tool (list_skills, read_skill)\nRetries backoff configurable · DLQ"]
     end
 
-    ATELIER -->|"relais:messages:outgoing_pending:{channel}"| SENTINELLE
+    ATELIER -->|"relais:messages:outgoing_pending"| SENTINELLE
     SENTINELLE -->|"relais:messages:outgoing:{channel}"| AIG_OUT
     ATELIER -->|"relais:memory:request\n+ observe outgoing"| SOUVENIR
     ATELIER -->|"relais:tasks:failed"| DLQ[("DLQ")]
