@@ -72,7 +72,7 @@ class AgentExecutor:
 ### Contrat `make_mcp_tools`
 
 ```python
-async def make_mcp_tools(session_manager: Any) -> list[StructuredTool]
+async def make_mcp_tools(session_manager: Any) -> list[BaseTool]
 ```
 
 - Itère `session_manager.sessions` (dict `server_name → MCP ClientSession`)
@@ -83,17 +83,19 @@ async def make_mcp_tools(session_manager: Any) -> list[StructuredTool]
 ### Contrat `make_skills_tools`
 
 ```python
-def make_skills_tools(skills_dir: Path) -> list[StructuredTool]
+def make_skills_tools(skills_dir: Path) -> list[BaseTool]
 ```
 
-- Retourne `[list_skills, read_skill]` (StructuredTool via `StructuredTool.from_function()`)
+- Retourne `[list_skills, read_skill]` (décorateur `@tool(parse_docstring=True)`)
 - Scan récursif `skills_dir.rglob("SKILL.md")`
 - Guard path traversal dans `read_skill` (interdit `/`, `\`, `..`)
 - Fonctionne même si `skills_dir` n'existe pas (retourne message vide/erreur)
 
 ### Format modèle
 
-`"provider:model-id"` — ex: `"anthropic:claude-sonnet-4-6"`, `"openai:qwen3-coder-30b-a3b-instruct"` (LM Studio local)
+`"provider:model-id"` — ex: `"anthropic:claude-sonnet-4-6"`, `"openai:mon-model"` (LM Studio/Ollama)
+
+`ProfileConfig` expose aussi `base_url: str | None` et `api_key_env: str | None` (obligatoires dans `profiles.yaml`). `base_url` supporte `${VAR}` — fail-fast si variable absente. `api_key_env` est le nom de la variable d'env contenant la clé API (`null` = pas de clé).
 
 ### MemoryExtractor migré
 
@@ -247,6 +249,21 @@ Ces champs existaient dans `ProfileConfig` pour le SDKExecutor (limite d'outils 
 - `mcp_timeout` : géré par `McpSessionManager` via `asyncio.wait_for` directement
 - `mcp_max_tools` : plus pertinent — DeepAgents gère la liste d'outils en interne
 - Les deux champs sont supprimés de `ProfileConfig` et `config/profiles.yaml.default`
+
+### 5a.6 ✅ Multi-provider LLM — `base_url` et `api_key_env` dans `ProfileConfig` DONE (2026-04-01)
+
+`ProfileConfig` a été étendu avec deux champs obligatoires :
+- `base_url: str | None` — endpoint custom (ex: LM Studio, déploiement privé). Supporte `${VAR}` (fail-fast si non définie).
+- `api_key_env: str | None` — nom de la variable d'env contenant la clé API.
+
+`_resolve_profile_model()` dans `agent_executor.py` construit un `BaseChatModel` via `init_chat_model()` quand l'un des deux est non-null, sinon passe le string `model` directement à `create_deep_agent`.
+
+Providers supportés : Anthropic, OpenRouter, Ollama, LM Studio (OpenAI-compatible).
+Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-mistralai`, `langchain-deepseek`.
+
+### 5a.7 ✅ Discord typing indicator DONE (2026-04-01)
+
+`_RelaisDiscordClient` affiche l'indicateur "est en train d'écrire" dès réception d'un message, jusqu'à l'envoi de la réponse ou 120 s (timeout de sécurité). Implémenté via `_typing_loop` (tâche asyncio) + `_cancel_typing`.
 
 ---
 
@@ -440,8 +457,12 @@ python-dotenv = ">=1.0"
 
 # Atelier DeepAgents (implémentées)
 deepagents        # moteur agentique LangGraph
-langchain-core    # BaseTool, StructuredTool, messages
-langchain-openai  # init_chat_model support OpenAI-compatible providers (LM Studio, etc.)
+langchain-core       # BaseTool, messages
+langchain-openai     # init_chat_model support OpenAI-compatible providers (LM Studio, etc.)
+langchain-openrouter # OpenRouter provider
+langchain-ollama     # Ollama local provider
+langchain-mistralai  # Mistral provider
+langchain-deepseek   # DeepSeek provider
 
 # Phase 4
 apscheduler = ">=4.0"
