@@ -18,6 +18,7 @@ from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 from common.text_utils import strip_outer_quotes
+from common.user_registry import UserRegistry
 logger = logging.getLogger("portail")
 
 
@@ -37,18 +38,46 @@ class Portail:
         self.consumer_name: str = "portail_1"
         self._dnd_cached: bool | None = None
         self._dnd_cache_at: float = 0.0
+        self._user_registry: UserRegistry = UserRegistry()
 
-    async def _update_session(self, redis_conn: Any, user_id: str, channel: str) -> None:
-        """Update active session TTL to route response appropriately.
+    def _enrich_envelope(self, envelope: "Envelope") -> None:
+        """Stamp user identity and LLM profile metadata onto the envelope.
+
+        Resolves the sender against the UserRegistry and writes known fields
+        into ``envelope.metadata`` in place.  Unknown users are silently
+        skipped — their identity fields are simply absent, which lets the
+        Sentinelle decide what to do.
+
+        Fields always written:
+            - ``llm_profile``: resolved from ``channel_profile`` metadata key
+              (stamped upstream by the Aiguilleur) or ``"default"`` when absent
+              or ``None``.
+
+        Fields written only for known users:
+            - ``user_role``: the user's role (e.g. ``"admin"``, ``"user"``).
+            - ``display_name``: human-readable name.
+            - ``custom_prompt_path``: per-user prompt override path, only
+              written when the registry value is not ``None``.
 
         Args:
-            redis_conn: Active Redis connection.
-            user_id: ID of the user initiating the session.
-            channel: Communication channel name.
+            envelope: The incoming envelope to enrich in place.
         """
-        key = f"relais:active_sessions:{user_id}"
-        await redis_conn.hset(key, channel, datetime.now(timezone.utc).timestamp())
-        await redis_conn.expire(key, 3600)  # TTL: 1 hour
+        # llm_profile resolution: channel_profile > "default"
+        channel_profile = envelope.metadata.get("channel_profile")
+        envelope.metadata["llm_profile"] = channel_profile if channel_profile else "default"
+
+        # Identity enrichment — skip silently when user not found
+        record = self._user_registry.resolve_user(
+            sender_id=envelope.sender_id,
+            channel=envelope.channel,
+        )
+        if record is None:
+            return
+
+        envelope.metadata["user_role"] = record.role
+        envelope.metadata["display_name"] = record.display_name
+        if record.custom_prompt_path is not None:
+            envelope.metadata["custom_prompt_path"] = record.custom_prompt_path
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: "Envelope") -> None:
         """Track active sessions per user for the Crieur (push notifications).
@@ -192,10 +221,11 @@ class Portail:
                                 )
                                 continue  # Le finally:xack s'exécute quand même
 
-                            # Update session mapping
-                            await self._update_session(
-                                redis_conn, envelope.sender_id, envelope.channel
-                            )
+                            # Enrich envelope with user identity and LLM profile
+                            self._enrich_envelope(envelope)
+
+                            # Update active session tracking
+                            await self._update_active_sessions(redis_conn, envelope)
 
                             # Add trace
                             envelope.add_trace("portail", "received and session updated")

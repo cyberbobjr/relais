@@ -1,44 +1,76 @@
 # Registry des utilisateurs RELAIS
 # Copié dans ~/.relais/config/users.yaml au premier lancement.
 # La Sentinelle charge ce fichier pour appliquer les ACL.
+#
+# ── Contrôle d'accès ─────────────────────────────────────────────────────────
+access_control:
+  # allowlist : tout refuser sauf les expéditeurs explicitement déclarés
+  # blocklist : tout accepter sauf les expéditeurs explicitement bloqués
+  default_mode: allowlist
+  channels: {}
+  # Exemple de surcharge par canal :
+  # channels:
+  #   telegram:
+  #     mode: blocklist
 
+# ── Groupes (WhatsApp, Telegram) ─────────────────────────────────────────────
+# L'autorisation de groupe porte sur le groupe lui-même, pas sur l'expéditeur.
+groups: []
+# Exemple :
+# groups:
+#   - id: grp_famille
+#     channel: whatsapp
+#     group_id: "120363000000000@g.us"
+#     allowed: true
+#     blocked: false
+
+# ── Utilisateurs ──────────────────────────────────────────────────────────────
 users:
 
   # Compte système interne — utilisé par les briques pour s'identifier
   usr_system:
     display_name: "Système RELAIS"
     role: admin
-    channels: ["*"]
     blocked: false
-    llm_profile: default
     notes: "Compte interne — ne pas supprimer"
 
   # Propriétaire principal — accès complet
   usr_admin:
     display_name: "Administrateur"
     role: admin
-    channels: ["discord", "telegram", "whatsapp", "rest"]
     blocked: false
-    llm_profile: precise
-    # Identifiants par canal (optionnels)
+    custom_prompt_path: null   # optionnel : chemin vers un prompt utilisateur personnalisé
+    # Identifiants par canal et contexte d'accès.
+    # context "dm"     → message privé direct
+    # context "server" → mention dans un serveur Discord
+    # Pour les groupes WhatsApp/Telegram, voir la section groups ci-dessus.
+    # Pour REST, les clés API sont rattachées à ce compte.
     identifiers:
-      discord: null
-      telegram: null
+      discord:
+        dm: null        # ID Discord numérique, ex: "123456789012345678"
+        server: null    # même ID ou null pour interdire les mentions serveur
+      telegram:
+        dm: null        # ID Telegram numérique
+      whatsapp:
+        dm: null        # Numéro international, ex: "+33600000000"
+      rest:
+        api_keys: []    # Liste de clés API rattachées à ce compte
     notes: "Compte administrateur principal"
 
-  # Exemple d'utilisateur standard — à personnaliser
+  # Exemple d'utilisateur standard — à personnaliser ou supprimer
   usr_exemple:
     display_name: "Utilisateur Exemple"
     role: user
-    channels: ["discord"]
     blocked: false
-    llm_profile: default
+    custom_prompt_path: null   # ex: "users/discord_123456789.md"
     identifiers:
-      discord: null
+      discord:
+        dm: null
     notes: "Exemple — remplacer ou supprimer"
 
-# Politique par défaut pour les utilisateurs inconnus
-default_policy:
-  allow: false
-  llm_profile: fast
-  max_messages_per_hour: 10
+# ── Rôles ─────────────────────────────────────────────────────────────────────
+roles:
+  admin:
+    actions: ["send", "command", "admin"]
+  user:
+    actions: ["send"]

@@ -8,6 +8,8 @@ All Discord library calls and Redis interactions are mocked.
 import json
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
+from aiguilleur.channel_config import ChannelConfig
+
 import pytest
 
 from common.envelope import Envelope
@@ -103,6 +105,7 @@ async def test_on_message_queues_envelope_on_mention():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._llm_profile = "default"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -143,6 +146,7 @@ async def test_on_message_dm_queues_envelope():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._llm_profile = "default"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -177,6 +181,7 @@ async def test_on_message_empty_content_defaults_to_coucou():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._llm_profile = "default"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -213,6 +218,7 @@ async def test_on_message_xadd_failure_does_not_raise():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._llm_profile = "default"
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             # Must not raise
@@ -360,3 +366,95 @@ async def test_consume_outgoing_xreadgroup_exception_does_not_crash():
 
             # Must not raise
             await client._consume_outgoing_stream()
+
+# ---------------------------------------------------------------------------
+# LLM profile stamping in envelope.metadata (Phase 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_on_message_stamps_channel_profile_from_channel_config():
+    """When the channel has profile='fast', envelope.metadata['channel_profile'] == 'fast'.
+
+    The DiscordAiguilleur must stamp the resolved channel profile under the
+    'channel_profile' key (not 'llm_profile') on every incoming envelope it
+    creates.  Downstream Portail is responsible for resolving 'llm_profile'.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_user = MagicMock()
+    mock_user.id = 100
+
+    mock_message = MagicMock()
+    mock_message.author.id = 999
+    mock_message.author.name = "TestUser"
+    mock_message.mentions = [mock_user]
+    mock_message.channel = type("TextChannel", (), {})()
+    mock_message.channel.id = 555
+    mock_message.content = f"<@{mock_user.id}> hello"
+
+    mock_redis = AsyncMock()
+
+    # Channel config with an explicit profile
+    channel_config = ChannelConfig(name="discord", profile="fast")
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis_conn = mock_redis
+        client.stream_in = "relais:messages:incoming"
+        client._channel_config = channel_config
+        client._llm_profile = "fast"   # pre-resolved at init time
+
+        with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
+            await client.on_message(mock_message)
+
+    mock_redis.xadd.assert_called_once()
+    payload_json = mock_redis.xadd.call_args[0][1]["payload"]
+    data = json.loads(payload_json)
+    assert data["metadata"]["channel_profile"] == "fast"
+    assert "llm_profile" not in data["metadata"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_on_message_stamps_default_channel_profile_when_no_channel_profile():
+    """When the channel has no profile, envelope.metadata['channel_profile'] falls back to 'default'.
+
+    The DiscordAiguilleur uses get_default_llm_profile() when
+    ChannelConfig.profile is None.  The result is stamped as 'channel_profile',
+    not 'llm_profile'.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_user = MagicMock()
+    mock_user.id = 100
+
+    mock_message = MagicMock()
+    mock_message.author.id = 999
+    mock_message.author.name = "TestUser"
+    mock_message.mentions = [mock_user]
+    mock_message.channel = type("TextChannel", (), {})()
+    mock_message.channel.id = 555
+    mock_message.content = f"<@{mock_user.id}> hello"
+
+    mock_redis = AsyncMock()
+
+    # Channel config without a profile
+    channel_config = ChannelConfig(name="discord", profile=None)
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis_conn = mock_redis
+        client.stream_in = "relais:messages:incoming"
+        client._channel_config = channel_config
+        client._llm_profile = "default"  # resolved at init to config fallback
+
+        with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
+            await client.on_message(mock_message)
+
+    mock_redis.xadd.assert_called_once()
+    payload_json = mock_redis.xadd.call_args[0][1]["payload"]
+    data = json.loads(payload_json)
+    assert data["metadata"]["channel_profile"] == "default"
+    assert "llm_profile" not in data["metadata"]

@@ -20,7 +20,7 @@ Usage:
 Notes:
   - start all démarre supervisord si nécessaire puis lance tous les programmes.
   - reload all correspond à supervisorctl reload.
-  - stop all arrête les programmes supervisés, mais ne coupe pas le démon supervisord.
+  - stop all arrête les programmes supervisés et coupe le démon supervisord.
 EOF
 }
 
@@ -106,7 +106,21 @@ case "$ACTION" in
             echo "supervisord n'est pas lancé. Rien à arrêter."
             exit 0
         fi
-        run_supervisorctl stop all
+        echo "Arrêt de supervisord..."
+        run_supervisorctl shutdown
+        # Attendre que supervisord libère le socket (max 10s)
+        stop_retries=40
+        for ((attempt=1; attempt<=stop_retries; attempt++)); do
+            if [[ ! -S "$SOCKET_PATH" ]]; then
+                break
+            fi
+            sleep 0.25
+        done
+        if [[ -S "$SOCKET_PATH" ]]; then
+            echo "Timeout: supervisord n'a pas libéré le socket dans les temps." >&2
+            exit 1
+        fi
+        echo "supervisord arrêté."
         ;;
     restart)
         if [[ "$TARGET" != "all" ]]; then
@@ -114,8 +128,20 @@ case "$ACTION" in
             exit 1
         fi
         if is_supervisord_running; then
+            echo "Arrêt de supervisord..."
             run_supervisorctl shutdown
-            sleep 0.5
+            # Attendre que supervisord libère le socket (max 10s)
+            stop_retries=40
+            for ((attempt=1; attempt<=stop_retries; attempt++)); do
+                if [[ ! -S "$SOCKET_PATH" ]]; then
+                    break
+                fi
+                sleep 0.25
+            done
+            if [[ -S "$SOCKET_PATH" ]]; then
+                echo "Timeout: supervisord n'a pas libéré le socket dans les temps." >&2
+                exit 1
+            fi
         fi
         load_dotenv
         echo "Démarrage de supervisord..."

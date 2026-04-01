@@ -19,18 +19,19 @@ The main pipeline flows through these bricks in order:
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
    - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
+   - **Profile stamping**: each adapter stamps `envelope.metadata["channel_profile"]` from `ChannelConfig.profile` (channels.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"` (resolved by Portail)
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
 
-2. **Portail** (`portail/`) - Consumer validating message format
+2. **Portail** (`portail/`) - Consumer enriching message context
    - Consumes: `relais:messages:incoming`
-   - Validates Envelope format, applies reply_policy (DND/vacation/in_meeting)
+   - Validates Envelope format, resolves user from `UserRegistry` (users.yaml), applies reply_policy (DND/vacation/in_meeting)
+   - Stamps contextual metadata: `user_role`, `display_name`, `llm_profile` (resolved from `channel_profile`), `custom_prompt_path` (optional)
    - Produces: `relais:security`
 
-3. **Sentinelle** (`sentinelle/`) - Consumer performing security checks
-   - Consumes: `relais:security`
-   - ACL validation (users.yaml), content guardrails pre/post-LLM filtering
-   - Produces: `relais:tasks` (or refuses if ACL fails)
+3. **Sentinelle** (`sentinelle/`) - Bidirectional security checkpoint
+   - **Incoming**: Consumes `relais:security`, ACL validation (users.yaml), produces `relais:tasks` (or refuses if ACL fails)
+   - **Outgoing**: Consumes `relais:messages:outgoing_pending:{channel}` (channel-specific), applies outgoing guardrails, produces `relais:messages:outgoing:{channel}`
 
 4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `deepagents.create_deep_agent()`
    - Consumes: `relais:tasks`
@@ -39,7 +40,9 @@ The main pipeline flows through these bricks in order:
    - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by `McpSessionManager`
    - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
-   - Produces: `relais:messages:outgoing:{channel}`
+   - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
+   - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `profiles.yaml`
+   - Produces: `relais:messages:outgoing_pending:{channel}` (→ consumed by Sentinelle outgoing loop)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
    - Dual-stream consumer: `relais:memory:request` (Atelier requests) + `relais:messages:outgoing:*` (response observer)
@@ -63,6 +66,7 @@ The main pipeline flows through these bricks in order:
   - `envelope.py`: Message wrapper (content, sender_id, channel, session_id, correlation_id, metadata, traces)
   - `redis_client.py`: Async Redis factory with per-brick ACL (password per service)
   - `config_loader.py`: YAML config cascade (user > system > project)
+  - `user_registry.py`: UserRegistry and UserRecord for user resolution from users.yaml
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings
@@ -86,7 +90,7 @@ The main pipeline flows through these bricks in order:
 ### Redis Streams & Consumer Groups
 
 - **At-least-once delivery**: Consumer groups with PEL (Pending Entry List) and XACK acknowledgment
-- **Stream naming**: `relais:messages:incoming`, `relais:security`, `relais:tasks`, `relais:messages:outgoing:{channel}`, `relais:memory:*`
+- **Stream naming**: `relais:messages:incoming`, `relais:security`, `relais:tasks`, `relais:messages:outgoing_pending`, `relais:messages:outgoing:{channel}`, `relais:memory:*`
 - **Initialization**: Each brick creates its consumer group on startup (idempotent)
 - **Resilience**: Failed messages left in PEL are automatically re-delivered; poison pills sent to DLQ
 

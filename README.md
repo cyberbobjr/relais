@@ -23,21 +23,22 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
               ┌───────────┴────────────┐
               ▼                        ▼
 ┌─────────────────────────┐  ┌─────────────────────────────────────────────┐
-│ COMMANDANT              │  │ PORTAIL — Validation des messages entrants  │
+│ COMMANDANT              │  │ PORTAIL — Enrichissement contextuel         │
 │  Commandes hors-LLM     │  │  Consomme : relais:messages:incoming        │
-│  /clear /dnd /brb       │  │  Valide le format, applique reply_policy    │
-│  (consumer group dédié) │  │  Check relais:state:dnd avant forward       │
-└─────────────────────────┘  │  Produit  : relais:security                 │
+│  /clear /dnd /brb       │  │  Résout utilisateur (UserRegistry)          │
+│  (consumer group dédié) │  │  Stamp métadonnées : user_role, llm_profile │
+└─────────────────────────┘  │  Applique reply_policy, Check DND            │
+                             │  Produit  : relais:security                 │
                              └─────────────────────────────────────────────┘
                           │
                     relais:security
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ SENTINELLE — Sécurité                                       │
-│  Consomme : relais:security                                 │
-│  Vérifie les ACL (users.yaml), filtre le contenu            │
-│  Produit  : relais:tasks                                    │
+│ SENTINELLE — Sécurité (point de contrôle bidirectionnel)    │
+│  [ENTRANT] Consomme : relais:security                       │
+│  Vérifie les ACL (users.yaml)                               │
+│  [ENTRANT] Produit  : relais:tasks                          │
 └─────────────────────────────────────────────────────────────┘
                           │
                      relais:tasks
@@ -52,20 +53,28 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 │  · Serveurs MCP : outils externes (stdio · SSE · HTTP)          │
 │  · Outils internes (@tool) : list_skills, read_skill            │
 │  · Retries avec backoff configurable                            │
-│  Produit  : relais:messages:outgoing:{channel}  (réponse)       │
+│  Produit  : relais:messages:outgoing_pending           (réponse)│
 │             relais:streaming:{channel}:{cid}    (chunks live)   │
 │             relais:tasks:failed                 (DLQ)           │
 └─────────────────────────────────────────────────────────────────┘
           │                        │                   │
-   relais:messages:outgoing:{ch}   │            relais:logs /
+relais:messages:outgoing_pending:{ch}  │       relais:logs /
           │                   relais:memory:*   relais:events:*
-          ▼                        ▼                   ▼
-┌───────────────────────┐  ┌──────────────┐   ┌──────────────┐
-│ AIGUILLEUR            │  │   SOUVENIR   │   │  ARCHIVISTE  │
-│  Relais sortants      │  │  Mémoire     │   │  Logs        │
-│  ┌──────┐ ┌────────┐  │  │  court/long  │   │  JSONL +     │
-│  │disco.│ │telegr. │  │  │  terme       │   │  SQLite      │
-│  └──────┘ └────────┘  │  └──────────────┘   └──────────────┘
+          ▼                        │                   ▼
+┌─────────────────────────────────────────────────────────────┐
+│ SENTINELLE — flux sortant (guardrails + routage)            │
+│  [SORTANT] Consomme : relais:messages:outgoing_pending:{ch} │
+│  [SORTANT] Produit  : relais:messages:outgoing:{ch}         │
+└─────────────────────────────────────────────────────────────┘
+          │                        ▼
+   relais:messages:outgoing:{ch}   ▼
+          ▼                  ┌──────────────┐   ┌──────────────┐
+┌───────────────────────┐    │   SOUVENIR   │   │  ARCHIVISTE  │
+│ AIGUILLEUR            │    │  Mémoire     │   │  Logs        │
+│  Relais sortants      │    │  court/long  │   │  JSONL +     │
+│  ┌──────┐ ┌────────┐  │    │  terme       │   │  SQLite      │
+│  │disco.│ │telegr. │  │    └──────────────┘   └──────────────┘
+│  └──────┘ └────────┘  │
 └──────────┬────────────┘
            │
            ▼
@@ -103,14 +112,14 @@ flowchart TD
     COMMANDANT -->|"relais:memory:request clear"| SOUVENIR
     COMMANDANT -->|"relais:messages:outgoing:{ch}"| AIG_OUT
 
-    subgraph PORTAIL["PORTAIL — Validation"]
-        P["Valide le format\nApplique reply_policy\n(DND, hors-heures)\nCheck relais:state:dnd"]
+    subgraph PORTAIL["PORTAIL — Enrichissement contextuel"]
+        P["Résout utilisateur (UserRegistry)\nStamp user_role, display_name, llm_profile\nApplique reply_policy, Check DND"]
     end
 
     PORTAIL -->|"relais:security"| SENTINELLE
 
-    subgraph SENTINELLE["SENTINELLE — Sécurité"]
-        S["ACL users.yaml\nGuardrails contenu"]
+    subgraph SENTINELLE["SENTINELLE — Sécurité (bidirectionnel)"]
+        S["[ENTRANT] ACL users.yaml\n[SORTANT] Pass-through outgoing_pending → outgoing"]
     end
 
     SENTINELLE -->|"relais:tasks"| ATELIER
@@ -119,7 +128,8 @@ flowchart TD
         A["AgentExecutor (DeepAgents/LangGraph) — boucle agentique · streaming live\nSOUL system prompt + historique mémoire (Souvenir)\nServeurs MCP : outils externes (stdio · SSE)\nOutils internes : @tool (list_skills, read_skill)\nRetries backoff configurable · DLQ"]
     end
 
-    ATELIER -->|"relais:messages:outgoing:{channel}"| AIG_OUT
+    ATELIER -->|"relais:messages:outgoing_pending:{channel}"| SENTINELLE
+    SENTINELLE -->|"relais:messages:outgoing:{channel}"| AIG_OUT
     ATELIER -->|"relais:memory:request\n+ observe outgoing"| SOUVENIR
     ATELIER -->|"relais:tasks:failed"| DLQ[("DLQ")]
     ATELIER -->|"relais:logs\nrelais:events:*"| ARCHIVISTE
@@ -346,7 +356,7 @@ uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --
 
 ### `profiles.yaml` — Profils LLM
 
-Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est déterminé par `llm.default_profile` (config.yaml) ou par `llm_profile` dans l'entrée de l'utilisateur (users.yaml).
+Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est résolu dans cet ordre de priorité : **`profile` dans `channels.yaml`** (canal gagne toujours) → `llm.default_profile` dans `config.yaml` (fallback système). Le champ `llm_profile` dans `users.yaml` n'est plus utilisé pour la résolution du modèle.
 
 ```yaml
 profiles:
@@ -354,10 +364,6 @@ profiles:
     model: mon-modele-local     # Doit correspondre à un model_name dans litellm.yaml
     temperature: 0.7            # 0.0 (déterministe) → 1.0 (créatif)
     max_tokens: 1024
-    stream: false               # true = streaming progressif vers Discord/Telegram
-
-    memory:
-      short_term_messages: 20   # Nb de messages injectés dans le contexte (0 = désactivé)
 
     resilience:
       retry_attempts: 3
@@ -388,29 +394,52 @@ profiles:
 ### `users.yaml` — Registre des utilisateurs (ACL)
 
 Chargé par la Sentinelle. Détermine si un utilisateur est autorisé et quel profil LLM lui est assigné.
+L'identité est contextuelle : `(canal, contexte, id_brut)` — ex. Discord distingue `dm` et `server`.
 
 ```yaml
+access_control:
+  default_mode: allowlist       # "allowlist" (défaut) | "blocklist"
+  channels:                     # Surcharges optionnelles par canal
+    # telegram:
+    #   mode: blocklist
+
+groups: []                      # Groupes WhatsApp / Telegram — autorisation par group_id
+# Exemple :
+# groups:
+#   - channel: whatsapp
+#     group_id: "120363000000000@g.us"
+#     allowed: true
+#     blocked: false
+#     llm_profile: fast
+
 users:
   usr_mon_utilisateur:
     display_name: "Prénom Nom"
     role: user                            # "admin" | "user"
-    channels: ["discord", "telegram"]     # Canaux autorisés ("*" = tous)
     blocked: false
     llm_profile: default
     identifiers:
-      discord: "123456789012345678"       # ID Discord (entier, pas le username)
-      telegram: "987654321"               # chat_id Telegram
+      discord:
+        dm: "123456789012345678"          # ID Discord (entier, pas le username)
+        server: null                      # null = refus des mentions en serveur
+      telegram:
+        dm: "987654321"                   # chat_id Telegram
     notes: "Commentaire libre"
 
-default_policy:
-  allow: false                  # false = refus des utilisateurs non enregistrés
-  llm_profile: fast
-  max_messages_per_hour: 10
+roles:
+  admin:
+    actions: ["send", "command", "admin"]
+  user:
+    actions: ["send"]
 ```
 
+**Modes ACL :**
+- `allowlist` : seuls les utilisateurs/groupes déclarés sont admis. Politique pour les inconnus : `deny` (rejet), `guest` (profil limité) ou `pending` (notif admin).
+- `blocklist` : tous admis sauf les utilisateurs/groupes marqués `blocked: true`.
+
 **Rôles :**
-- `admin` : accès à tous les canaux, toutes les commandes, guardrails désactivés
-- `user` : accès limité aux canaux déclarés, guardrails actifs
+- `admin` : toutes les actions (`send`, `command`, `admin`)
+- `user` : `send` uniquement
 
 > `usr_system` est un compte interne utilisé par les briques — ne pas supprimer.
 
@@ -461,6 +490,7 @@ channels:
     type: native                     # "native" (Python) | "external" (subprocess)
     class_path: null                 # Override optionnel : "aiguilleur.channels.discord.adapter.DiscordAiguilleur"
     max_restarts: 5                  # Nombre max de redémarrages avant abandon
+    # profile non défini → utilise config.yaml > llm.default_profile
 
   telegram:
     enabled: false
@@ -468,6 +498,7 @@ channels:
     type: native
     class_path: null
     max_restarts: 5
+    profile: fast                    # Profil LLM imposé à tous les messages de ce canal
 
   slack:
     enabled: false
@@ -507,6 +538,7 @@ channels:
 - `class_path` — override optionnel du chemin de la classe adaptateur
 - `max_restarts` — limite de redémarrages automatiques (exponential backoff `min(2^count, 30)` secondes)
 - `command`/`args` — requis pour `type: external` uniquement
+- `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["llm_profile"]` par l'Aiguilleur ; si absent, utilise `config.yaml > llm.default_profile`
 
 **Activation/désactivation sans redémarrage :**
 Modifier `enabled: true/false` dans `~/.relais/config/channels.yaml` et redémarrer AIGUILLEUR via supervisord (`supervisorctl restart aiguilleur`). Le changement ne demande pas la reconfiguration du reste du système.

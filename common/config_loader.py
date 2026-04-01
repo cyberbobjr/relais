@@ -1,5 +1,8 @@
 import os
 from pathlib import Path
+from typing import Any
+
+import yaml
 from dotenv import load_dotenv
 
 # Search for .env from current directory upwards
@@ -97,3 +100,21 @@ def resolve_storage_dir() -> Path:
     ``initialize_user_dir`` on first run.
     """
     return get_relais_home() / "storage"
+
+
+def get_default_llm_profile() -> str:
+    """Return the system-wide default LLM profile name.
+
+    Reads ``llm.default_profile`` from ``config.yaml`` using the standard
+    config cascade (user > system > project).  Returns ``"default"`` on any
+    error (missing file, missing key, empty config).
+
+    Returns:
+        The configured LLM profile name, or ``"default"`` as fallback.
+    """
+    try:
+        config_path: Path = resolve_config_path("config.yaml")
+        raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
+        return str(raw.get("llm", {}).get("default_profile") or "default")
+    except FileNotFoundError:
+        return "default"

@@ -78,7 +78,7 @@ async def main():
     async for message in consumer.consume():
         try:
             result = await execute_with_resilience(message)
-            await producer.publish("relais:messages:outgoing:discord", result)
+            await producer.publish("relais:messages:outgoing_pending", result)
         except ExhaustedRetriesError:
             await producer.publish("relais:tasks:failed", {"error": ..., "payload": message})
         finally:
@@ -134,27 +134,34 @@ PIPELINE CORE
 │   ▼
 │ PORTAIL (consumer)
 │ ├─ Valide format (Envelope)
+│ ├─ Résout utilisateur (UserRegistry)
+│ ├─ Stamp métadonnées : user_role, display_name, llm_profile, custom_prompt_path
 │ ├─ Applique reply_policy
 │ └─ Publie si accepté
 │   ▼
-│ relais:tasks (intermediate)
+│ relais:security (enriched messages)
 │   ▼
-│ SENTINELLE (consumer)
-│ ├─ Vérifie ACL (users.yaml)
-│ ├─ Applique guardrails pré-LLM
-│ └─ Publie si accepté
+│ SENTINELLE (consumer — bidirectionnel)
+│ ├─ [ENTRANT] Consomme relais:security
+│ ├─ [ENTRANT] Vérifie ACL (users.yaml)
+│ ├─ [ENTRANT] Publie si accepté
 │   ▼
-│ relais:tasks (validated)
+│ relais:tasks (security-cleared)
 │   ▼
 │ ATELIER (transformer)
-│ ├─ Charge SOUL + contexte long-term
+│ ├─ Charge SOUL + contexte long-term (+ user_role depuis metadata)
 │ ├─ Exécute boucle agentique via AgentExecutor (deepagents.create_deep_agent)
 │ ├─ Streams output token-by-token → relais:messages:streaming:{channel}:{correlation_id}
 │ ├─ Publie réponse si succès
 │ └─ Publie en DLQ si échec après retries
-│   ├─ relais:messages:outgoing:*
+│   ├─ relais:messages:outgoing_pending:{channel}  (→ Sentinelle outgoing)
 │   ├─ relais:messages:streaming:{channel}:{correlation_id}
 │   └─ relais:tasks:failed (DLQ)
+│       ▼
+│ SENTINELLE (consumer — flux sortant)
+│ ├─ [SORTANT] Consomme relais:messages:outgoing_pending:{channel}
+│ ├─ [SORTANT] Applique guardrails sortants
+│ └─ [SORTANT] Route vers relais:messages:outgoing:{channel}
 │       ▼
 │ SOUVENIR (consumer)
 │ ├─ Historique court-terme (Redis List)
@@ -178,7 +185,12 @@ SORTANT (Canaux externes)
 
 Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à la fois :
 - les chunks progressifs sur `relais:messages:streaming:{channel}:{correlation_id}` (rendu live)
-- l'enveloppe finale sur `relais:messages:outgoing:{channel}` (confirmé)
+- l'enveloppe finale sur `relais:messages:outgoing_pending:{channel}` (→ Sentinelle outgoing → `outgoing:{channel}`)
+
+**Métadonnées du stream `relais:messages:outgoing_pending:{channel}`:**
+
+Hérités de `relais:security` : `llm_profile`, `user_role`, `display_name`, `custom_prompt_path` (optionnel)
+Ajoutés par Atelier : `user_message`, `traces`
 
 > **Note :** Atelier lit `channels.yaml` **une seule fois au démarrage** pour construire la liste des canaux
 > streaming-capable. Tout changement du champ `streaming:` dans ce fichier nécessite un redémarrage
@@ -200,6 +212,22 @@ Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à l
 | `relais:messages:incoming:slack` | Slack API | Aiguilleur/slack | Enveloppe message |
 | `relais:messages:incoming:rest` | HTTP POST | Aiguilleur/rest | Enveloppe message |
 
+**Champ `metadata.channel_profile` (stampé par l'Aiguilleur sur tous les streams d'entrée) :**
+
+| Champ | Type | Valeur | Source |
+|-------|------|--------|--------|
+| `channel_profile` | `string` (optional) | Nom du profil LLM non-résolu | `channels.yaml:profile` → `config.yaml:llm.default_profile` → `"default"` |
+
+Ce champ est résolu par le **Portail** en `llm_profile` et stampé sur `relais:security`.
+
+**Champ `metadata.llm_profile` (stampé par le Portail sur tous les messages en sécurité) :**
+
+| Champ | Type | Valeur | Source |
+|-------|------|--------|--------|
+| `llm_profile` | `string` | Nom du profil LLM résolu | `channel_profile` (incoming) → `"default"` |
+
+Ce champ est présent sur toutes les enveloppes enrichies. L'Atelier le lit via `envelope.metadata.get("llm_profile", "default")` pour charger le `ProfileConfig` approprié depuis `profiles.yaml`.
+
 ### Streams intermédiaires
 
 | Stream | Consumer | Producteur | Contenu |
@@ -214,10 +242,14 @@ Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à l
 
 | Stream | Producteur | Consommateur | Contenu |
 |--------|-----------|--------------|---------|
-| `relais:messages:outgoing:discord` | Atelier | Aiguilleur/discord | Message formaté Discord |
-| `relais:messages:outgoing:telegram` | Atelier | Aiguilleur/telegram | Message formaté Telegram |
-| `relais:messages:outgoing:slack` | Atelier | Aiguilleur/slack | Message formaté Slack |
-| `relais:messages:outgoing:rest` | Atelier | Aiguilleur/rest | JSON payload |
+| `relais:messages:outgoing_pending:discord` | Atelier | Sentinelle (outgoing) | Message Discord en attente de validation sortante |
+| `relais:messages:outgoing_pending:telegram` | Atelier | Sentinelle (outgoing) | Message Telegram en attente de validation sortante |
+| `relais:messages:outgoing_pending:slack` | Atelier | Sentinelle (outgoing) | Message Slack en attente de validation sortante |
+| `relais:messages:outgoing_pending:rest` | Atelier | Sentinelle (outgoing) | Message REST en attente de validation sortante |
+| `relais:messages:outgoing:discord` | Sentinelle | Aiguilleur/discord, Souvenir | Message validé, formaté Discord |
+| `relais:messages:outgoing:telegram` | Sentinelle | Aiguilleur/telegram, Souvenir | Message validé, formaté Telegram |
+| `relais:messages:outgoing:slack` | Sentinelle | Aiguilleur/slack, Souvenir | Message validé, formaté Slack |
+| `relais:messages:outgoing:rest` | Sentinelle | Aiguilleur/rest, Souvenir | Message validé, JSON payload |
 
 ### Streams d'erreur et monitoring
 
@@ -347,6 +379,26 @@ Chaque brick charge config.yaml en ce ordre:
 | Souvenir | `config.yaml`, `~/.relais/storage/memory.db` (SQLite via Alembic) |
 | Archiviste | `config.yaml` (retention policy) |
 | Aiguilleur | `config.yaml`, `aiguilleur/{canal}.yaml` |
+
+### Résolution du profil LLM
+
+Le profil LLM actif pour un message entrant est résolu dans cet ordre strict :
+
+```
+channels.yaml:profile          (stampé par l'Aiguilleur dans envelope.metadata["llm_profile"])
+    ↓ absent
+config.yaml > llm.default_profile   (fallback système)
+    ↓ absent
+"default"                      (valeur de repli ultime)
+```
+
+**Responsabilité du stamping :** l'**Aiguilleur** lit `ChannelConfig.profile` (champ optionnel dans `channels.yaml`) et stampe `envelope.metadata["llm_profile"]` lors de la création de chaque enveloppe entrante. Si le canal n'a pas de `profile`, l'Aiguilleur utilise `get_default_llm_profile()` de `common/config_loader.py` (lit `config.yaml > llm.default_profile`, fallback `"default"`).
+
+**L'Atelier** lit `envelope.metadata.get("llm_profile", "default")` pour charger le `ProfileConfig` depuis `profiles.yaml`.
+
+**La Sentinelle ne stampe jamais `llm_profile`** — elle transmet l'enveloppe inchangée.
+
+---
 
 ### Fonctions `common/config_loader.py`
 
@@ -585,35 +637,82 @@ Chaque brick a mot de passe séparé (`.env`). Atelier a accès aux streams de s
 ```yaml
 # redis.conf
 user portail +@all ~* >$REDIS_PASS_PORTAIL
-user sentinelle +@all ~* >$REDIS_PASS_SENTINELLE
-user atelier +@all ~relais:messages:streaming:* >$REDIS_PASS_ATELIER
-user souvenir +@all ~relais:messages:outgoing:* >$REDIS_PASS_SOUVENIR
+user sentinelle +@all ~relais:security ~relais:tasks ~relais:messages:outgoing_pending:* ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SENTINELLE
+user atelier +@all ~relais:tasks ~relais:messages:outgoing_pending:* ~relais:messages:streaming:* ~relais:logs >$REDIS_PASS_ATELIER
+user souvenir +@all ~relais:memory:* ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SOUVENIR
 ```
 
 ### Sentinelle ACL
 
-Utilisateurs contrôlés via `users.yaml`:
+L'ACL est contextuelle : l'identité est résolue via un triplet `(channel, context, raw_id)`.
+Le contexte (`dm`, `server`, `group`) est injecté par l'Aiguilleur dans `envelope.metadata["access_context"]`.
+
+**Deux modes globaux** (surchargeables par canal via `access_control.channels`) :
+- `allowlist` (défaut) : tout refuser sauf les expéditeurs déclarés explicitement.
+- `blocklist` : tout accepter sauf les expéditeurs marqués `blocked: true`.
+
+**Politique utilisateur inconnu** (mode allowlist, paramètre global sur `ACLManager`) :
+- `deny` (défaut) : rejet silencieux, message loggué.
+- `guest` : accepté avec le profil LLM `guest_profile` (pas de mémoire, pas d'outils).
+- `pending` : rejeté + notification publiée dans `relais:admin:pending_users`.
+
+**Mode permissif** : si aucun `users.yaml` n'est trouvé, l'ACL est désactivée avec un WARNING.
 
 ```yaml
+# ~/.relais/config/users.yaml
+access_control:
+  default_mode: allowlist       # "allowlist" | "blocklist"
+  channels:                     # Surcharges optionnelles par canal
+    telegram:
+      mode: blocklist
+
+groups:                         # Groupes WhatsApp / Telegram (autorisation par group_id)
+  - channel: whatsapp
+    group_id: "120363000000000@g.us"
+    allowed: true
+    blocked: false
+    llm_profile: fast
+
 users:
-  benjamin:
+  usr_admin:
+    display_name: "Administrateur"
     role: admin
-    allowed_channels: [discord, telegram, rest]
-  alice:
-    role: user
-    allowed_channels: [discord]
+    blocked: false
+    llm_profile: precise
+    identifiers:
+      discord:
+        dm: "123456789012345678"    # ID Discord — accès DM
+        server: "123456789012345678" # même ID — accès mentions serveur
+      telegram:
+        dm: "987654321"
+      whatsapp:
+        dm: "+33600000000"
+      rest:
+        api_keys: ["clé-api-1"]
+
+roles:
+  admin:
+    actions: ["send", "command", "admin"]
+  user:
+    actions: ["send"]
 ```
 
 ### Guardrails LLM
 
-Sentinelle filtre contenu:
+Sentinelle filtre contenu via `ContentFilter` (pré et post-LLM) :
 
 ```python
-if guardrails.is_dangerous_pre_llm(envelope.text):
-    # Rejette avant appel LLM
+# Avant appel LLM (check_input)
+result = await content_filter.check_input(envelope.content, envelope.sender_id)
+if not result.allowed:
+    # Rejet — raison dans result.reason
 
-elif guardrails.is_dangerous_post_llm(response.text):
-    # Filtre réponse avant envoi
+# Après appel LLM (check_output)
+result = await content_filter.check_output(response_text, envelope.sender_id)
+if not result.allowed:
+    # Blocage — raison dans result.reason
+elif result.modified_text:
+    # Réponse tronquée — utiliser result.modified_text
 ```
 
 ---
@@ -763,7 +862,7 @@ agent.astream({"messages": ...}, stream_mode="messages")
   → chunks token-by-token → stream_callback → relais:messages:streaming
   → tool calls gérés automatiquement par DeepAgents
   ↓
-Résultat agrégé → relais:messages:outgoing:{channel}
+Résultat agrégé → relais:messages:outgoing_pending:{channel}  (→ Sentinelle outgoing → outgoing:{channel})
 ```
 
 ### Souvenir — Dual-Stream avec Extracteur Mémoire

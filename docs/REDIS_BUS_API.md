@@ -80,7 +80,13 @@ Carries raw inbound messages from external channel adapters before any validatio
 XADD relais:messages:incoming * payload <Envelope JSON>
 ```
 
-**Metadata keys set by Aiguilleur (Discord)**:
+**Metadata keys set by Aiguilleur (all channel adapters)**:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `channel_profile` | `string` (optional) | LLM profile name, resolved in order: `channels.yaml:profile` → `config.yaml:llm.default_profile` → `"default"`. Stamped by the Aiguilleur adapter at envelope creation time. Read by Portail and then passed downstream as `llm_profile`. |
+
+**Metadata keys set by Aiguilleur (Discord only)**:
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -94,7 +100,7 @@ XADD relais:messages:incoming * payload <Envelope JSON>
 **Direction**: Portail → Sentinelle
 **Consumer group**: `sentinelle_group`
 
-Carries validated envelopes pending ACL and content-security checks.
+Carries validated and enriched envelopes pending ACL and content-security checks. Portail resolves user information via UserRegistry and stamps contextual metadata.
 
 ```
 XADD relais:security * payload <Envelope JSON>
@@ -104,6 +110,10 @@ XADD relais:security * payload <Envelope JSON>
 
 | Key | Type | Description |
 |-----|------|-------------|
+| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (from incoming metadata) → `"default"`. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
+| `user_role` | `string` | User role resolved from `UserRegistry` (users.yaml) — used by Atelier for role-based prompt layer selection. |
+| `display_name` | `string` | User display name from `UserRegistry` (users.yaml). |
+| `custom_prompt_path` | `string` (optional) | Custom prompt override path if defined in user profile (users.yaml). |
 | `session_start` | `float` (optional) | Epoch timestamp if this is a new session |
 
 ---
@@ -144,15 +154,16 @@ XADD relais:tasks:failed * payload <original Envelope JSON>
 
 ---
 
-### `relais:messages:outgoing:{channel}`
+### `relais:messages:outgoing_pending:{channel}`
 
-**Direction**: Atelier → Aiguilleur (relay)
-**Consumer groups**: `{channel}_relay_group`, `souvenir_outgoing_group`
+**Direction**: Atelier → Sentinelle
+**Consumer groups**: `sentinelle_outgoing_group`
 
-Carries completed LLM response envelopes for delivery to the user.
+Carries completed LLM response envelopes waiting for outgoing validation by Sentinelle before delivery.
+The destination channel is determined by the `{channel}` suffix in the stream key.
 
 ```
-XADD relais:messages:outgoing:discord * payload <Envelope JSON>
+XADD relais:messages:outgoing_pending:discord * payload <Envelope JSON>
 ```
 
 **Metadata added by Atelier**:
@@ -161,6 +172,27 @@ XADD relais:messages:outgoing:discord * payload <Envelope JSON>
 |-----|------|-------------|
 | `user_message` | `string` | Original user message content (copied from incoming envelope) |
 | `traces` | `array` | Pipeline trace list appended with `{"brick": "atelier", "action": "Generated via {model}"}` |
+
+---
+
+### `relais:messages:outgoing:{channel}`
+
+**Direction**: Sentinelle → Aiguilleur (relay)
+**Consumer groups**: `{channel}_relay_group`, `souvenir_outgoing_group`
+
+Carries outgoing-validated response envelopes for delivery to the user. Sentinelle reads from
+`outgoing_pending`, applies the outgoing rule (currently a pass-through), and republishes here.
+
+```
+XADD relais:messages:outgoing:discord * payload <Envelope JSON>
+```
+
+**Metadata added by Sentinelle**:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `traces` | `array` | Pipeline trace list appended with `{"brick": "sentinelle", "action": "outgoing pass-through"}` |
+
 ---
 
 ### `relais:messages:streaming:{channel}:{correlation_id}`
@@ -270,7 +302,7 @@ XADD relais:logs * level          "INFO"
                    brick          "atelier"
                    correlation_id "550e8400-..."
                    sender_id      "discord:123"
-                   message        "Answered corr-id via relais:messages:outgoing:discord"
+                   message        "Answered corr-id via relais:messages:outgoing_pending:discord"
                    content_preview "Hello, here is ..."
 ```
 
@@ -424,6 +456,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:messages:incoming` | `portail_group`, `commandant_group` | Portail, Commandant |
 | `relais:security` | `sentinelle_group` | Sentinelle |
 | `relais:tasks` | `atelier_group` | Atelier |
+| `relais:messages:outgoing_pending:{channel}` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group`, `souvenir_outgoing_group` | Aiguilleur, Souvenir |
 | `relais:memory:request` | `souvenir_group` | Souvenir |
 | `relais:logs` | `archiviste_group` | Archiviste |

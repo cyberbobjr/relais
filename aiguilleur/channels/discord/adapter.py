@@ -25,6 +25,7 @@ import discord
 
 from common.redis_client import RedisClient
 from common.envelope import Envelope
+from common.config_loader import get_default_llm_profile
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
 
@@ -50,7 +51,7 @@ class DiscordAiguilleur(NativeAiguilleur):
             )
             return
 
-        client = _RelaisDiscordClient(stop_event=self.stop_event)
+        client = _RelaisDiscordClient(stop_event=self.stop_event, channel_config=self.config)
         try:
             await client.start(token)
         except asyncio.CancelledError:
@@ -77,7 +78,19 @@ class _RelaisDiscordClient(discord.Client):
     ``channels.yaml`` to prevent Atelier from publishing partial chunks.
     """
 
-    def __init__(self, stop_event: asyncio.Event | None = None) -> None:
+    def __init__(
+        self,
+        stop_event: asyncio.Event | None = None,
+        channel_config: ChannelConfig | None = None,
+    ) -> None:
+        """Initialise the Discord client.
+
+        Args:
+            stop_event: Optional event to signal the adapter should stop.
+            channel_config: Optional channel configuration for this adapter.
+                Used to resolve the LLM profile stamped on every incoming
+                envelope. When None, falls back to the system default profile.
+        """
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
@@ -90,6 +103,13 @@ class _RelaisDiscordClient(discord.Client):
         self._redis_conn = None
         # threading.Event or asyncio.Event — we only call is_set()
         self._stop_event = stop_event
+        self._channel_config = channel_config
+        # Resolve LLM profile once at init: channel config > system default
+        self._llm_profile: str = (
+            channel_config.profile
+            if channel_config is not None and channel_config.profile is not None
+            else get_default_llm_profile()
+        )
 
     async def setup_hook(self) -> None:
         """Initialise the Redis connection and launch background tasks.
@@ -151,6 +171,8 @@ class _RelaisDiscordClient(discord.Client):
             metadata={
                 "content_type": "text",
                 "reply_to": str(message.channel.id),
+                "access_context": "dm" if is_dm else "server",
+                "channel_profile": self._llm_profile,
             },
         )
 

@@ -77,6 +77,15 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
     )
     logger.info("Clear request sent for session=%s", envelope.session_id)
 
+    response = Envelope.from_parent(
+        envelope,
+        "✓ Historique effacé — nouvelle session démarrée.",
+    )
+    await redis_conn.xadd(
+        f"relais:messages:outgoing:{envelope.channel}",
+        {"payload": response.to_json()},
+    )
+
 
 async def handle_dnd(envelope: Envelope, redis_conn: Any) -> None:
     """Active le mode DND global en posant la clé relais:state:dnd.

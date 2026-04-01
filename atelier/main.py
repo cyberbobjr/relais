@@ -12,7 +12,7 @@ Message flow (one task at a time):
     │      ├── streaming chunks ──► relais:messages:streaming:{channel}:{corr_id}
     │      └── full reply
     │  (6) publish response Envelope
-    └──► relais:messages:outgoing:{channel}
+    └──► relais:messages:outgoing_pending:{channel}
 
 XACK contract:
   - Return True  → ACK (success or final error routed to DLQ)
@@ -148,6 +148,7 @@ class Atelier:
                 prompts_dir=_PROMPTS_DIR,
                 channel=envelope.channel,
                 sender_id=envelope.sender_id,
+                user_role=envelope.metadata.get("user_role"),
             )
 
             # 4. Select MCP servers for this profile.
@@ -205,7 +206,7 @@ class Atelier:
                 response_env.metadata["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
-            out_stream = f"relais:messages:outgoing:{envelope.channel}"
+            out_stream = "relais:messages:outgoing_pending"
             await redis_conn.xadd(out_stream, {"payload": response_env.to_json()})
 
             await redis_conn.xadd("relais:logs", {

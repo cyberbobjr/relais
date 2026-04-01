@@ -16,6 +16,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch, call
 import pytest
 
 from common.envelope import Envelope
+from common.user_registry import UserRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,9 @@ async def test_portail_xadd_includes_correlation_id(tmp_path: Path) -> None:
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
+    portail._dnd_cached = None
+    portail._dnd_cache_at = 0.0
+    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
 
     envelope = _make_envelope()
     conn = _make_redis_conn()
@@ -121,6 +125,9 @@ async def test_portail_xadd_includes_sender_id(tmp_path: Path) -> None:
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
+    portail._dnd_cached = None
+    portail._dnd_cache_at = 0.0
+    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
 
     envelope = _make_envelope(sender_id="discord:987654321")
     conn = _make_redis_conn()
@@ -155,6 +162,7 @@ async def test_portail_error_xadd_includes_correlation_id(tmp_path: Path) -> Non
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
+    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
 
     conn = _make_redis_conn()
     # Forward xadd succeeds but raising an error mid-processing by injecting
@@ -195,6 +203,9 @@ async def test_sentinelle_xadd_includes_correlation_id(tmp_path: Path) -> None:
     sentinelle.stream_out = "relais:tasks"
     sentinelle.group_name = "sentinelle_group"
     sentinelle.consumer_name = "sentinelle_1"
+    sentinelle._acl = MagicMock()
+    sentinelle._acl.is_allowed.return_value = True
+    sentinelle._acl.unknown_user_policy = "deny"
 
     envelope = _make_envelope()
     conn = _make_redis_conn()
@@ -226,6 +237,9 @@ async def test_sentinelle_xadd_includes_sender_id(tmp_path: Path) -> None:
     sentinelle.stream_out = "relais:tasks"
     sentinelle.group_name = "sentinelle_group"
     sentinelle.consumer_name = "sentinelle_1"
+    sentinelle._acl = MagicMock()
+    sentinelle._acl.is_allowed.return_value = True
+    sentinelle._acl.unknown_user_policy = "deny"
 
     envelope = _make_envelope(sender_id="telegram:55566677")
     conn = _make_redis_conn()
@@ -257,6 +271,9 @@ async def test_sentinelle_xadd_includes_content_preview(tmp_path: Path) -> None:
     sentinelle.stream_out = "relais:tasks"
     sentinelle.group_name = "sentinelle_group"
     sentinelle.consumer_name = "sentinelle_1"
+    sentinelle._acl = MagicMock()
+    sentinelle._acl.is_allowed.return_value = True
+    sentinelle._acl.unknown_user_policy = "deny"
 
     long_content = "A" * 100
     envelope = _make_envelope(content=long_content)

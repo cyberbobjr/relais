@@ -382,7 +382,7 @@ async def test_handle_message_injects_user_message_in_response_metadata() -> Non
     # Find the outgoing stream XADD
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == f"relais:messages:outgoing:{envelope.channel}"
+        if c.args[0] == "relais:messages:outgoing_pending"
     ]
     assert len(outgoing_calls) == 1
 
@@ -814,7 +814,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
 
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == "relais:messages:outgoing:telegram"
+        if c.args[0] == "relais:messages:outgoing_pending"
     ]
     assert len(outgoing_calls) == 1
     payload_json = outgoing_calls[0].args[1]["payload"]
@@ -860,9 +860,99 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
 
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == "relais:messages:outgoing:whatsapp"
+        if c.args[0] == "relais:messages:outgoing_pending"
     ]
     assert len(outgoing_calls) == 1
     payload_json = outgoing_calls[0].args[1]["payload"]
     response_data = json.loads(payload_json)
     assert "streamed" not in response_data["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — user_role forwarded to assemble_system_prompt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_stream_passes_user_role_to_assemble_system_prompt() -> None:
+    """_process_stream passes envelope.metadata['user_role'] to assemble_system_prompt.
+
+    When Portail has stamped a user_role into the envelope metadata, Atelier
+    must forward it as the user_role keyword argument so the role overlay is
+    included in the assembled system prompt.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(metadata={"user_role": "admin", "llm_profile": "default"})
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    mock_sp = MagicMock(return_value="soul")
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value="reply")
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", mock_sp):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
+
+    mock_sp.assert_called_once()
+    call_kwargs = mock_sp.call_args.kwargs
+    assert call_kwargs.get("user_role") == "admin"
+
+
+@pytest.mark.asyncio
+async def test_process_stream_user_role_none_when_absent_in_metadata() -> None:
+    """_process_stream passes user_role=None when metadata has no user_role key.
+
+    When the envelope carries no user_role (e.g. unknown user), the call must
+    still succeed with user_role=None rather than raising KeyError.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(metadata={"llm_profile": "default"})  # no user_role
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    mock_sp = MagicMock(return_value="soul")
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value="reply")
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", mock_sp):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
+
+    mock_sp.assert_called_once()
+    call_kwargs = mock_sp.call_args.kwargs
+    assert call_kwargs.get("user_role") is None

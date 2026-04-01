@@ -22,16 +22,24 @@
 #                          After exhaustion the adapter thread dies and a CRITICAL
 #                          log is emitted — the Aiguilleur process stays alive for
 #                          other channels.
+#   profile     (str)    — Optional LLM profile name to apply to all messages from
+#                          this channel (overrides config.yaml > llm.default_profile).
+#                          The Aiguilleur stamps envelope.metadata["llm_profile"] with
+#                          this value. Omit to fall back to the system default profile.
+#                          Example: fast, precise, coder
+#                          See config/profiles.yaml for available profiles.
 
 channels:
 
   discord:
     enabled: true
     streaming: false
+    # profile not set → falls back to config.yaml > llm.default_profile
 
   telegram:
     enabled: false
     streaming: true
+    profile: fast
 
   slack:
     enabled: false

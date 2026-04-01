@@ -191,3 +191,85 @@ channels:
 
     assert set(configs.keys()) == {"discord", "telegram"}
     assert all(isinstance(v, ChannelConfig) for v in configs.values())
+
+
+# ---------------------------------------------------------------------------
+# ChannelConfig.profile — LLM profile per channel (Phase 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_channel_config_profile_default_is_none():
+    """ChannelConfig.profile defaults to None when not specified."""
+    cfg = ChannelConfig(name="discord")
+    assert cfg.profile is None
+
+
+@pytest.mark.unit
+def test_channel_config_profile_can_be_set():
+    """ChannelConfig.profile stores the provided profile name."""
+    cfg = ChannelConfig(name="telegram", profile="fast")
+    assert cfg.profile == "fast"
+
+
+@pytest.mark.unit
+def test_load_channels_config_parses_profile_when_present():
+    """A channel with 'profile: fast' in YAML → ChannelConfig.profile == 'fast'."""
+    yaml_content = """
+channels:
+  telegram:
+    enabled: false
+    streaming: true
+    profile: fast
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(yaml_content)
+        tmp_path = f.name
+
+    with patch("aiguilleur.channel_config.resolve_config_path", return_value=Path(tmp_path)):
+        configs = load_channels_config()
+
+    assert configs["telegram"].profile == "fast"
+
+
+@pytest.mark.unit
+def test_load_channels_config_profile_is_none_when_absent():
+    """A channel without 'profile' key in YAML → ChannelConfig.profile is None."""
+    yaml_content = """
+channels:
+  discord:
+    enabled: true
+    streaming: false
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(yaml_content)
+        tmp_path = f.name
+
+    with patch("aiguilleur.channel_config.resolve_config_path", return_value=Path(tmp_path)):
+        configs = load_channels_config()
+
+    assert configs["discord"].profile is None
+
+
+@pytest.mark.unit
+def test_load_channels_config_mixed_profile_and_no_profile():
+    """load_channels_config handles a mix of channels with and without profile."""
+    yaml_content = """
+channels:
+  discord:
+    enabled: true
+    streaming: false
+  telegram:
+    enabled: false
+    streaming: true
+    profile: precise
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(yaml_content)
+        tmp_path = f.name
+
+    with patch("aiguilleur.channel_config.resolve_config_path", return_value=Path(tmp_path)):
+        configs = load_channels_config()
+
+    assert configs["discord"].profile is None
+    assert configs["telegram"].profile == "precise"

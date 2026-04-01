@@ -184,9 +184,9 @@ Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers
 |---|---|---|---|---|
 | 🚦 **L'Aiguilleur** | `aiguilleur/` | Relay | Adaptateur de canaux — processus unifié | ← `outgoing:{ch}` / → `incoming:{ch}` |
 | 🏛️ **Le Portail** | `portail/` | Transformer | Routage, identification, politique | ← `incoming:{ch}` / → `security` |
-| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, profils, guardrails | ← `security` / → `tasks` |
+| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, profils, guardrails (bidirectionnel) | ← `security` / → `tasks` ; ← `outgoing_pending:{ch}` / → `outgoing:{ch}` |
 | 📨 **Le Coursier** | Redis | Infrastructure | Bus messages Unix socket | — |
-| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `tasks` / → `outgoing:{ch}`, `tasks:failed` |
+| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `tasks` / → `outgoing_pending:{ch}`, `tasks:failed` |
 | 💭 **Le Souvenir** | `souvenir/` | Stream Consumer | Mémoire contexte + longue durée | ← `memory:request` + `outgoing:*` / → `memory:response` |
 | 📚 **L'Archiviste** | `archiviste/` | Pure Observer | Logs → JSONL + SQLite | ← `logs` + `events:*` (pubsub) |
 
@@ -294,11 +294,11 @@ user portail    on >${REDIS_PASS_PORTAIL}
   +subscribe +publish +xadd +hset +expire
 
 user sentinelle on >${REDIS_PASS_SENTINELLE}
-  ~relais:security
+  ~relais:security ~relais:tasks ~relais:messages:outgoing_pending:* ~relais:messages:outgoing:* ~relais:logs
   +subscribe +publish +xreadgroup +xack +xadd
 
 user atelier    on >${REDIS_PASS_ATELIER}
-  ~relais:tasks ~relais:tasks:failed ~relais:memory:* ~relais:messages:streaming:* ~relais:messages:outgoing:* ~relais:events:* ~relais:logs
+  ~relais:tasks ~relais:tasks:failed ~relais:memory:* ~relais:messages:streaming:* ~relais:messages:outgoing_pending:* ~relais:events:* ~relais:logs
   +subscribe +publish +xreadgroup +xack +xadd
 
 user souvenir   on >${REDIS_PASS_SOUVENIR}
@@ -345,7 +345,8 @@ STREAMS (at-least-once — perte inacceptable)
   relais:memory:request                 Atelier → Souvenir
   relais:memory:response                Souvenir → Atelier
   relais:messages:incoming:{channel}    Aiguilleur → Portail
-  relais:messages:outgoing:{channel}    Atelier → Aiguilleur + Souvenir (observer)
+  relais:messages:outgoing_pending:{channel}  Atelier → Sentinelle (outgoing pass-through)
+  relais:messages:outgoing:{channel}    Sentinelle → Aiguilleur + Souvenir (observer)
   relais:messages:streaming:{ch}:{corr} Atelier → Aiguilleur (progressive chunks)
   relais:security                       Portail ↔ Sentinelle
   relais:logs                           Toutes → Archiviste (audit critique)
@@ -404,6 +405,7 @@ channels:
     type: native                     # "native" (Python, thread+asyncio) | "external" (subprocess)
     class_path: null                 # Override : "aiguilleur.channels.discord.adapter.DiscordAiguilleur"
     max_restarts: 5
+    # profile non défini → fallback config.yaml > llm.default_profile
 
   telegram:
     enabled: false
@@ -411,6 +413,7 @@ channels:
     type: native
     class_path: null
     max_restarts: 5
+    profile: fast                    # Profil LLM imposé à tous les messages de ce canal
 
   slack:
     enabled: false
@@ -449,6 +452,9 @@ channels:
 - `type` — `native` (thread Python + asyncio) ou `external` (subprocess)
 - `class_path` — override de la classe adaptateur
 - `max_restarts` — max avant abandon, restart avec backoff exponentiel
+- `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["llm_profile"]` par l'Aiguilleur au moment de la création de l'enveloppe entrante ; si absent, l'Aiguilleur lit `config.yaml > llm.default_profile` (fallback `"default"`)
+
+> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.metadata["llm_profile"]` — pas la Sentinelle. La Sentinelle n'écrit jamais ce champ.
 - `command`/`args` — requis pour `type: external` uniquement
 
 ### Tableau des canaux
@@ -475,7 +481,7 @@ Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier
 
 ### Rôle
 
-Le Portail valide le format Envelope entrant, met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (DND, vacation, in_meeting) et route vers La Sentinelle.
+Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` (users.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (DND, vacation, in_meeting) et route vers La Sentinelle.
 
 ### config/reply_policy.yaml
 
@@ -556,6 +562,17 @@ overrides:
 
 ## 10. La Sentinelle — sécurité & profils
 
+### Séparation des responsabilités : enrichissement vs sécurité
+
+**Architecture clarifiée :**
+
+1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `users.yaml`, stampe `user_role`, `display_name`, `llm_profile` (résolu depuis `channel_profile` de l'Aiguilleur).
+2. **La Sentinelle** effectue la **sécurité pure** : vérifie l'ACL (users.yaml : `blocked`, `allowed_channels`), applique guardrails (bidirectionnel).
+
+> **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
+> Elle valide l'ACL en lecture depuis `users.yaml` et transmet l'enveloppe enrichie inchangée vers `relais:tasks` (flux entrant).
+> En flux sortant, elle consomme `relais:messages:outgoing_pending:{channel}`, applique les guardrails sortants, et publie vers `relais:messages:outgoing:{channel}`.
+
 ### Les 3 rôles humains
 
 ```
@@ -572,45 +589,62 @@ USER        → Conversation standard. Read uniquement. Pas de bash.
 
 ### config/users.yaml
 
-```yaml
-users:
-  - internal_id: usr_benjamin
-    display_name: "Benjamin"
-    role: ADMIN
-    identities:
-      telegram: "123456789"
-      discord: "789012345678"
-      rest_api_key_hash: "sha256:..."
-    notification_strategy:
-      normal: last_active     # 1 canal — évite le bruit
-      high: all_active        # tous les canaux actifs
-      critical: all_active    # tous les canaux + notif système OS
-    active: true
+Schéma dict-keyed (clé = `usr_<id>`) avec identifiants contextuels par canal.
 
-  # Utilisateur système — sessions CRON et planifiées
-  - internal_id: usr_system
+```yaml
+access_control:
+  default_mode: allowlist       # "allowlist" | "blocklist"
+  channels:                     # Surcharges optionnelles par canal
+    # telegram:
+    #   mode: blocklist
+
+groups:                         # Groupes WhatsApp / Telegram — auth par group_id
+  - channel: whatsapp
+    group_id: "120363000000000@g.us"
+    allowed: true
+    blocked: false
+    llm_profile: fast
+
+users:
+  usr_benjamin:
+    display_name: "Benjamin"
+    role: admin
+    blocked: false
+    llm_profile: precise
+    identifiers:
+      discord:
+        dm: "789012345678"          # accès DM
+        server: "789012345678"      # accès mentions serveur (null = interdit)
+      telegram:
+        dm: "123456789"
+      rest:
+        api_keys: ["clé-api-1"]     # clés API REST (texte clair dans users.yaml)
+
+  usr_system:
     display_name: "RELAIS System"
-    role: SCHEDULER_AGENT
-    identities: {}
-    notification_strategy:
-      normal: last_active
-      high: all_active
-      critical: all_active
-    notification_target_user: usr_benjamin
-    active: true
+    role: admin
+    blocked: false
+    llm_profile: default
+    notes: "Compte interne — ne pas supprimer"
+
+roles:
+  admin:
+    actions: ["send", "command", "admin"]
+  user:
+    actions: ["send"]
 ```
 
 ### Politique utilisateur inconnu
 
-```yaml
-channels:
-  telegram:
-    unknown_user_policy: pending   # approbation admin manuelle
-  whatsapp:
-    unknown_user_policy: guest     # profil USER limité automatique
-  rest:
-    unknown_user_policy: deny      # rejet 401
+La politique est un paramètre global sur `ACLManager` (pas par canal dans `channels.yaml`).
+
 ```
+unknown_user_policy: "deny"     # rejet silencieux (défaut)
+unknown_user_policy: "guest"    # accès avec profil LLM limité (guest_profile)
+unknown_user_policy: "pending"  # rejet + notification dans relais:admin:pending_users
+```
+
+Le mode `blocklist` rend cette politique sans effet : les inconnus sont admis par défaut.
 
 ---
 
@@ -623,7 +657,10 @@ L'Atelier suit ce flux pour chaque tâche entrante :
 ```
 Incoming envelope
   ↓
-Parse + load profile (model, max_turns, max_tokens, resilience)
+Parse + load profile
+  — lit envelope.metadata["llm_profile"] (stampé par l'Aiguilleur)
+  — si absent : fallback sur config.yaml > llm.default_profile → "default"
+  — résout le ProfileConfig depuis profiles.yaml (model, max_turns, max_tokens, resilience)
   ↓
 Request context from Souvenir (relais:memory:request stream)
   ↓
@@ -640,7 +677,7 @@ Execute via AgentExecutor (boucle multi-tour explicite)
   ↓
 If streaming capable (Discord/Telegram): publish chunks to relais:messages:streaming:{channel}:{correlation_id}
   ↓
-Publish response to relais:messages:outgoing:{channel}
+Publish response to relais:messages:outgoing_pending:{channel}  (→ Sentinelle outgoing → outgoing:{channel})
   ↓
 Conditional XACK (success or DLQ) — never lose messages on retry
 ```
@@ -740,7 +777,7 @@ default:
 
 - `AgentExecutionError` → DLQ (`relais:tasks:failed`) + ACK
 - Exception transiente (réseau, timeout) → pas d'ACK → reste en PEL pour re-livraison
-- Succès → ACK après publication dans `relais:messages:outgoing:{channel}`
+- Succès → ACK après publication dans `relais:messages:outgoing_pending:{channel}`
 
 ---
 
@@ -785,7 +822,7 @@ Le Souvenir consomme deux streams en parallèle :
 ### Flux mémoire : outgoing (observation + extraction)
 
 ```
-1. relais:messages:outgoing:{channel} published by Atelier
+1. relais:messages:outgoing:{channel} published by Sentinelle (Atelier → outgoing_pending → Sentinelle → outgoing)
 
 2. Souvenir._handle_outgoing():
    a. Extract user message from envelope.metadata["user_message"]
@@ -995,6 +1032,16 @@ Message utilisateur                                      N tokens
 ---
 
 ## 16. Profils — config/profiles.yaml complet
+
+### Règle de résolution du profil
+
+Le profil actif pour un message entrant est résolu dans cet ordre strict (le premier trouvé gagne) :
+
+1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["llm_profile"]`)
+2. **`config.yaml > llm.default_profile`** — profil système par défaut
+3. **`"default"`** — valeur de repli ultime si `llm.default_profile` est absent de `config.yaml`
+
+> Le champ `llm_profile` dans `users.yaml` n'est **pas** utilisé pour la résolution du modèle — il s'agit d'une métadonnée informative uniquement.
 
 ```yaml
 profiles:
@@ -1332,7 +1379,9 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   └── prompt_loader.py
 │
 ├── sentinelle/
-│   └── main.py
+│   ├── main.py
+│   ├── acl.py                         ← ACLManager context-aware (allowlist/blocklist)
+│   └── guardrails.py                  ← ContentFilter (pré/post-LLM)
 │
 ├── atelier/
 │   ├── main.py

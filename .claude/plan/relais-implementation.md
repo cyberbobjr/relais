@@ -347,6 +347,44 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 
 ---
 
+## Phase 7 — Profil LLM par canal
+
+**Objectif :** permettre à chaque canal de forcer un profil LLM spécifique, indépendamment des utilisateurs.
+
+**Décision :** canal gagne toujours ; fallback sur `config.yaml > llm.default_profile` → `"default"`.
+
+### 7.1 `aiguilleur/channel_config.py` — Ajout champ `profile`
+- Ajouter `profile: str | None = None` dans `ChannelConfig` dataclass
+- `load_channels_config()` parse le champ optionnel sans breaking change
+
+**Tests** (`tests/test_channel_config.py`) :
+- Canal avec `profile: fast` → `config.profile == "fast"`
+- Canal sans `profile` → `config.profile is None`
+- `load_channels_config()` gère les deux cas
+
+### 7.2 Stamping dans les adaptateurs Aiguilleur
+- Au moment de la création de chaque enveloppe entrante, l'adaptateur stampe `envelope.metadata["llm_profile"]`
+- Si `channel_config.profile` est défini → utiliser cette valeur
+- Sinon → `get_default_llm_profile()` depuis `common/config_loader.py`
+
+**Tests** (`tests/test_discord_adapter.py`) :
+- Canal avec `profile: fast` → `metadata["llm_profile"] == "fast"`
+- Canal sans `profile` → `metadata["llm_profile"] == valeur config.yaml`
+
+### 7.3 `common/config_loader.py` — `get_default_llm_profile()`
+- Fonction helper qui lit `config.yaml > llm.default_profile`
+- Retourne `"default"` si la clé est absente
+
+**Tests** :
+- Retourne la valeur de `config.yaml > llm.default_profile` quand présente
+- Retourne `"default"` si clé absente
+
+### 7.4 `sentinelle/acl.py` — Deprecation `get_effective_profile()`
+- Ajouter docstring deprecation sur la méthode (ne pas supprimer)
+- Note : cette méthode n'est plus dans le chemin de résolution du profil
+
+---
+
 ## Phase 8 — Tests (continu)
 
 | Type | Cible | Outil |

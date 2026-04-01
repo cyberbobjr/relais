@@ -67,6 +67,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         ("relais:messages:incoming", "portail_group"),
         ("relais:security", "sentinelle_group"),
         ("relais:tasks", "atelier_group"),
+        ("relais:messages:outgoing_pending", "sentinelle_outgoing_group"),
         ("relais:messages:outgoing:discord", "souvenir_outgoing_group"),
     ]:
         await redis_conn.xgroup_create(stream, group, id="0", mkstream=True)
@@ -88,7 +89,9 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     assert len(security_msgs) == 1, "Portail doit publier 1 message dans relais:security"
 
     # ── STEP 2: Sentinelle ────────────────────────────────────────────────────
+    # Use permissive ACL so the test user (discord:111222333) is allowed through.
     sentinelle = Sentinelle()
+    sentinelle._acl.is_allowed = lambda *_args, **_kwargs: True
     await sentinelle._process_stream(redis_conn, shutdown=_one_shot())
 
     tasks_msgs = await redis_conn.xrange("relais:tasks", "-", "+")
@@ -126,6 +129,13 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
 
         atelier = Atelier()
         await atelier._process_stream(redis_conn, shutdown=_one_shot())
+
+    # ── STEP 3b: Sentinelle outgoing pass-through ─────────────────────────────
+    # Atelier publishes to relais:messages:outgoing_pending; Sentinelle routes
+    # each message to relais:messages:outgoing:{envelope.channel}.
+    sentinelle_out = Sentinelle()
+    sentinelle_out._acl.is_allowed = lambda *_args, **_kwargs: True
+    await sentinelle_out._process_outgoing_stream(redis_conn, shutdown=_one_shot())
 
     outgoing_msgs = await redis_conn.xrange("relais:messages:outgoing:discord", "-", "+")
     assert len(outgoing_msgs) == 1, "Atelier doit publier 1 réponse dans relais:messages:outgoing:discord"

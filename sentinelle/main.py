@@ -15,6 +15,7 @@ logging.basicConfig(
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
+from sentinelle.acl import ACLManager
 
 logger = logging.getLogger("sentinelle")
 
@@ -33,6 +34,9 @@ class Sentinelle:
         self.stream_out: str = "relais:tasks"
         self.group_name: str = "sentinelle_group"
         self.consumer_name: str = "sentinelle_1"
+        self.outgoing_group_name: str = "sentinelle_outgoing_group"
+        self.outgoing_consumer_name: str = "sentinelle_outgoing_1"
+        self._acl: ACLManager = ACLManager()
 
     async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
         """Consume security checks from Gateway and forward approved messages.
@@ -81,9 +85,16 @@ class Sentinelle:
                                 f"from {envelope.sender_id}"
                             )
 
-                            # ACL Check MVP: Allow all for now
-                            # TODO: Future implementation: load users.yaml and evaluate ACLs
-                            is_authorized = True
+                            # ACL check — context-aware, reads access_context/access_scope
+                            # injected by Aiguilleur adapters into the envelope metadata.
+                            acl_context: str = envelope.metadata.get("access_context", "dm")
+                            acl_scope: str | None = envelope.metadata.get("access_scope")
+                            is_authorized = self._acl.is_allowed(
+                                envelope.sender_id,
+                                envelope.channel,
+                                context=acl_context,
+                                scope_id=acl_scope,
+                            )
 
                             if is_authorized:
                                 envelope.add_trace("sentinelle", "ACL verified")
@@ -104,6 +115,10 @@ class Sentinelle:
                                 logger.warning(
                                     f"Unauthorized message {envelope.correlation_id} dropped."
                                 )
+                                if self._acl.unknown_user_policy == "pending":
+                                    await self._acl.notify_pending(
+                                        redis_conn, envelope.sender_id, envelope.channel
+                                    )
                                 await redis_conn.xadd("relais:logs", {
                                     "level": "WARN",
                                     "brick": "sentinelle",
@@ -132,8 +147,91 @@ class Sentinelle:
                 logger.error(f"Stream error: {e}")
                 await asyncio.sleep(1)
 
+    async def _process_outgoing_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
+        """Consume outgoing-pending messages and forward them to per-channel streams.
+
+        Reads from the single aggregated ``relais:messages:outgoing_pending``
+        stream, applies a pass-through outgoing rule (currently unconditional
+        forward), and publishes to ``relais:messages:outgoing:{envelope.channel}``
+        for the Aiguilleur adapter to consume.  The destination channel is read
+        from the envelope — no env-var configuration needed.
+
+        Exits cleanly when ``shutdown.is_stopping()`` returns True.
+
+        Args:
+            redis_conn: Active Redis connection.
+            shutdown: GracefulShutdown instance controlling the loop lifetime.
+                If None a new instance is created (backward-compatible).
+        """
+        if shutdown is None:
+            shutdown = GracefulShutdown()
+
+        stream_pending = "relais:messages:outgoing_pending"
+
+        try:
+            await redis_conn.xgroup_create(stream_pending, self.outgoing_group_name, mkstream=True)
+        except Exception as e:
+            if "BUSYGROUP" not in str(e):
+                logger.warning(f"Outgoing consumer group error: {e}")
+
+        logger.info("Sentinelle listening to outgoing_pending...")
+
+        while not shutdown.is_stopping():
+            try:
+                results = await redis_conn.xreadgroup(
+                    self.outgoing_group_name,
+                    self.outgoing_consumer_name,
+                    {stream_pending: ">"},
+                    count=10,
+                    block=2000,
+                )
+
+                if not results:
+                    continue
+
+                for _, messages in results:
+                    for message_id, data in messages:
+                        target_id = message_id
+                        try:
+                            payload = data.get("payload", "{}")
+                            envelope = Envelope.from_json(payload)
+
+                            stream_out = f"relais:messages:outgoing:{envelope.channel}"
+                            logger.debug(
+                                f"Outgoing pass-through: {envelope.correlation_id} "
+                                f"→ {stream_out}"
+                            )
+
+                            # Outgoing rule — currently a pass-through.
+                            # Future: apply output content policy here.
+                            envelope.add_trace("sentinelle", "outgoing pass-through")
+                            await redis_conn.xadd(stream_out, {"payload": envelope.to_json()})
+
+                        except Exception as inner_e:
+                            logger.error(
+                                f"Failed to process outgoing message {target_id}: {inner_e}"
+                            )
+                            await redis_conn.xadd("relais:logs", {
+                                "level": "ERROR",
+                                "brick": "sentinelle",
+                                "correlation_id": "",
+                                "message": f"Outgoing validation error: {inner_e}",
+                                "error": str(inner_e),
+                            })
+                        finally:
+                            await redis_conn.xack(stream_pending, self.outgoing_group_name, message_id)
+
+            except Exception as e:
+                logger.error(f"Outgoing stream error: {e}")
+                await asyncio.sleep(1)
+
     async def start(self) -> None:
-        """Starts La Sentinelle service and its main processing loop.
+        """Starts La Sentinelle service and its main processing loops.
+
+        Runs two concurrent loops:
+        - Incoming: ``relais:security`` → ACL check → ``relais:tasks``
+        - Outgoing: ``relais:messages:outgoing_pending`` → pass-through
+          → ``relais:messages:outgoing:{envelope.channel}``
 
         Registers SIGTERM/SIGINT handlers via GracefulShutdown so the process
         exits cleanly when sent a termination signal.
@@ -146,8 +244,12 @@ class Sentinelle:
             "brick": "sentinelle",
             "message": "Sentinelle started"
         })
+
         try:
-            await self._process_stream(redis_conn, shutdown=shutdown)
+            await asyncio.gather(
+                self._process_stream(redis_conn, shutdown=shutdown),
+                self._process_outgoing_stream(redis_conn, shutdown=shutdown),
+            )
         except asyncio.CancelledError:
             logger.info("Sentinelle shutting down...")
         finally:
