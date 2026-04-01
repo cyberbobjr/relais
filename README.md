@@ -247,7 +247,6 @@ Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (ut
 │   ├── litellm.yaml         Modèles LLM et proxy
 │   ├── profiles.yaml        Profils LLM (température, tokens, résilience)
 │   ├── users.yaml           Registre des utilisateurs et ACL
-│   ├── reply_policy.yaml    Politique de réponse automatique
 │   ├── channels.yaml        Canaux actifs, streaming, redémarrages (Aiguilleur + Atelier)
 │   ├── mcp_servers.yaml     Serveurs MCP (outils externes)
 │   └── HEARTBEAT.md         Tâches CRON planifiées
@@ -380,8 +379,6 @@ profiles:
       fallback_model: null      # Modèle de repli si tous les retries échouent
 
     max_turns: 10
-    mcp_timeout: 10             # Timeout (s) par appel outil MCP
-    mcp_max_tools: 20           # Max outils MCP exposés au modèle (0 = aucun)
 ```
 
 **Exemples de configuration par provider :**
@@ -478,36 +475,15 @@ roles:
 
 ---
 
-### `reply_policy.yaml` — Politique de réponse automatique
+### Politique utilisateurs inconnus — `unknown_user_policy`
 
-Chargé par le Portail. Détermine si un message entrant doit être traité ou ignoré.
+Configuré dans `config.yaml` (`security.unknown_user_policy`). Détermine le comportement du Portail face à un `sender_id` absent de `users.yaml` :
 
-```yaml
-reply_policy:
-  enabled: true
-
-  channels:
-    - discord
-    # - telegram
-    # - whatsapp
-
-  blocked_users: []             # user_id refusés sans réponse
-
-  debounce_seconds: 2           # Anti-flood : délai min entre deux réponses au même utilisateur
-
-  out_of_hours:
-    enabled: false
-    active_start: "08:00"       # Plage active (HH:MM)
-    active_end: "22:00"
-    timezone: "Europe/Paris"    # Fuseau tz database
-    prompt_file: "prompts/out_of_hours.md"
-
-  ignored_prefixes:
-    - "!"                       # Commandes bots tiers
-    - "/"                       # Slash commands
-
-  min_message_length: 2
-```
+| Valeur | Comportement |
+|--------|-------------|
+| `deny` (défaut) | Drop silencieux — aucune réponse |
+| `guest` | Stamp identité guest synthétique, rôle `guest` (accès restreint) |
+| `pending` | Publie l'enveloppe sur `relais:admin:pending_users` pour validation manuelle, puis drop |
 
 ---
 
@@ -610,7 +586,7 @@ mcp_servers:
 - `stdio` : processus local via stdin/stdout — l'Atelier spawne le serveur comme sous-processus (recommandé pour outils CLI)
 - `sse` : Server-Sent Events — connexion à un serveur HTTP existant (recommandé pour services distants persistants)
 
-> **Timeout et nombre max d'outils** — configurés par profil dans `profiles.yaml` (champs `mcp_timeout` et `mcp_max_tools`).
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `users.yaml:roles:`.
 
 ---
 
