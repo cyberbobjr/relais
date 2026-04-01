@@ -156,7 +156,7 @@ flowchart TD
 
 ## ATELIER — Moteur LLM
 
-L'Atelier est la brique qui exécute l'intelligence. Il utilise **DeepAgents/LangGraph** (`AgentExecutor`) avec une boucle agentique multi-tours, en appelant directement le provider LLM via `ANTHROPIC_API_KEY`.
+L'Atelier est la brique qui exécute l'intelligence. Il utilise **DeepAgents/LangGraph** (`AgentExecutor`) avec une boucle agentique multi-tours, en appelant directement le provider LLM (Anthropic, OpenRouter, Ollama, LM Studio…) via LangChain `init_chat_model`.
 
 ### Capacités actives
 
@@ -167,8 +167,8 @@ L'Atelier est la brique qui exécute l'intelligence. Il utilise **DeepAgents/Lan
 | **Serveurs MCP** | Outils externes via stdio ou SSE — déclarés dans `mcp_servers.yaml`, filtrés par profil |
 | **Outils internes** | Fonctions `@tool` LangChain exposées à la boucle agentique (`list_skills`, `read_skill`) |
 | **Streaming live** | Chunks publiés en temps réel sur `relais:messages:streaming:{channel}:{cid}` → rendu progressif (Telegram, TUI — désactivé sur Discord) |
-| **Profils LLM** | Modèle, température, max_turns configurables par profil (`profiles.yaml`) |
-| **Provider direct** | `ANTHROPIC_API_KEY` → appel direct Anthropic via DeepAgents/LangChain |
+| **Profils LLM** | Modèle, température, max_turns, base_url, api_key_env configurables par profil (`profiles.yaml`) |
+| **Multi-provider** | Anthropic, OpenRouter, Ollama, LM Studio — endpoint et clé API par profil |
 | **Résilience** | Retry avec backoff configurable ; messages non-récupérables → DLQ (`relais:tasks:failed`) |
 
 ### Flux d'exécution simplifié
@@ -358,12 +358,21 @@ uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --
 
 Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est résolu dans cet ordre de priorité : **`profile` dans `channels.yaml`** (canal gagne toujours) → `llm.default_profile` dans `config.yaml` (fallback système). Le champ `llm_profile` dans `users.yaml` n'est plus utilisé pour la résolution du modèle.
 
+Le champ `model` utilise le format `provider:model-id` (ex. `anthropic:claude-haiku-4-5`). Les champs `base_url` et `api_key_env` sont **obligatoires** dans chaque profil — déclarez-les explicitement même si leur valeur est `null`.
+
+`base_url` accepte une URL littérale **ou** une référence à une variable d'environnement via la syntaxe `${VAR}`. Si la variable n'est pas définie au démarrage, le chargement échoue immédiatement (fail-fast).
+
 ```yaml
 profiles:
   mon-profil:
-    model: mon-modele-local     # Doit correspondre à un model_name dans litellm.yaml
+    model: anthropic:claude-haiku-4-5   # Format obligatoire : provider:model-id
     temperature: 0.7            # 0.0 (déterministe) → 1.0 (créatif)
     max_tokens: 1024
+    base_url: null              # null = endpoint par défaut du provider
+                                # URL littérale : http://192.168.1.134:1234/v1
+                                # Variable d'env : "${LM_STUDIO_URL}"  ← interpolée au démarrage
+    api_key_env: ANTHROPIC_API_KEY  # Nom de la variable d'env contenant la clé API
+                                    # null = aucune clé injectée (ex. Ollama local)
 
     resilience:
       retry_attempts: 3
@@ -378,6 +387,18 @@ profiles:
     guardrails: []
     memory_scope: own           # "own" = mémoire par utilisateur | "global" = partagée
 ```
+
+**Exemples de configuration par provider :**
+
+| Provider | `model` | `base_url` | `api_key_env` |
+|----------|---------|-----------|--------------|
+| Anthropic (cloud) | `anthropic:claude-haiku-4-5` | `null` | `ANTHROPIC_API_KEY` |
+| OpenRouter | `openrouter:openai/gpt-4o-mini` | `null` | `OPENROUTER_API_KEY` |
+| Ollama (local) | `ollama:llama3` | `null` | `null` |
+| LM Studio (IP fixe) | `openai:my-model` | `http://192.168.1.x:1234/v1` | `null` |
+| LM Studio (variable) | `openai:my-model` | `"${LM_STUDIO_URL}"` | `null` |
+
+> `export LM_STUDIO_URL=http://192.168.1.134:1234/v1` — si la variable n'est pas définie, le démarrage échoue avec une `ValueError` explicite.
 
 **Profils livrés par défaut :**
 

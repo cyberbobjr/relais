@@ -9,10 +9,11 @@ profiles:
     model: anthropic:claude-haiku-4-5
     temperature: 0.7
     max_tokens: 1024
+    base_url: null              # null = endpoint par défaut du provider
+    api_key_env: ANTHROPIC_API_KEY
     stream: false
     memory:
       short_term_messages: 20
-    # Wave-1A fields
     allowed_tools: null           # null = unrestricted
     allowed_mcp: null             # null = unrestricted
     guardrails: []                # no guardrail rules
@@ -28,10 +29,11 @@ profiles:
     model: anthropic:claude-haiku-4-5
     temperature: 0.5
     max_tokens: 256
+    base_url: null
+    api_key_env: ANTHROPIC_API_KEY
     stream: false
     memory:
       short_term_messages: 10
-    # Wave-1A fields — narrow tool set matches low-latency intent
     allowed_tools: null
     allowed_mcp: null
     guardrails: []
@@ -47,10 +49,11 @@ profiles:
     model: anthropic:claude-sonnet-4-5
     temperature: 0.3
     max_tokens: 4096
+    base_url: null
+    api_key_env: ANTHROPIC_API_KEY
     stream: false
     memory:
       short_term_messages: 30
-    # Wave-1A fields — haiku as fallback to reduce cost on retry
     allowed_tools: null
     allowed_mcp: null
     guardrails: []
@@ -62,14 +65,19 @@ profiles:
       fallback_model: mistral-small-2603
 
   # Profil codeur — génération et révision de code
+  # Exemple avec modèle local (LM Studio / Ollama) :
+  #   model: openai:mon-modele-local
+  #   base_url: "${LM_STUDIO_URL}"   # export LM_STUDIO_URL=http://192.168.1.x:1234/v1
+  #   api_key_env: null
   coder:
     model: anthropic:claude-sonnet-4-5
     temperature: 0.2
     max_tokens: 8192
+    base_url: null
+    api_key_env: ANTHROPIC_API_KEY
     stream: false
     memory:
       short_term_messages: 20
-    # Wave-1A fields — broader tool access for code tasks
     allowed_tools: [Read, Write, "Bash(git *)", "mcp__jcodemunch__*"]
     allowed_mcp: ["mcp__jcodemunch__*"]
     guardrails: [no_code_exec]
@@ -86,6 +94,8 @@ profiles:
     temperature: 0.1
     max_tokens: 512
     max_turns: 1
+    base_url: null
+    api_key_env: ANTHROPIC_API_KEY
     stream: false
     memory:
       short_term_messages: 0

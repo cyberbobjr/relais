@@ -171,7 +171,6 @@ class Atelier:
                 mcp_tools = await make_mcp_tools(session_manager)
                 tools = [*self._skills_tools, *mcp_tools]
 
-                # 6. Create AgentExecutor with the assembled tools.
                 agent_executor = AgentExecutor(
                     profile=profile,
                     soul_prompt=soul_prompt,

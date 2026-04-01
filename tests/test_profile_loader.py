@@ -3,10 +3,12 @@
 import textwrap
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from atelier.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
+from atelier.agent_executor import _resolve_profile_model
 
 # Path to the actual project default profiles file (used for integration-style tests
 # that must verify the shipped configuration, not a fixture YAML).
@@ -24,6 +26,8 @@ MINIMAL_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         resilience:
           retry_attempts: 3
           retry_delays: [2, 5, 15]
@@ -31,6 +35,8 @@ MINIMAL_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.3
         max_tokens: 512
+        base_url: null
+        api_key_env: null
         resilience:
           retry_attempts: 2
           retry_delays: [1, 3]
@@ -38,6 +44,8 @@ MINIMAL_YAML = textwrap.dedent(
         model: claude-sonnet-4-5
         temperature: 0.2
         max_tokens: 4096
+        base_url: null
+        api_key_env: null
         resilience:
           retry_attempts: 3
           retry_delays: [2, 5, 15]
@@ -157,6 +165,8 @@ def test_resolve_profile_missing_default_raises() -> None:
             temperature=0.3,
             max_tokens=512,
             resilience=ResilienceConfig(retry_attempts=2, retry_delays=[1, 3]),
+            base_url=None,
+            api_key_env=None,
         )
     }
 
@@ -208,6 +218,8 @@ def test_load_profiles_with_explicit_path(tmp_path: Path) -> None:
                 model: test-model-only
                 temperature: 0.1
                 max_tokens: 100
+                base_url: null
+                api_key_env: null
                 resilience:
                   retry_attempts: 1
                   retry_delays: [1]
@@ -334,6 +346,8 @@ def test_load_profiles_delegates_to_resolve_config_path(
         "    model: cascade-delegated-model\n"
         "    temperature: 0.5\n"
         "    max_tokens: 512\n"
+        "    base_url: null\n"
+        "    api_key_env: null\n"
         "    resilience:\n"
         "      retry_attempts: 1\n"
         "      retry_delays: [1]\n"
@@ -387,6 +401,8 @@ MAX_TURNS_YAML = textwrap.dedent(
         temperature: 0.7
         max_tokens: 2048
         max_turns: 10
+        base_url: null
+        api_key_env: null
         resilience:
           retry_attempts: 3
           retry_delays: [2, 5, 15]
@@ -395,6 +411,8 @@ MAX_TURNS_YAML = textwrap.dedent(
         temperature: 0.5
         max_tokens: 1024
         max_turns: 5
+        base_url: null
+        api_key_env: null
         resilience:
           retry_attempts: 2
           retry_delays: [1, 3]
@@ -439,6 +457,8 @@ def test_profile_config_max_turns_constructable_directly() -> None:
         max_tokens=1024,
         max_turns=15,
         resilience=ResilienceConfig(retry_attempts=2, retry_delays=[1, 3]),
+        base_url=None,
+        api_key_env=None,
     )
 
     assert profile.max_turns == 15
@@ -476,6 +496,8 @@ ALLOWED_TOOLS_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         resilience:
           retry_attempts: 3
           retry_delays: [2, 5, 15]
@@ -483,6 +505,8 @@ ALLOWED_TOOLS_YAML = textwrap.dedent(
         model: qwen3-coder-30b
         temperature: 0.2
         max_tokens: 8192
+        base_url: null
+        api_key_env: null
         allowed_tools: [Read, "Bash(git *)", "mcp__jcodemunch__*"]
         resilience:
           retry_attempts: 3
@@ -539,6 +563,8 @@ ALLOWED_MCP_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         allowed_mcp: ["mcp__gitlab__*", "mcp__brave__search"]
         resilience:
           retry_attempts: 3
@@ -593,6 +619,8 @@ GUARDRAILS_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         guardrails: [no_bash, no_code_exec]
         resilience:
           retry_attempts: 3
@@ -647,6 +675,8 @@ MEMORY_SCOPE_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         memory_scope: global
         resilience:
           retry_attempts: 3
@@ -655,6 +685,8 @@ MEMORY_SCOPE_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.5
         max_tokens: 1024
+        base_url: null
+        api_key_env: null
         memory_scope: task
         resilience:
           retry_attempts: 2
@@ -691,6 +723,8 @@ INVALID_MEMORY_SCOPE_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         memory_scope: invalid_scope
         resilience:
           retry_attempts: 3
@@ -748,6 +782,8 @@ FALLBACK_MODEL_YAML = textwrap.dedent(
         model: mistral-small-2603
         temperature: 0.7
         max_tokens: 2048
+        base_url: null
+        api_key_env: null
         fallback_model: haiku-4-5
         resilience:
           retry_attempts: 3
@@ -756,6 +792,8 @@ FALLBACK_MODEL_YAML = textwrap.dedent(
         model: claude-sonnet-4-5
         temperature: 0.3
         max_tokens: 4096
+        base_url: null
+        api_key_env: null
         fallback_model: mistral-small-2603
         resilience:
           retry_attempts: 3
@@ -799,6 +837,8 @@ def test_profile_config_new_fields_constructable_directly() -> None:
         temperature=0.5,
         max_tokens=1024,
         resilience=ResilienceConfig(retry_attempts=2, retry_delays=[1, 3]),
+        base_url="http://localhost:1234/v1",
+        api_key_env="MY_API_KEY",
         allowed_tools=("Read", "Write"),
         allowed_mcp=("mcp__brave__search",),
         guardrails=("no_bash",),
@@ -806,6 +846,8 @@ def test_profile_config_new_fields_constructable_directly() -> None:
         fallback_model="haiku-4-5",
     )
 
+    assert profile.base_url == "http://localhost:1234/v1"
+    assert profile.api_key_env == "MY_API_KEY"
     assert profile.allowed_tools == ("Read", "Write")
     assert profile.allowed_mcp == ("mcp__brave__search",)
     assert profile.guardrails == ("no_bash",)
@@ -819,28 +861,34 @@ def test_profile_config_new_fields_constructable_directly() -> None:
 
 
 @pytest.mark.unit
-def test_profile_config_backward_compat_missing_new_fields(profiles_yaml: Path) -> None:
-    """Profiles without any Wave-1A fields still load successfully with defaults.
+def test_profile_config_missing_required_fields_raises_key_error(tmp_path: Path) -> None:
+    """load_profiles() raises KeyError when base_url or api_key_env is absent.
 
-    The MINIMAL_YAML fixture has no allowed_tools, allowed_mcp, guardrails,
-    memory_scope, or fallback_model.  load_profiles() must apply defaults
-    rather than raising.
+    Both base_url and api_key_env are required fields — every profile must
+    declare them explicitly (even as null). Omitting them must raise KeyError,
+    not silently fall back to a default.
 
     Args:
-        profiles_yaml: Fixture path to the temporary profiles YAML file.
+        tmp_path: Pytest-provided temporary directory.
     """
-    profiles = load_profiles(config_path=profiles_yaml)
-
-    for name in ("default", "fast", "precise"):
-        p = profiles[name]
-        assert p.allowed_tools is None, f"{name}: allowed_tools should be None"
-        assert p.allowed_mcp is None, f"{name}: allowed_mcp should be None"
-        assert p.guardrails == (), f"{name}: guardrails should be ()"
-        assert p.memory_scope == "own", f"{name}: memory_scope should be 'own'"
-        # fallback_model may be None or a string depending on the profile
-        assert isinstance(p.fallback_model, (str, type(None))), (
-            f"{name}: fallback_model must be str or None"
+    missing_fields_yaml = tmp_path / "profiles.yaml"
+    missing_fields_yaml.write_text(
+        textwrap.dedent(
+            """\
+            profiles:
+              default:
+                model: mistral-small-2603
+                temperature: 0.7
+                max_tokens: 2048
+                resilience:
+                  retry_attempts: 3
+                  retry_delays: [2, 5, 15]
+            """
         )
+    )
+
+    with pytest.raises(KeyError):
+        load_profiles(config_path=missing_fields_yaml)
 
 
 # ---------------------------------------------------------------------------
@@ -916,3 +964,166 @@ def test_default_profiles_model_format_uses_provider_prefix() -> None:
             f"Profile '{name}': model '{profile.model}' must use 'provider:model' format "
             f"(e.g., 'anthropic:claude-haiku-4-5'). LiteLLM proxy has been removed."
         )
+
+
+# ---------------------------------------------------------------------------
+# 32. base_url and api_key_env are loaded from YAML
+# ---------------------------------------------------------------------------
+
+
+BASE_URL_YAML = textwrap.dedent(
+    """\
+    profiles:
+      local:
+        model: openai:my-local-model
+        temperature: 0.5
+        max_tokens: 1024
+        base_url: http://192.168.1.134:1234/v1
+        api_key_env: null
+        resilience:
+          retry_attempts: 2
+          retry_delays: [1, 3]
+      cloud:
+        model: anthropic:claude-haiku-4-5
+        temperature: 0.7
+        max_tokens: 512
+        base_url: null
+        api_key_env: MY_PROVIDER_KEY
+        resilience:
+          retry_attempts: 3
+          retry_delays: [2, 5, 15]
+    """
+)
+
+
+@pytest.mark.unit
+def test_profile_config_base_url_and_api_key_env_loaded_from_yaml(tmp_path: Path) -> None:
+    """ProfileConfig.base_url and api_key_env are read from YAML as-is.
+
+    base_url may be a string URL or null; api_key_env may be an env var name or null.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+    """
+    p = tmp_path / "profiles.yaml"
+    p.write_text(BASE_URL_YAML)
+
+    profiles = load_profiles(config_path=p)
+
+    assert profiles["local"].base_url == "http://192.168.1.134:1234/v1"
+    assert profiles["local"].api_key_env is None
+    assert profiles["cloud"].base_url is None
+    assert profiles["cloud"].api_key_env == "MY_PROVIDER_KEY"
+
+
+# ---------------------------------------------------------------------------
+# 33. _resolve_profile_model — string passthrough when both fields are None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_returns_string_when_no_overrides() -> None:
+    """_resolve_profile_model returns the model string when base_url and api_key_env are None.
+
+    No init_chat_model call should be made in this path — create_deep_agent
+    receives the raw provider:model string and resolves the provider itself.
+    """
+    profile = ProfileConfig(
+        model="anthropic:claude-haiku-4-5",
+        temperature=0.5,
+        max_tokens=512,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url=None,
+        api_key_env=None,
+    )
+
+    result = _resolve_profile_model(profile)
+
+    assert result == "anthropic:claude-haiku-4-5"
+
+
+# ---------------------------------------------------------------------------
+# 34. _resolve_profile_model — builds BaseChatModel when base_url is set
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_calls_init_chat_model_with_base_url(tmp_path: Path) -> None:
+    """_resolve_profile_model calls init_chat_model with base_url when it is set.
+
+    When base_url is provided (and api_key_env is None), init_chat_model must
+    be called with only the base_url kwarg.
+    """
+    profile = ProfileConfig(
+        model="openai:my-local-model",
+        temperature=0.2,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url="http://localhost:1234/v1",
+        api_key_env=None,
+    )
+
+    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+        _resolve_profile_model(profile)
+
+    mock_init.assert_called_once_with("openai:my-local-model", base_url="http://localhost:1234/v1")
+
+
+# ---------------------------------------------------------------------------
+# 35. _resolve_profile_model — reads api_key from environment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_reads_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_resolve_profile_model passes the env var value as api_key to init_chat_model.
+
+    Args:
+        monkeypatch: Pytest fixture for safe environment patching.
+    """
+    monkeypatch.setenv("MY_PROVIDER_KEY", "sk-test-secret")
+
+    profile = ProfileConfig(
+        model="anthropic:claude-haiku-4-5",
+        temperature=0.7,
+        max_tokens=512,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url=None,
+        api_key_env="MY_PROVIDER_KEY",
+    )
+
+    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+        _resolve_profile_model(profile)
+
+    mock_init.assert_called_once_with("anthropic:claude-haiku-4-5", api_key="sk-test-secret")
+
+
+# ---------------------------------------------------------------------------
+# 36. _resolve_profile_model — raises KeyError when api_key_env var is absent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_raises_key_error_for_missing_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_profile_model raises KeyError when the env var named by api_key_env is absent.
+
+    Fail-fast: missing credentials must never be silently swallowed.
+
+    Args:
+        monkeypatch: Pytest fixture for safe environment patching.
+    """
+    monkeypatch.delenv("ABSENT_KEY", raising=False)
+
+    profile = ProfileConfig(
+        model="anthropic:claude-haiku-4-5",
+        temperature=0.7,
+        max_tokens=512,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url=None,
+        api_key_env="ABSENT_KEY",
+    )
+
+    with pytest.raises(KeyError):
+        _resolve_profile_model(profile)

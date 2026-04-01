@@ -20,6 +20,23 @@ from common.envelope import Envelope
 # ---------------------------------------------------------------------------
 
 
+def _init_typing_mocks(client) -> None:
+    """Attach typing-indicator stubs to a bare client bypassing __init__.
+
+    Sets ``_typing_tasks`` to an empty dict and replaces ``loop`` with a
+    MagicMock whose ``create_task`` immediately closes the coroutine it
+    receives (preventing "coroutine was never awaited" warnings) and returns
+    a mock Task.
+
+    Args:
+        client: A ``_RelaisDiscordClient`` instance created via ``__new__``.
+    """
+    client._typing_tasks = {}
+    mock_loop = MagicMock()
+    mock_loop.create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+    client.loop = mock_loop
+
+
 def _make_envelope(
     correlation_id: str = "corr-001",
     channel_id: int = 999888777,
@@ -106,6 +123,7 @@ async def test_on_message_queues_envelope_on_mention():
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
         client._llm_profile = "default"
+        _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -147,6 +165,7 @@ async def test_on_message_dm_queues_envelope():
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
         client._llm_profile = "default"
+        _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -182,6 +201,7 @@ async def test_on_message_empty_content_defaults_to_coucou():
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
         client._llm_profile = "default"
+        _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -219,6 +239,7 @@ async def test_on_message_xadd_failure_does_not_raise():
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
         client._llm_profile = "default"
+        _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             # Must not raise
@@ -273,6 +294,7 @@ async def test_consume_outgoing_sends_reply_and_xack():
         client.consumer_name = "discord_test"
         client.is_closed = is_closed
         client.get_channel = MagicMock(return_value=mock_channel)
+        client._typing_tasks = {}
 
         await client._consume_outgoing_stream()
 
@@ -329,6 +351,7 @@ async def test_consume_outgoing_dm_fallback_when_channel_not_in_cache():
         client.is_closed = is_closed
         client.get_channel = MagicMock(return_value=None)   # not in cache
         client.fetch_user = AsyncMock(return_value=mock_user)
+        client._typing_tasks = {}
 
         await client._consume_outgoing_stream()
 
@@ -405,6 +428,7 @@ async def test_on_message_stamps_channel_profile_from_channel_config():
         client.stream_in = "relais:messages:incoming"
         client._channel_config = channel_config
         client._llm_profile = "fast"   # pre-resolved at init time
+        _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -449,6 +473,7 @@ async def test_on_message_stamps_default_channel_profile_when_no_channel_profile
         client.stream_in = "relais:messages:incoming"
         client._channel_config = channel_config
         client._llm_profile = "default"  # resolved at init to config fallback
+        _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
             await client.on_message(mock_message)
@@ -458,3 +483,187 @@ async def test_on_message_stamps_default_channel_profile_when_no_channel_profile
     data = json.loads(payload_json)
     assert data["metadata"]["channel_profile"] == "default"
     assert "llm_profile" not in data["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# Typing indicator tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_typing_task_started_on_message():
+    """on_message must register a typing task keyed by correlation_id.
+
+    After on_message returns, _typing_tasks must contain exactly one entry
+    and loop.create_task must have been called once with a coroutine.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_user = MagicMock()
+    mock_user.id = 100
+
+    mock_channel = MagicMock()
+    mock_channel.id = 555
+    mock_channel.trigger_typing = AsyncMock()
+
+    mock_message = MagicMock()
+    mock_message.author.id = 999
+    mock_message.author.name = "TestUser"
+    mock_message.mentions = [mock_user]
+    mock_message.channel = mock_channel
+    mock_message.content = f"<@{mock_user.id}> hello"
+
+    mock_redis = AsyncMock()
+    mock_task = MagicMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._redis_conn = mock_redis
+        client.stream_in = "relais:messages:incoming"
+        client._llm_profile = "default"
+        client._typing_tasks = {}
+        mock_loop = MagicMock()
+        created_coros = []
+
+        def _create_task(coro):
+            created_coros.append(coro)
+            coro.close()
+            return mock_task
+
+        mock_loop.create_task.side_effect = _create_task
+        client.loop = mock_loop
+
+        with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
+            await client.on_message(mock_message)
+
+    assert mock_loop.create_task.call_count == 1
+    assert len(created_coros) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_typing_task_cancelled_on_delivery():
+    """_deliver_outgoing_message must cancel the typing task for the correlation_id.
+
+    A mock task pre-registered in _typing_tasks must have cancel() called and
+    the entry must be removed from the dict before channel.send() is called.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = _make_envelope(correlation_id="corr-xyz")
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+    mock_task = MagicMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {"corr-xyz": mock_task}
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._deliver_outgoing_message({"payload": env.to_json()})
+
+    mock_task.cancel.assert_called_once()
+    assert "corr-xyz" not in client._typing_tasks
+    mock_channel.send.assert_called_once_with(env.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_delivery_without_matching_typing_task_does_not_crash():
+    """_deliver_outgoing_message must not crash when no typing task is registered.
+
+    Handles replays or messages originated before the typing feature was deployed.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = _make_envelope(correlation_id="unknown-corr")
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {}   # no entry for "unknown-corr"
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        # Must not raise
+        await client._deliver_outgoing_message({"payload": env.to_json()})
+
+    mock_channel.send.assert_called_once_with(env.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_typing_loop_handles_discord_api_error():
+    """_typing_loop must exit silently when channel.typing() raises an exception.
+
+    A Discord API error (e.g. deleted channel) must not propagate to the caller.
+    """
+    import discord as discord_lib
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_channel = MagicMock()
+    mock_channel.typing.return_value.__aenter__ = AsyncMock(
+        side_effect=discord_lib.HTTPException(MagicMock(status=403), "Forbidden")
+    )
+    mock_channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {"err-corr": MagicMock()}
+
+        # Must not raise
+        await client._typing_loop(mock_channel, "err-corr")
+
+    # Task removed from dict in finally block
+    assert "err-corr" not in client._typing_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_typing_loop_respects_max_timeout():
+    """_typing_loop must stop after _TYPING_MAX_SECONDS even without cancellation.
+
+    Patching _TYPING_MAX_SECONDS to a small value verifies the loop exits after
+    the sleep completes and the context manager is exited cleanly.
+    """
+    import aiguilleur.channels.discord.adapter as adapter_mod
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_channel = MagicMock()
+    mock_channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    mock_channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {"t-corr": MagicMock()}
+
+        with patch.object(adapter_mod, "_TYPING_MAX_SECONDS", 0.01):
+            await client._typing_loop(mock_channel, "t-corr")
+
+    mock_channel.typing.assert_called_once()
+    assert "t-corr" not in client._typing_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_all_typing_tasks_cancelled_on_close():
+    """close() must cancel all pending typing tasks before delegating to super().
+
+    Prevents "task was destroyed but it is pending" warnings on shutdown.
+    """
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_task_a = MagicMock()
+    mock_task_b = MagicMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {"corr-a": mock_task_a, "corr-b": mock_task_b}
+
+        with patch("discord.Client.close", new_callable=AsyncMock):
+            await client.close()
+
+    mock_task_a.cancel.assert_called_once()
+    mock_task_b.cancel.assert_called_once()
+    assert client._typing_tasks == {}

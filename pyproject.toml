@@ -22,6 +22,10 @@ dependencies = [
     "discord-py>=2.0",
     "certifi>=2024.0",
     "langchain-openai>=1.1.12",
+    "langchain-openrouter>=0.2.1",
+    "langchain-ollama>=1.0.1",
+    "langchain-mistralai>=1.1.2",
+    "langchain-deepseek>=1.0.1",
 ]
 
 [build-system]

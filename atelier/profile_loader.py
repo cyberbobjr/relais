@@ -6,6 +6,8 @@ config cascade: ~/.relais/config/ > /opt/relais/config/ > ./config/.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -16,6 +18,11 @@ from common.config_loader import resolve_config_path
 
 _VALID_MEMORY_SCOPES: Final[frozenset[str]] = frozenset(
     {"global", "own", "sender", "task"}
+)
+
+# Matches any $VAR or ${VAR} that survives os.path.expandvars — i.e. the variable was unset.
+_UNEXPANDED_VAR_RE: Final[re.Pattern[str]] = re.compile(
+    r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)"
 )
 
 
@@ -49,10 +56,16 @@ class ProfileConfig:
             The provider prefix is required — LiteLLM proxy has been removed.
         temperature: Sampling temperature controlling response randomness.
         max_tokens: Maximum number of tokens the LLM may generate.
-        max_turns: Maximum number of agentic turns in the tool-use loop.
         resilience: Retry and fallback configuration for transient failures.
             Loaded and exposed on AgentExecutor; retry logic is not yet
             enforced — see TODO in agent_executor.py (Phase 5).
+        base_url: Override the provider's default API endpoint. Used for local
+            models (Ollama, LM Studio) or custom deployments. None means use
+            the provider's built-in default.
+        api_key_env: Name of the environment variable holding the API key for
+            this provider. The value is read at call time via os.environ[].
+            None means no API key is injected (e.g. local Ollama).
+        max_turns: Maximum number of agentic turns in the tool-use loop.
         allowed_tools: Tuple of allowed MCP tool names; None means unrestricted.
             Loaded for forward-compatibility; not yet enforced.
         allowed_mcp: Tuple of allowed MCP server names; None means unrestricted.
@@ -74,6 +87,8 @@ class ProfileConfig:
     temperature: float
     max_tokens: int
     resilience: ResilienceConfig
+    base_url: str | None
+    api_key_env: str | None
     max_turns: int = 20
     allowed_tools: tuple[str, ...] | None = None
     allowed_mcp: tuple[str, ...] | None = None
@@ -158,11 +173,27 @@ def load_profiles(
 
         fallback_model: str | None = cfg.get("fallback_model") or None
 
+        base_url_raw: str | None = cfg["base_url"]
+        if base_url_raw is not None:
+            expanded = os.path.expandvars(str(base_url_raw))
+            if _UNEXPANDED_VAR_RE.search(expanded):
+                raise ValueError(
+                    f"base_url for profile '{name}' references an unset environment variable: "
+                    f"{base_url_raw!r}"
+                )
+            base_url: str | None = expanded
+        else:
+            base_url = None
+
+        api_key_env: str | None = cfg["api_key_env"]
+
         result[name] = ProfileConfig(
             model=str(cfg["model"]),
             temperature=float(cfg["temperature"]),
             max_tokens=int(cfg["max_tokens"]),
             resilience=resilience,
+            base_url=base_url,
+            api_key_env=api_key_env,
             max_turns=int(cfg["max_turns"]) if "max_turns" in cfg else 20,
             allowed_tools=allowed_tools,
             allowed_mcp=allowed_mcp,

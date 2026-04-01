@@ -26,13 +26,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool, tool
 
 logger = logging.getLogger(__name__)
 
 
-def make_skills_tools(skills_dir: Path) -> list[StructuredTool]:
-    """Return LangChain StructuredTool instances for listing and reading skills.
+def make_skills_tools(skills_dir: Path) -> list[BaseTool]:
+    """Return LangChain @tool-decorated callables for listing and reading skills.
 
     Both tools operate on ``skills_dir`` (captured at call time via closure).
     If ``skills_dir`` does not exist the tools still work — ``list_skills``
@@ -42,17 +42,16 @@ def make_skills_tools(skills_dir: Path) -> list[StructuredTool]:
         skills_dir: Directory to scan for ``SKILL.md`` files recursively.
 
     Returns:
-        List of two StructuredTool instances: ``list_skills`` and ``read_skill``.
+        List of two BaseTool instances: ``list_skills`` and ``read_skill``.
     """
 
-    def _list_skills() -> str:
+    @tool(parse_docstring=True)
+    def list_skills() -> str:
         """List all available skills with a one-line summary of each.
 
         Call this first to discover what skills exist before reading one.
-
-        Returns:
-            Newline-separated list of skill names with a one-line summary,
-            or a message indicating no skills are available.
+        Returns a newline-separated catalogue or a message when no skills
+        are available.
         """
         if not skills_dir.exists():
             return "No skills directory found."
@@ -65,17 +64,16 @@ def make_skills_tools(skills_dir: Path) -> list[StructuredTool]:
             return "No skills found."
         return "\n".join(entries)
 
-    def _read_skill(skill_name: str) -> str:
+    @tool(parse_docstring=True)
+    def read_skill(skill_name: str) -> str:
         """Read the full content of a skill by its name.
 
-        Use list_skills first to find the exact skill name.
+        Use list_skills first to discover available skill names, then call
+        this tool with the exact name to retrieve the full guidance document.
 
         Args:
             skill_name: Exact name of the skill directory (e.g. 'python-patterns').
-
-        Returns:
-            Full text content of the SKILL.md file, or an error string when
-            the skill is not found or the name is invalid.
+                Must be a plain name with no path separators or '..' references.
         """
         # Guard against path traversal: model-supplied skill_name must be a
         # plain directory name with no separators or parent-dir references.
@@ -94,25 +92,7 @@ def make_skills_tools(skills_dir: Path) -> list[StructuredTool]:
                 return skill_file.read_text(encoding="utf-8")
         return f"Error: skill '{skill_name}' not found in {skills_dir}."
 
-    list_tool = StructuredTool.from_function(
-        func=_list_skills,
-        name="list_skills",
-        description=(
-            "List all available skills with a one-line summary of each. "
-            "Call this first to discover what skills exist before reading one."
-        ),
-    )
-
-    read_tool = StructuredTool.from_function(
-        func=_read_skill,
-        name="read_skill",
-        description=(
-            "Read the full content of a skill by its name. "
-            "Use list_skills first to find the exact skill name."
-        ),
-    )
-
-    return [list_tool, read_tool]
+    return [list_skills, read_skill]
 
 
 # ---------------------------------------------------------------------------

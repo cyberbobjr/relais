@@ -6,9 +6,13 @@ native streaming (token-by-token) and multi-provider models.
 
 from __future__ import annotations
 
-from typing import Callable, Awaitable
+import os
+from pathlib import Path
+from typing import Any, Callable, Awaitable
 
+from deepagents.backends import LocalShellBackend
 from langchain_core.tools import BaseTool
+from langchain.chat_models import BaseChatModel, init_chat_model
 
 from deepagents import create_deep_agent
 from atelier.profile_loader import ProfileConfig
@@ -29,6 +33,42 @@ _TRANSIENT_ERROR_NAMES: frozenset[str] = frozenset(
         "ServiceUnavailableError",
     }
 )
+
+
+def _resolve_profile_model(
+    profile: ProfileConfig,
+) -> BaseChatModel | str:
+    """Build the model argument for create_deep_agent from a ProfileConfig.
+
+    When both base_url and api_key_env are None, returns the model string
+    directly so create_deep_agent can resolve the provider internally.
+    When either is set, constructs a BaseChatModel via init_chat_model(),
+    passing only the kwargs that are present.
+
+    Args:
+        profile: The resolved ProfileConfig for the current envelope.
+
+    Returns:
+        Either the model identifier string, or a pre-built BaseChatModel
+        instance with the configured endpoint and credentials.
+
+    Raises:
+        KeyError: api_key_env is set but the environment variable is absent.
+    """
+    if profile.base_url is None and profile.api_key_env is None:
+        return profile.model
+    kwargs: dict[str, Any] = {}
+    if profile.base_url is not None:
+        kwargs["base_url"] = profile.base_url
+    if profile.api_key_env is not None:
+        api_key = os.environ.get(profile.api_key_env)
+        if api_key is None:
+            raise KeyError(
+                f"Environment variable '{profile.api_key_env}' (required by profile "
+                f"'{profile.model}') is not set."
+            )
+        kwargs["api_key"] = api_key
+    return init_chat_model(profile.model, **kwargs)
 
 
 def _is_transient_provider_error(exc: BaseException) -> bool:
@@ -86,9 +126,10 @@ class AgentExecutor:
     ) -> None:
         self._profile = profile
         self._agent = create_deep_agent(
-            model=profile.model,
+            model=_resolve_profile_model(profile),
             tools=tools,
             system_prompt=soul_prompt,
+            backend=LocalShellBackend(root_dir=str(Path(__file__).parent.parent.resolve()), virtual_mode=False, inherit_env=False)
         )
 
     async def execute(

@@ -31,6 +31,8 @@ from aiguilleur.core.native import NativeAiguilleur
 
 logger = logging.getLogger("aiguilleur.discord")
 
+_TYPING_MAX_SECONDS: float = 120.0
+
 
 class DiscordAiguilleur(NativeAiguilleur):
     """Discord channel adapter.
@@ -110,6 +112,58 @@ class _RelaisDiscordClient(discord.Client):
             if channel_config is not None and channel_config.profile is not None
             else get_default_llm_profile()
         )
+        # Active typing indicator tasks keyed by correlation_id
+        self._typing_tasks: dict[str, asyncio.Task] = {}
+
+    async def _typing_loop(
+        self, channel: discord.abc.Messageable, correlation_id: str
+    ) -> None:
+        """Maintain a typing indicator until cancelled or the timeout expires.
+
+        Uses ``channel.typing()`` — discord.py's built-in context manager —
+        which sends ``trigger_typing`` every 5 seconds automatically. The task
+        sleeps inside the context for up to ``_TYPING_MAX_SECONDS`` as a safety
+        net against pipeline failures that would never deliver a reply.
+        Cancelling the task (via ``_cancel_typing``) raises ``CancelledError``
+        in ``asyncio.sleep``, which exits the context manager cleanly.
+
+        Args:
+            channel: The Discord channel or DM to show the indicator in.
+            correlation_id: Key used to register this task in ``_typing_tasks``.
+        """
+        try:
+            async with channel.typing():
+                await asyncio.sleep(_TYPING_MAX_SECONDS)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("typing indicator error (ignored): %s", exc)
+        finally:
+            self._typing_tasks.pop(correlation_id, None)
+
+    def _cancel_typing(self, correlation_id: str) -> None:
+        """Cancel the typing indicator task for the given correlation ID.
+
+        Safe to call even if no task is registered for that ID.
+
+        Args:
+            correlation_id: The correlation ID whose typing task to cancel.
+        """
+        task = self._typing_tasks.pop(correlation_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def close(self) -> None:
+        """Shut down the client and cancel any pending typing indicator tasks.
+
+        Cancels all active typing tasks before delegating to the parent
+        ``discord.Client.close()`` to avoid "task was destroyed but pending"
+        warnings on shutdown.
+        """
+        for task in list(self._typing_tasks.values()):
+            task.cancel()
+        self._typing_tasks.clear()
+        await super().close()
 
     async def setup_hook(self) -> None:
         """Initialise the Redis connection and launch background tasks.
@@ -176,11 +230,17 @@ class _RelaisDiscordClient(discord.Client):
             },
         )
 
+        typing_task = self.loop.create_task(
+            self._typing_loop(message.channel, envelope.correlation_id)
+        )
+        self._typing_tasks[envelope.correlation_id] = typing_task
+
         try:
             await self._redis_conn.xadd(self.stream_in, {"payload": envelope.to_json()})
             logger.info("Queued message from %s", message.author.name)
         except Exception as exc:
             logger.error("Failed to queue message: %s", exc)
+            self._cancel_typing(envelope.correlation_id)
 
     # ------------------------------------------------------------------
     # Outgoing stream helpers
@@ -265,6 +325,7 @@ class _RelaisDiscordClient(discord.Client):
             preview,
         )
 
+        self._cancel_typing(envelope.correlation_id)
         await channel.send(envelope.content)
 
     async def _consume_outgoing_stream(self) -> None:
