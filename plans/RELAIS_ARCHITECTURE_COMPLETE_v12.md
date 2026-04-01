@@ -269,7 +269,7 @@ mcp_servers:
 
 > **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
 >
-> **Timeout et nombre max d'outils** — configurés par profil dans `profiles.yaml` (`mcp_timeout`, `mcp_max_tools`), pas dans ce fichier.
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `users.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s) et `mcp_max_tools` (défaut 20) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `profiles.yaml`.
 
 ---
 
@@ -486,81 +486,6 @@ Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserReg
 - `deny` (défaut) : drop silencieux
 - `guest` : stamp identité guest synthétique, rôle `guest` (accès restreint)
 - `pending` : publie l'enveloppe sur `relais:admin:pending_users` pour validation manuelle, puis drop
-
-### config/reply_policy.yaml
-
-```yaml
-global:
-  default_mode: manual
-  default_language: fr
-  active_hours:
-    start: "08:00"
-    end: "22:00"
-    timezone: "Europe/Paris"
-  out_of_hours:
-    mode: auto_immediate
-    prompt: prompts/out_of_hours.md
-
-channels:
-  whatsapp:
-    default_mode: auto_deferred
-    debounce_delay: 120
-    default_prompt: prompts/whatsapp_default.md
-    notify_on_debounce: true
-  telegram:
-    default_mode: auto_immediate
-    default_prompt: prompts/telegram_default.md
-  signal:
-    default_mode: manual
-  discord:
-    default_mode: auto_immediate
-    default_prompt: prompts/discord_default.md
-    condition: mention_only
-
-senders:
-  - id: "+33612345678"
-    name: "Marie"
-    mode: auto_deferred
-    debounce_delay: 120
-    prompt: prompts/marie.md
-    active_hours: { start: "07:00", end: "23:00" }
-    allowed_channels: [whatsapp, telegram]
-
-  - id: "+33698765432"
-    name: "Famille"
-    mode: auto_immediate
-    prompt: prompts/family.md
-
-  - id: "client_acme@slack"
-    name: "ACME Corp"
-    mode: auto_deferred
-    debounce_delay: 300
-    prompt: prompts/professional_client.md
-    escalation: { delay: 600, action: notify_urgent }
-
-  - id: "bot_*"
-    mode: ignore
-
-  - id: unknown
-    mode: manual
-    welcome_message: >
-      Bonjour ! Je suis l'assistant de Benjamin.
-      Il vous répondra dès que possible.
-
-overrides:
-  - name: "Summer vacation"
-    active: false
-    start: "2026-07-15"
-    end: "2026-08-15"
-    global_mode: auto_immediate
-    prompt: prompts/vacation.md
-
-  - name: "Meeting mode"
-    active: false
-    duration_minutes: 60
-    global_mode: auto_immediate
-    prompt: prompts/in_meeting.md
-```
 
 ---
 
@@ -1324,7 +1249,6 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── config.yaml.default
 │   ├── profiles.yaml.default
 │   ├── users.yaml.default
-│   ├── reply_policy.yaml.default
 │   ├── mcp_servers.yaml.default
 │   ├── redis.conf
 │   └── HEARTBEAT.md.default

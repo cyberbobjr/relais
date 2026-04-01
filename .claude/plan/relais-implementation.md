@@ -21,7 +21,7 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 | `atelier/main.py` | ✅ | AgentExecutor, XACK conditionnel, streaming |
 | `atelier/agent_executor.py` | ✅ | Wrapper DeepAgents, streaming buffer 80 chars |
 | `atelier/mcp_adapter.py` | ✅ | make_mcp_tools() — wrappers LangChain sur McpSessionManager |
-| `atelier/tools.py` | ✅ | make_skills_tools() — list_skills + read_skill |
+| `atelier/tool_policy.py` | ✅ | ToolPolicy — resolve_skills(), filter_mcp_tools() par rôle |
 | `atelier/mcp_session_manager.py` | ✅ | Cycle de vie MCP isolé |
 | `souvenir/main.py` | ✅ | append/get, Redis List, TTL 24h |
 | `archiviste/main.py` | ✅ | JSONL, consumer group multi-streams |
@@ -80,16 +80,20 @@ async def make_mcp_tools(session_manager: Any) -> list[BaseTool]
 - Si `list_tools()` lève pour un serveur → warning + skip, autres serveurs traités
 - `_McpTool(BaseTool)` : `_arun(**kwargs)` délègue à `session_manager.call_tool(prefixed_name, kwargs)` ; exceptions retournées comme string (loop vivante)
 
-### Contrat `make_skills_tools`
+### Contrat `ToolPolicy`
 
 ```python
-def make_skills_tools(skills_dir: Path) -> list[BaseTool]
+class ToolPolicy:
+    def __init__(self, base_dir: Path) -> None
+    def resolve_skills(self, metadata_value: object) -> list[str]
+    def parse_mcp_patterns(self, metadata_value: object) -> tuple[str, ...]
+    def filter_mcp_tools(self, tools: list, metadata_value: object) -> list
 ```
 
-- Retourne `[list_skills, read_skill]` (décorateur `@tool(parse_docstring=True)`)
-- Scan récursif `skills_dir.rglob("SKILL.md")`
-- Guard path traversal dans `read_skill` (interdit `/`, `\`, `..`)
-- Fonctionne même si `skills_dir` n'existe pas (retourne message vide/erreur)
+- `resolve_skills` : retourne des chemins absolus vers les répertoires de skills autorisés pour le rôle (depuis `envelope.metadata["skills_dirs"]`)
+- `parse_mcp_patterns` : parse les patterns d'outils MCP autorisés (depuis `envelope.metadata["allowed_mcp_tools"]`)
+- `filter_mcp_tools` : filtre la liste de `BaseTool` MCP selon les patterns du rôle
+- Les dirs résolus sont passés comme `skills=` à `create_deep_agent()` — pas de `list_skills`/`read_skill` LangChain
 
 ### Format modèle
 
@@ -536,7 +540,7 @@ prometheus-client = ">=0.20"
 
 | Fichier | État | Changements |
 |---------|------|-------------|
-| `CLAUDE.md` | ✅ MIS À JOUR | Section Atelier : `AgentExecutor`/`DeepAgents`, `make_skills_tools()`, `McpSessionManager` ; dépendances `deepagents` |
+| `CLAUDE.md` | ✅ MIS À JOUR | Section Atelier : `AgentExecutor`/`DeepAgents`, `ToolPolicy` (remplace `make_skills_tools()`), `McpSessionManager` ; dépendances `deepagents` |
 | `docs/ARCHITECTURE.md` | ✅ MIS À JOUR | Section Atelier : `AgentExecutor` remplace `SDKExecutor`, diagramme DeepAgents, suppression mentions LiteLLM proxy |
 | `plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md` | ✅ MIS À JOUR | Exigences fonctionnelles alignées ; détails impl Anthropic SDK et LiteLLM supprimés |
 
