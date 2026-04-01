@@ -26,6 +26,7 @@ from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
 from souvenir.context_store import ContextStore
+from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
 from souvenir.memory_extractor import MemoryExtractor
 
@@ -71,45 +72,10 @@ class Souvenir:
             extraction_model = _FALLBACK_EXTRACTION_MODEL
         self._extractor = MemoryExtractor(model=extraction_model)
         self._channels: list[str] = _DEFAULT_CHANNELS
+        self._action_registry = build_registry()
 
     # ------------------------------------------------------------------
     # Public handler methods (testable without a running Redis)
-    # ------------------------------------------------------------------
-
-    async def _handle_get_request(
-        self,
-        redis_conn: Any,
-        context_store: ContextStore,
-        long_term_store: LongTermStore,
-        session_id: str,
-        correlation_id: str,
-    ) -> None:
-        """Répond à une requête ``get`` en retournant l'historique de session.
-
-        Essaie d'abord le cache Redis (``context_store.get_recent``). Si vide,
-        utilise le fallback SQLite (``long_term_store.get_recent_messages``).
-        Publie la réponse sur ``relais:memory:response``.
-
-        Args:
-            redis_conn: Connexion Redis async.
-            context_store: Store court terme Redis.
-            long_term_store: Store long terme SQLite.
-            session_id: Identifiant de la session à récupérer.
-            correlation_id: ID de corrélation à inclure dans la réponse.
-        """
-        messages = await context_store.get_recent(session_id, limit=20)
-        if not messages:
-            messages = await long_term_store.get_recent_messages(session_id, limit=20)
-            if messages:
-                logger.debug("Redis cache miss for session %s — using SQLite", session_id)
-
-        payload = {
-            "correlation_id": correlation_id,
-            "messages": messages,
-        }
-        await redis_conn.xadd(self.stream_res, {"payload": json.dumps(payload)})
-        logger.info("Provided context for session %s (%d msgs)", session_id, len(messages))
-
     async def _handle_outgoing(
         self,
         envelope: Envelope,
@@ -206,55 +172,16 @@ class Souvenir:
                                 _payload = _payload.decode()
                             req = json.loads(_payload)
                             action = req.get("action")
-                            session_id = req.get("session_id", "")
-                            correlation_id = req.get("correlation_id")
-
-                            if action == "get":
-                                await self._handle_get_request(
-                                    redis_conn=redis_conn,
-                                    context_store=context_store,
-                                    long_term_store=self._long_term,
-                                    session_id=session_id,
-                                    correlation_id=correlation_id,
-                                )
-
-                            elif action == "clear":
-                                await context_store.clear(session_id)
-                                await self._long_term.clear_session(session_id)
-                                logger.info(
-                                    "Cleared context for session=%s (Redis + SQLite)",
-                                    session_id,
-                                )
-                                envelope_json = req.get("envelope_json")
-                                if envelope_json:
-                                    try:
-                                        orig = Envelope.from_json(envelope_json)
-                                        confirmation = Envelope.from_parent(
-                                            orig,
-                                            "✓ Historique de conversation effacé.",
-                                        )
-                                        await redis_conn.xadd(
-                                            f"relais:messages:outgoing:{orig.channel}",
-                                            {"payload": confirmation.to_json()},
-                                        )
-                                    except Exception as _conf_exc:
-                                        logger.warning(
-                                            "Could not send /clear confirmation: %s",
-                                            _conf_exc,
-                                        )
-
-                            elif action == "store_memory":
-                                user_id = req.get("user_id", session_id)
-                                key = req.get("key", "")
-                                value = req.get("value", "")
-                                source = req.get("source", "manual")
-                                await self._long_term.store(user_id, key, value, source)
-                                logger.info(
-                                    "Stored long-term memory for user=%s key=%s",
-                                    user_id,
-                                    key,
-                                )
-
+                            ctx = HandlerContext(
+                                redis_conn=redis_conn,
+                                context_store=context_store,
+                                long_term_store=self._long_term,
+                                req=req,
+                                stream_res=self.stream_res,
+                            )
+                            handler = self._action_registry.get(action)
+                            if handler:
+                                await handler.handle(ctx)
                             else:
                                 logger.warning("Unknown memory action: %s", action)
 

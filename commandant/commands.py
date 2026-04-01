@@ -58,7 +58,8 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
     """Efface l'historique de session : Redis context + SQLite messages.
 
     Envoie action="clear" sur relais:memory:request pour que Souvenir
-    effectue le nettoyage (context_store.clear + long_term_store.clear_session).
+    effectue le nettoyage (context_store.clear + long_term_store.clear_session)
+    et publie la confirmation de retour vers le canal.
 
     Args:
         envelope: L'enveloppe du message /clear reçu.
@@ -76,15 +77,6 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
         {"payload": json.dumps(clear_request)},
     )
     logger.info("Clear request sent for session=%s", envelope.session_id)
-
-    response = Envelope.from_parent(
-        envelope,
-        "✓ Historique effacé — nouvelle session démarrée.",
-    )
-    await redis_conn.xadd(
-        f"relais:messages:outgoing:{envelope.channel}",
-        {"payload": response.to_json()},
-    )
 
 
 async def handle_dnd(envelope: Envelope, redis_conn: Any) -> None:

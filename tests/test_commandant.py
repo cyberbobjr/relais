@@ -223,14 +223,14 @@ async def test_handle_clear_publishes_to_memory_request(mock_redis, sample_envel
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_handle_clear_publishes_confirmation(mock_redis, sample_envelope):
-    """handle_clear publie un message de confirmation sur relais:messages:outgoing:discord."""
+async def test_handle_clear_does_not_publish_confirmation(mock_redis, sample_envelope):
+    """handle_clear ne publie PAS de confirmation : c'est Souvenir qui confirme après le vrai nettoyage."""
     from commandant.commands import handle_clear
     await handle_clear(sample_envelope, mock_redis)
 
     expected_stream = f"relais:messages:outgoing:{sample_envelope.channel}"
     calls = [str(c) for c in mock_redis.xadd.call_args_list]
-    assert any(expected_stream in c for c in calls)
+    assert not any(expected_stream in c for c in calls)
 
 
 @pytest.mark.asyncio
@@ -403,7 +403,7 @@ async def test_commandant_acks_non_command_messages(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_commandant_acks_command_messages(mock_redis):
-    """Messages-commandes → ACK + xadd confirmation + xadd memory:request."""
+    """Messages-commandes → ACK + xadd memory:request (confirmation déléguée à Souvenir)."""
     from commandant.main import Commandant
 
     mock_redis.xreadgroup = AsyncMock(return_value=[
@@ -428,4 +428,4 @@ async def test_commandant_acks_command_messages(mock_redis):
     mock_redis.xack.assert_called_once()
     all_xadd_streams = [str(c) for c in mock_redis.xadd.call_args_list]
     assert any("relais:memory:request" in s for s in all_xadd_streams)
-    assert any("relais:messages:outgoing:discord" in s for s in all_xadd_streams)
+    assert not any("relais:messages:outgoing:discord" in s for s in all_xadd_streams)
