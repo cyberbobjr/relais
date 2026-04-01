@@ -9,7 +9,6 @@ DEFAULT_FILES = [
     ("config/config.yaml",          "config/config.yaml.default"),
     ("config/profiles.yaml",        "config/profiles.yaml.default"),
     ("config/users.yaml",           "config/users.yaml.default"),
-    ("config/reply_policy.yaml",    "config/reply_policy.yaml.default"),
     ("config/mcp_servers.yaml",     "config/mcp_servers.yaml.default"),
     ("config/HEARTBEAT.md",         "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
@@ -49,7 +48,7 @@ def initialize_user_dir(system_install_path: Path | None = None):
         "prompts/roles",
         "prompts/users",
         "skills/manual", "skills/auto",
-        "media", "logs", "backup",
+        "media", "logs", "backup", "storage",
     ]
     for d in dirs:
         (home / d).mkdir(parents=True, exist_ok=True)

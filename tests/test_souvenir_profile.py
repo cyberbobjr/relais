@@ -40,6 +40,8 @@ def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> ProfileConfig:
         temperature=0.1,
         max_tokens=512,
         resilience=ResilienceConfig(retry_attempts=2, retry_delays=[1, 3]),
+        base_url=None,
+        api_key_env=None,
     )
 
 

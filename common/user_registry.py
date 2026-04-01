@@ -163,8 +163,9 @@ class UserRegistry:
             raw = self._config_path.read_text(encoding="utf-8")
             data: dict[str, Any] = yaml.safe_load(raw) or {}
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "UserRegistry: failed to parse %s — %s — falling back to permissive mode",
+            logger.critical(
+                "UserRegistry: failed to parse %s — %s — falling back to permissive mode "
+                "(all users will appear unknown — review config immediately)",
                 self._config_path,
                 exc,
             )
@@ -174,10 +175,20 @@ class UserRegistry:
         new_by_identifier: dict[tuple[str, str, str], UserRecord] = {}
 
         for _key, user in (data.get("users") or {}).items():
+            raw_custom_path = user.get("custom_prompt_path") or None
+            if raw_custom_path is not None:
+                p = Path(raw_custom_path)
+                if p.is_absolute() or any(part == ".." for part in p.parts):
+                    logger.warning(
+                        "UserRegistry: custom_prompt_path %r rejected for user — "
+                        "absolute path or directory traversal detected",
+                        raw_custom_path,
+                    )
+                    raw_custom_path = None
             record = UserRecord(
                 display_name=str(user.get("display_name") or ""),
                 role=str(user.get("role") or ""),
-                custom_prompt_path=user.get("custom_prompt_path") or None,
+                custom_prompt_path=raw_custom_path,
                 blocked=bool(user.get("blocked", False)),
             )
 

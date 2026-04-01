@@ -17,6 +17,7 @@ import pytest
 
 from common.envelope import Envelope
 from common.user_registry import UserRegistry
+from common.role_registry import RoleRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,9 @@ async def test_portail_xadd_includes_correlation_id(tmp_path: Path) -> None:
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
+    portail._role_registry = RoleRegistry()
+    portail._unknown_user_policy = "guest"
+    portail._guest_profile = "fast"
 
     envelope = _make_envelope()
     conn = _make_redis_conn()
@@ -128,6 +132,9 @@ async def test_portail_xadd_includes_sender_id(tmp_path: Path) -> None:
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
+    portail._role_registry = RoleRegistry()
+    portail._unknown_user_policy = "guest"
+    portail._guest_profile = "fast"
 
     envelope = _make_envelope(sender_id="discord:987654321")
     conn = _make_redis_conn()

@@ -46,8 +46,12 @@ _USERS_YAML = dedent("""\
     roles:
       admin:
         actions: ["send", "admin", "config"]
+        skills_dirs: ["*"]
+        allowed_mcp_tools: ["*"]
       user:
         actions: ["send"]
+        skills_dirs: []
+        allowed_mcp_tools: []
 """)
 
 
@@ -265,8 +269,8 @@ def _make_users_yaml(extra_users: dict[str, dict[str, Any]] | None = None) -> st
         "groups": [],
         "users": users,
         "roles": {
-            "user": {"actions": ["send"]},
-            "admin": {"actions": ["send", "admin"]},
+            "user": {"actions": ["send"], "skills_dirs": [], "allowed_mcp_tools": []},
+            "admin": {"actions": ["send", "admin"], "skills_dirs": ["*"], "allowed_mcp_tools": ["*"]},
         },
     }
     return yaml.dump(data)
@@ -467,7 +471,7 @@ class TestSentinelleOutgoingPassthrough:
         redis_conn = AsyncMock()
         redis_conn.xgroup_create = AsyncMock(return_value="OK")
         redis_conn.xreadgroup = AsyncMock(side_effect=[
-            [("relais:messages:outgoing_pending:discord", [(b"1-0", {"payload": payload})])],
+            [("relais:messages:outgoing_pending", [(b"1-0", {"payload": payload})])],
             [],  # second call returns empty → loop exits via shutdown
         ])
         redis_conn.xadd = AsyncMock(return_value=b"2-0")
@@ -482,7 +486,7 @@ class TestSentinelleOutgoingPassthrough:
         # Stop after processing the first batch
         shutdown.is_stopping.side_effect = [False, False, True]
 
-        await sentinel._process_outgoing_stream(redis_conn, "discord", shutdown=shutdown)
+        await sentinel._process_outgoing_stream(redis_conn, shutdown=shutdown)
 
         # Envelope must have been forwarded to relais:messages:outgoing:discord
         outgoing_calls = [
@@ -505,7 +509,7 @@ class TestSentinelleOutgoingPassthrough:
         redis_conn = AsyncMock()
         redis_conn.xgroup_create = AsyncMock(return_value="OK")
         redis_conn.xreadgroup = AsyncMock(side_effect=[
-            [("relais:messages:outgoing_pending:discord", [(b"1-0", {"payload": payload})])],
+            [("relais:messages:outgoing_pending", [(b"1-0", {"payload": payload})])],
             [],
         ])
         redis_conn.xadd = AsyncMock(return_value=b"2-0")
@@ -519,7 +523,7 @@ class TestSentinelleOutgoingPassthrough:
         shutdown = MagicMock(spec=GracefulShutdown)
         shutdown.is_stopping.side_effect = [False, False, True]
 
-        await sentinel._process_outgoing_stream(redis_conn, "discord", shutdown=shutdown)
+        await sentinel._process_outgoing_stream(redis_conn, shutdown=shutdown)
 
         outgoing_calls = [
             c for c in redis_conn.xadd.await_args_list
@@ -544,7 +548,7 @@ class TestSentinelleOutgoingPassthrough:
         redis_conn = AsyncMock()
         redis_conn.xgroup_create = AsyncMock(return_value="OK")
         redis_conn.xreadgroup = AsyncMock(side_effect=[
-            [("relais:messages:outgoing_pending:discord", [(b"1-0", {"payload": payload})])],
+            [("relais:messages:outgoing_pending", [(b"1-0", {"payload": payload})])],
             [],
         ])
         redis_conn.xadd = AsyncMock(return_value=b"2-0")
@@ -558,10 +562,11 @@ class TestSentinelleOutgoingPassthrough:
         shutdown = MagicMock(spec=GracefulShutdown)
         shutdown.is_stopping.side_effect = [False, False, True]
 
-        await sentinel._process_outgoing_stream(redis_conn, "discord", shutdown=shutdown)
+        await sentinel._process_outgoing_stream(redis_conn, shutdown=shutdown)
 
         redis_conn.xack.assert_awaited_once_with(
-            "relais:messages:outgoing_pending:discord",
+            "relais:messages:outgoing_pending",
             "sentinelle_outgoing_group",
             b"1-0",
         )
+

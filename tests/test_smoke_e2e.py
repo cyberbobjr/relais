@@ -83,6 +83,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
 
     # ── STEP 1: Portail ───────────────────────────────────────────────────────
     portail = Portail()
+    portail._unknown_user_policy = "guest"  # sender discord:111222333 not in users.yaml
     await portail._process_stream(redis_conn, shutdown=_one_shot())
 
     security_msgs = await redis_conn.xrange("relais:security", "-", "+")
@@ -102,8 +103,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     mock_profile.model = "test-model"
     mock_profile.max_turns = 20
     mock_profile.name = "default"
-    mock_profile.allowed_tools = None
-    mock_profile.guardrails = ()
+
 
     with (
         patch("atelier.main.load_profiles", return_value={"default": mock_profile}),

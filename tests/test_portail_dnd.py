@@ -58,6 +58,9 @@ async def test_portail_forwards_when_dnd_inactive(mock_redis_no_dnd):
     mock_redis_no_dnd.xreadgroup = AsyncMock(return_value=_make_message("bonjour"))
 
     portail = Portail()
+    # Use guest policy so unknown sender (discord:123) is still forwarded —
+    # this test focuses on DND behaviour, not on unknown-user policy.
+    portail._unknown_user_policy = "guest"
     shutdown = MagicMock()
     shutdown.is_stopping.side_effect = [False, True]
 
@@ -163,6 +166,9 @@ async def test_portail_forwards_non_command_message(mock_redis_no_dnd):
     mock_redis_no_dnd.xreadgroup = AsyncMock(return_value=_make_message("bonjour le monde"))
 
     portail = Portail()
+    # Use guest policy so unknown sender (discord:123) is still forwarded —
+    # this test focuses on command detection, not on unknown-user policy.
+    portail._unknown_user_policy = "guest"
     shutdown = MagicMock()
     shutdown.is_stopping.side_effect = [False, True]
 

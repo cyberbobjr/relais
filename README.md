@@ -382,10 +382,6 @@ profiles:
     max_turns: 10
     mcp_timeout: 10             # Timeout (s) par appel outil MCP
     mcp_max_tools: 20           # Max outils MCP exposés au modèle (0 = aucun)
-    allowed_tools: null         # null = tous les outils autorisés
-    allowed_mcp: null           # null = tous les serveurs MCP autorisés
-    guardrails: []
-    memory_scope: own           # "own" = mémoire par utilisateur | "global" = partagée
 ```
 
 **Exemples de configuration par provider :**
@@ -436,9 +432,11 @@ groups: []                      # Groupes WhatsApp / Telegram — autorisation p
 users:
   usr_mon_utilisateur:
     display_name: "Prénom Nom"
-    role: user                            # "admin" | "user"
+    role: user                            # "admin" | "user" | "guest"
     blocked: false
-    llm_profile: default
+    custom_prompt_path: null             # Chemin relatif (depuis prompts/) vers un overlay personnel.
+                                         # Ex : "users/discord_123456789.md"
+                                         # Priorité maximale — écrase le prompt de rôle.
     identifiers:
       discord:
         dm: "123456789012345678"          # ID Discord (entier, pas le username)
@@ -450,17 +448,31 @@ users:
 roles:
   admin:
     actions: ["send", "command", "admin"]
+    skills_dirs: ["*"]
+    allowed_mcp_tools: ["*"]
+    prompt_path: null                    # Overlay de rôle — chargé pour tous les utilisateurs "admin"
+                                         # si aucun custom_prompt_path personnel n'est défini.
+                                         # Ex : "roles/admin.md"
   user:
     actions: ["send"]
+    skills_dirs: []
+    allowed_mcp_tools: []
+    prompt_path: null
+  guest:
+    actions: []
+    skills_dirs: []
+    allowed_mcp_tools: []
+    prompt_path: null                    # Utilisé quand unknown_user_policy=guest
 ```
 
 **Modes ACL :**
 - `allowlist` : seuls les utilisateurs/groupes déclarés sont admis. Politique pour les inconnus : `deny` (rejet), `guest` (profil limité) ou `pending` (notif admin).
 - `blocklist` : tous admis sauf les utilisateurs/groupes marqués `blocked: true`.
 
-**Rôles :**
-- `admin` : toutes les actions (`send`, `command`, `admin`)
-- `user` : `send` uniquement
+**Rôles :** entièrement libres — créez autant de rôles que nécessaire dans la section `roles:`. Chaque rôle définit ses `actions`, `skills_dirs`, `allowed_mcp_tools` et `prompt_path`. Le rôle `guest` est conventionnel : il est attribué aux inconnus quand `unknown_user_policy: guest`.
+
+**Priorité des prompts :**
+`custom_prompt_path` (niveau utilisateur) > `prompt_path` (niveau rôle) > absent
 
 > `usr_system` est un compte interne utilisé par les briques — ne pas supprimer.
 
@@ -609,12 +621,12 @@ L'Atelier assemble le system prompt à partir de **5 couches optionnelles** lues
 | Couche | Répertoire | Convention de nom | Déclencheur |
 |--------|-----------|-------------------|-------------|
 | 1 — Personnalité | `prompts/soul/` | `SOUL.md` (fixe) | Toujours chargé (warning si absent) |
-| 2 — Rôle | `prompts/roles/` | `{role}.md` | Quand l'utilisateur a un `role` dans `users.yaml` |
-| 3 — Utilisateur | `prompts/users/` | `{channel}_{id}.md` | Quand `sender_id` est défini (`:` → `_`) |
+| 2 — Rôle | _(libre)_ | _(libre)_ | Quand `roles.{role}.prompt_path` est défini dans `users.yaml` |
+| 3 — Utilisateur | _(libre)_ | _(libre)_ | Quand `users.{user}.custom_prompt_path` est défini dans `users.yaml` |
 | 4 — Canal | `prompts/channels/` | `{channel}_default.md` | Quand un canal est actif |
 | 5 — Politique | `prompts/policies/` | `{policy}.md` | Quand `reply_policy` est actif |
 
-Les couches présentes sont concaténées dans l'ordre avec `---` comme séparateur. Une **6e couche** (faits mémoire long-terme sur l'utilisateur) est ajoutée dynamiquement par le Souvenir — elle ne correspond à aucun fichier sur disque.
+Les chemins des couches 2 et 3 sont des chemins relatifs configurés explicitement dans `users.yaml` — aucune convention de nom magique. Les couches présentes sont concaténées dans l'ordre avec `---` comme séparateur. Une **6e couche** (faits mémoire long-terme sur l'utilisateur) est ajoutée dynamiquement par le Souvenir — elle ne correspond à aucun fichier sur disque.
 
 **Exemples de fichiers à créer :**
 
@@ -622,11 +634,11 @@ Les couches présentes sont concaténées dans l'ordre avec `---` comme séparat
 # Personnalité — toujours active
 ~/.relais/prompts/soul/SOUL.md
 
-# Overlay pour le rôle "admin" (users.yaml : role: admin)
+# Overlay pour le rôle "admin" — déclaré dans users.yaml : roles.admin.prompt_path: "roles/admin.md"
 ~/.relais/prompts/roles/admin.md
 
-# Override spécifique à un utilisateur Discord (sender_id "discord:123456789")
-~/.relais/prompts/users/discord_123456789.md
+# Override personnel — déclaré dans users.yaml : users.usr_xxx.custom_prompt_path: "users/alice.md"
+~/.relais/prompts/users/alice.md
 
 # Formatage Telegram (canal "telegram")
 ~/.relais/prompts/channels/telegram_default.md

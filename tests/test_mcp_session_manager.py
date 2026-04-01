@@ -20,6 +20,8 @@ def _make_profile(mcp_timeout: int = 10, mcp_max_tools: int = 20) -> ProfileConf
         temperature=0.7,
         max_tokens=1024,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url=None,
+        api_key_env=None,
         mcp_timeout=mcp_timeout,
         mcp_max_tools=mcp_max_tools,
     )

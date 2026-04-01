@@ -43,6 +43,8 @@ class APIConnectionError(Exception):
 def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> MagicMock:
     profile = MagicMock()
     profile.model = model
+    profile.base_url = None
+    profile.api_key_env = None
     return profile
 
 
@@ -406,3 +408,63 @@ def test_agent_execution_error_defaults_response_body_to_none() -> None:
 
     err = AgentExecutionError("failed")
     assert err.response_body is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — AgentExecutor skills= parameter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_executor_accepts_skills_parameter() -> None:
+    """AgentExecutor must accept a skills= list without raising."""
+    from atelier.agent_executor import AgentExecutor
+
+    mock_agent = MagicMock()
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="You are helpful.",
+            tools=[],
+            skills=["/some/path/to/skills"],
+        )
+    assert executor is not None
+
+
+@pytest.mark.unit
+def test_executor_passes_skills_to_create_deep_agent() -> None:
+    """AgentExecutor must pass the skills list to create_deep_agent."""
+    from atelier.agent_executor import AgentExecutor
+
+    mock_agent = MagicMock()
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
+        AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+            skills=["/path/coding", "/path/research"],
+        )
+
+    mock_create.assert_called_once()
+    call_kwargs = mock_create.call_args.kwargs
+    assert call_kwargs.get("skills") == ["/path/coding", "/path/research"]
+
+
+@pytest.mark.unit
+def test_executor_defaults_skills_to_empty_list() -> None:
+    """AgentExecutor without skills= must pass skills=[] to create_deep_agent."""
+    from atelier.agent_executor import AgentExecutor
+
+    mock_agent = MagicMock()
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
+        AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+        )
+
+    call_kwargs = mock_create.call_args.kwargs
+    assert call_kwargs.get("skills", "NOT_SET") == []

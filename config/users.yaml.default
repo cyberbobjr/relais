@@ -69,8 +69,35 @@ users:
     notes: "Exemple — remplacer ou supprimer"
 
 # ── Rôles ─────────────────────────────────────────────────────────────────────
+# skills_dirs  : répertoires de skills accessibles (relatifs à paths.skills)
+#                null ou []    → aucun skill
+#                ["*"]         → tous les répertoires (accès illimité)
+#                ["dir1", …]   → liste d'autorisations explicites
+#
+# allowed_mcp_tools : outils MCP autorisés
+#                null ou []    → aucun outil MCP
+#                ["*"]         → tous les outils (accès illimité)
+#                ["server__tool", "server__*", …] → liste ou glob
+#
 roles:
   admin:
     actions: ["send", "command", "admin"]
+    skills_dirs: ["*"]
+    allowed_mcp_tools: ["*"]
+    # prompt_path : chemin relatif (depuis prompts/) vers un overlay de prompt
+    # pour tous les utilisateurs de ce rôle (fallback si pas de custom_prompt_path
+    # sur l'utilisateur). null = pas d'overlay de rôle.
+    # Exemple : "roles/admin.md"
+    prompt_path: null
   user:
     actions: ["send"]
+    skills_dirs: []
+    allowed_mcp_tools: []
+    prompt_path: null
+  guest:
+    # Rôle attribué aux utilisateurs inconnus si unknown_user_policy=guest
+    actions: []
+    skills_dirs: []
+    allowed_mcp_tools: []
+    # prompt_path peut être utilisé pour personnaliser l'accueil des inconnus
+    prompt_path: null

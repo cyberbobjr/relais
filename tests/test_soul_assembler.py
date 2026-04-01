@@ -69,7 +69,7 @@ def test_soul_only(tmp_path: Path) -> None:
 def test_all_layers_assembled_in_order(tmp_path: Path) -> None:
     """All layer files present — result contains all layers in order with separators.
 
-    Layer order: soul → role → user → channel → policy → facts.
+    Layer order: soul → role → user → channel.
 
     Args:
         tmp_path: pytest temporary directory.
@@ -79,20 +79,16 @@ def test_all_layers_assembled_in_order(tmp_path: Path) -> None:
     _write(prompts / "roles" / "admin.md", "ROLE")
     _write(prompts / "users" / "discord_123.md", "USER")
     _write(prompts / "channels" / "telegram_default.md", "CHANNEL")
-    _write(prompts / "policies" / "in_meeting.md", "POLICY")
 
     result = assemble_system_prompt(
         prompts,
         channel="telegram",
-        sender_id="discord:123",
+        user_prompt_path=prompts / "users" / "discord_123.md",
         user_role="admin",
-        reply_policy="in_meeting",
-        user_facts=["fact A", "fact B"],
     )
 
     sep = "\n\n---\n\n"
-    facts_block = "## Mémoire utilisateur\n- fact A\n- fact B"
-    expected = sep.join(["SOUL", "ROLE", "USER", "CHANNEL", "POLICY", facts_block])
+    expected = sep.join(["SOUL", "ROLE", "USER", "CHANNEL"])
     assert result == expected
 
 
@@ -140,75 +136,34 @@ def test_missing_layer_skipped_silently(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 – user facts injected as last layer
+# Test 5 – user_prompt_path loads the explicit file
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_user_facts_injected_last(tmp_path: Path) -> None:
-    """User facts present — injected as final layer with correct header.
+def test_user_prompt_path_loads_explicit_file(tmp_path: Path) -> None:
+    """user_prompt_path loads the file at the given path (Layer 3).
 
     Args:
         tmp_path: pytest temporary directory.
     """
     prompts = _make_prompts_dir(tmp_path)
-    _write(prompts / "soul" / "SOUL.md", "SOUL")
+    user_file = tmp_path / "my_custom_prompt.md"
+    user_file.write_text("USER_PROFILE", encoding="utf-8")
 
-    result = assemble_system_prompt(prompts, user_facts=["likes Python", "prefers French"])
-
-    sep = "\n\n---\n\n"
-    assert result == f"SOUL{sep}## Mémoire utilisateur\n- likes Python\n- prefers French"
-
-
-# ---------------------------------------------------------------------------
-# Test 6 – empty user_facts list not injected
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_empty_user_facts_not_injected(tmp_path: Path) -> None:
-    """user_facts=[] — no mémoire section added to output.
-
-    Args:
-        tmp_path: pytest temporary directory.
-    """
-    prompts = _make_prompts_dir(tmp_path)
-    _write(prompts / "soul" / "SOUL.md", "SOUL")
-
-    result = assemble_system_prompt(prompts, user_facts=[])
-
-    assert result == "SOUL"
-    assert "Mémoire" not in result
-
-
-# ---------------------------------------------------------------------------
-# Test 7 – sender_id colon sanitized to underscore in filename
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_sender_id_colon_sanitized(tmp_path: Path) -> None:
-    """sender_id 'discord:123' resolves to users/discord_123.md (colon → underscore).
-
-    Args:
-        tmp_path: pytest temporary directory.
-    """
-    prompts = _make_prompts_dir(tmp_path)
-    _write(prompts / "users" / "discord_123.md", "USER_PROFILE")
-
-    result = assemble_system_prompt(prompts, sender_id="discord:123")
+    result = assemble_system_prompt(prompts, user_prompt_path=user_file)
 
     assert result == "USER_PROFILE"
 
 
 # ---------------------------------------------------------------------------
-# Test 8 – no layers and no facts returns empty string
+# Test 6 – no layers returns empty string
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_no_layers_returns_empty_string(tmp_path: Path) -> None:
-    """No files, no facts — returns empty string without error.
+    """No files — returns empty string without error.
 
     Args:
         tmp_path: pytest temporary directory.
@@ -221,7 +176,7 @@ def test_no_layers_returns_empty_string(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 9 – empty file treated as missing
+# Test 7 – empty file treated as missing
 # ---------------------------------------------------------------------------
 
 

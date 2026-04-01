@@ -62,12 +62,26 @@ def convert_md_to_telegram(text: str) -> str:
         segment = re.sub(r"`([^`]+)`", _inline_code, segment)
 
         # Bold — **text** → *text*  (MarkdownV2 uses single * for bold)
-        segment = re.sub(r"\*\*(.+?)\*\*", lambda m: f"*{_escape_telegram(m.group(1))}*", segment)
+        # Null-byte placeholders protect bold output from the italic pass below,
+        # which would otherwise convert the freshly-emitted *text* to _text_.
+        _BOLD_OPEN = "\x00BO\x00"
+        _BOLD_CLOSE = "\x00BC\x00"
+        segment = re.sub(
+            r"\*\*(.+?)\*\*",
+            lambda m: f"{_BOLD_OPEN}{_escape_telegram(m.group(1))}{_BOLD_CLOSE}",
+            segment,
+        )
         # Bold alternative __text__
-        segment = re.sub(r"__(.+?)__", lambda m: f"*{_escape_telegram(m.group(1))}*", segment)
-        # Italic — *text* or _text_ → _text_
+        segment = re.sub(
+            r"__(.+?)__",
+            lambda m: f"{_BOLD_OPEN}{_escape_telegram(m.group(1))}{_BOLD_CLOSE}",
+            segment,
+        )
+        # Italic — *text* or _text_ → _text_  (bold placeholders are not matched)
         segment = re.sub(r"\*([^*]+)\*", lambda m: f"_{_escape_telegram(m.group(1))}_", segment)
         segment = re.sub(r"_([^_]+)_", lambda m: f"_{_escape_telegram(m.group(1))}_", segment)
+        # Restore bold placeholders → MarkdownV2 *
+        segment = segment.replace(_BOLD_OPEN, "*").replace(_BOLD_CLOSE, "*")
         # Strikethrough — ~~text~~ → ~text~
         segment = re.sub(r"~~(.+?)~~", lambda m: f"~{_escape_telegram(m.group(1))}~", segment)
         # Links — [text](url) → [text](url)  (URL must not be escaped)

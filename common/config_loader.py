@@ -44,8 +44,15 @@ def resolve_config_path(filename: str) -> Path:
     for fname in filenames:
         for base in CONFIG_SEARCH_PATH:
             candidate = base / fname
-            if candidate.exists():
-                return candidate
+            if not candidate.exists():
+                continue
+            # Guard against path traversal: resolved path must stay inside the
+            # intended search base.
+            try:
+                candidate.resolve().relative_to(base.resolve())
+            except ValueError:
+                continue
+            return candidate
 
     raise FileNotFoundError(
         f"Config file '{filename}' not found.\n"

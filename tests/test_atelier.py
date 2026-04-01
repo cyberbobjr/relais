@@ -89,9 +89,8 @@ def _default_profile_mock() -> MagicMock:
 def _make_atelier_with_patches(extra_patches: dict | None = None):
     """Instantiate Atelier with __init__-time loaders patched out.
 
-    Patches load_profiles, load_for_sdk, make_skills_tools, and
-    resolve_profile before the Atelier() call so that __init__ does not
-    hit the filesystem.
+    Patches load_profiles, load_for_sdk, and resolve_profile before the
+    Atelier() call so that __init__ does not hit the filesystem.
 
     Args:
         extra_patches: Optional dict of additional patch targets → return values
@@ -108,7 +107,6 @@ def _make_atelier_with_patches(extra_patches: dict | None = None):
     patches = {
         "atelier.main.load_profiles": profiles_map,
         "atelier.main.load_for_sdk": {},
-        "atelier.main.make_skills_tools": [],
         "atelier.main.resolve_profile": profile_mock,
     }
     if extra_patches:
@@ -956,3 +954,199 @@ async def test_process_stream_user_role_none_when_absent_in_metadata() -> None:
     mock_sp.assert_called_once()
     call_kwargs = mock_sp.call_args.kwargs
     assert call_kwargs.get("user_role") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Skill injection helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_parse_tool_policy_list_input() -> None:
+    """_parse_tool_policy converts a plain list to a tuple of strings."""
+    from atelier.main import _parse_tool_policy
+
+    assert _parse_tool_policy(["*"]) == ("*",)
+
+
+@pytest.mark.unit
+def test_parse_tool_policy_string_returns_empty() -> None:
+    """_parse_tool_policy returns () for a raw string (not a list)."""
+    from atelier.main import _parse_tool_policy
+
+    assert _parse_tool_policy('["coding", "research"]') == ()
+
+
+@pytest.mark.unit
+def test_parse_tool_policy_none_returns_empty() -> None:
+    """_parse_tool_policy returns () for None."""
+    from atelier.main import _parse_tool_policy
+
+    assert _parse_tool_policy(None) == ()
+
+
+@pytest.mark.unit
+def test_parse_tool_policy_non_list_returns_empty() -> None:
+    """_parse_tool_policy returns () for non-list garbage values."""
+    from atelier.main import _parse_tool_policy
+
+    assert _parse_tool_policy(42) == ()
+    assert _parse_tool_policy("not-json") == ()
+    assert _parse_tool_policy({}) == ()
+
+
+@pytest.mark.unit
+def test_resolve_skills_paths_empty_dirs(tmp_path) -> None:
+    """_resolve_skills_paths returns [] when dirs tuple is empty."""
+    from atelier.main import _resolve_skills_paths
+
+    assert _resolve_skills_paths((), tmp_path) == []
+
+
+@pytest.mark.unit
+def test_resolve_skills_paths_wildcard_expands_subdirs(tmp_path) -> None:
+    """_resolve_skills_paths expands '*' to all immediate subdirectories."""
+    from atelier.main import _resolve_skills_paths
+
+    (tmp_path / "coding").mkdir()
+    (tmp_path / "research").mkdir()
+    (tmp_path / "not_a_dir.txt").touch()
+
+    result = _resolve_skills_paths(("*",), tmp_path)
+
+    assert str(tmp_path / "coding") in result
+    assert str(tmp_path / "research") in result
+    assert str(tmp_path / "not_a_dir.txt") not in result
+
+
+@pytest.mark.unit
+def test_resolve_skills_paths_explicit_existing_dir(tmp_path) -> None:
+    """_resolve_skills_paths returns the explicit dir path when it exists."""
+    from atelier.main import _resolve_skills_paths
+
+    (tmp_path / "coding").mkdir()
+
+    result = _resolve_skills_paths(("coding",), tmp_path)
+
+    assert result == [str(tmp_path / "coding")]
+
+
+@pytest.mark.unit
+def test_resolve_skills_paths_missing_dir_excluded(tmp_path) -> None:
+    """_resolve_skills_paths excludes dirs that do not exist on disk."""
+    from atelier.main import _resolve_skills_paths
+
+    result = _resolve_skills_paths(("nonexistent",), tmp_path)
+
+    assert result == []
+
+
+@pytest.mark.unit
+def test_resolve_skills_paths_traversal_rejected(tmp_path) -> None:
+    """_resolve_skills_paths rejects path-traversal entries (e.g. '../other')."""
+    from atelier.main import _resolve_skills_paths
+
+    # Create a sibling directory outside the base
+    sibling = tmp_path.parent / "sibling"
+    sibling.mkdir(exist_ok=True)
+
+    # Attempt traversal via '..'
+    result = _resolve_skills_paths(("../sibling",), tmp_path)
+
+    assert result == []
+
+
+@pytest.mark.unit
+def test_filter_mcp_tools_wildcard_passes_all() -> None:
+    """_filter_mcp_tools with ('*',) passes all tools through."""
+    from atelier.main import _filter_mcp_tools
+
+    tool_a = MagicMock()
+    tool_a.name = "server__search"
+    tool_b = MagicMock()
+    tool_b.name = "other__tool"
+
+    result = _filter_mcp_tools([tool_a, tool_b], ("*",))
+    assert result == [tool_a, tool_b]
+
+
+@pytest.mark.unit
+def test_filter_mcp_tools_empty_patterns_returns_empty() -> None:
+    """_filter_mcp_tools with empty patterns returns []."""
+    from atelier.main import _filter_mcp_tools
+
+    tool_a = MagicMock()
+    tool_a.name = "server__search"
+
+    assert _filter_mcp_tools([tool_a], ()) == []
+
+
+@pytest.mark.unit
+def test_filter_mcp_tools_glob_pattern() -> None:
+    """_filter_mcp_tools keeps only tools matching any fnmatch pattern."""
+    from atelier.main import _filter_mcp_tools
+
+    tool_a = MagicMock()
+    tool_a.name = "server__search"
+    tool_b = MagicMock()
+    tool_b.name = "other__tool"
+    tool_c = MagicMock()
+    tool_c.name = "server__list"
+
+    result = _filter_mcp_tools([tool_a, tool_b, tool_c], ("server__*",))
+    assert tool_a in result
+    assert tool_c in result
+    assert tool_b not in result
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
+    """_handle_message reads skills_dirs from envelope metadata and passes them to AgentExecutor."""
+    (tmp_path / "coding").mkdir()
+
+    atelier = _make_atelier_with_patches()
+    # Override the skills base dir set at init to point to tmp_path.
+    atelier._skills_base_dir = tmp_path
+
+    envelope = _make_envelope(metadata={
+        "skills_dirs": ["coding"],
+        "allowed_mcp_tools": [],
+        "llm_profile": "default",
+    })
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    executor_calls: list = []
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value="reply")
+
+        def capture_call(*args, **kwargs):
+            executor_calls.append(kwargs)
+            return mock_instance
+
+        MockExecutor.side_effect = capture_call
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
+
+    assert len(executor_calls) == 1
+    assert "skills" in executor_calls[0]
+    assert str(tmp_path / "coding") in executor_calls[0]["skills"]

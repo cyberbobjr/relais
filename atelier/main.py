@@ -53,9 +53,9 @@ from atelier.agent_executor import AgentExecutor, AgentExecutionError
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.stream_publisher import StreamPublisher
-from atelier.tools import make_skills_tools
 from common.config_loader import resolve_prompts_dir, resolve_skills_dir
 from aiguilleur.channel_config import load_channels_config
+from atelier.tool_policy import ToolPolicy
 
 logger = logging.getLogger("atelier")
 
@@ -100,9 +100,24 @@ class Atelier:
             name for name, cfg in load_channels_config().items() if cfg.streaming
         )
 
-        # Build skills tools once — no need to re-scan the skills directory
-        # on every message.  MCP tools are built per-message (session-bound).
-        self._skills_tools = make_skills_tools(resolve_skills_dir())
+        # Base directory for role-based skill resolution — resolved once at
+        # startup so _handle_message does not hit the filesystem on every message.
+        # Tests may override this attribute after construction; _tool_policy is
+        # a property that always derives from _skills_base_dir so the override
+        # is automatically picked up.
+        self._skills_base_dir: Path = resolve_skills_dir()
+
+    @property
+    def _tool_policy(self) -> ToolPolicy:
+        """Return a ToolPolicy rooted at the current _skills_base_dir.
+
+        Constructed on each access so that test overrides of _skills_base_dir
+        are reflected immediately without requiring a separate setter.
+
+        Returns:
+            A fresh ToolPolicy instance bound to self._skills_base_dir.
+        """
+        return ToolPolicy(base_dir=self._skills_base_dir)
 
 
     async def _handle_message(
@@ -147,7 +162,7 @@ class Atelier:
             soul_prompt = assemble_system_prompt(
                 prompts_dir=_PROMPTS_DIR,
                 channel=envelope.channel,
-                sender_id=envelope.sender_id,
+                user_prompt_path=envelope.metadata.get("custom_prompt_path"),
                 user_role=envelope.metadata.get("user_role"),
             )
 
@@ -165,16 +180,31 @@ class Atelier:
             stream_pub: StreamPublisher | None = None
             stream_callback = None
 
+            # 5a. Resolve per-user skills and MCP tool policy from envelope metadata
+            # stamped by Portail from RoleRegistry.
+            skills = self._tool_policy.resolve_skills(
+                envelope.metadata.get("skills_dirs")
+            )
+            mcp_patterns = self._tool_policy.parse_mcp_patterns(
+                envelope.metadata.get("allowed_mcp_tools")
+            )
+
             session_manager = McpSessionManager(profile, mcp_servers)
             async with contextlib.AsyncExitStack() as stack:
-                await session_manager.start_all(stack)
-                mcp_tools = await make_mcp_tools(session_manager)
-                tools = [*self._skills_tools, *mcp_tools]
+                if mcp_patterns:
+                    await session_manager.start_all(stack)
+                    mcp_tools = self._tool_policy.filter_mcp_tools(
+                        await make_mcp_tools(session_manager),
+                        envelope.metadata.get("allowed_mcp_tools"),
+                    )
+                else:
+                    mcp_tools = []
 
                 agent_executor = AgentExecutor(
                     profile=profile,
                     soul_prompt=soul_prompt,
-                    tools=tools,
+                    tools=mcp_tools,
+                    skills=skills,
                 )
 
                 # 7. Execute — with optional streaming for capable channels.
@@ -458,6 +488,61 @@ def _extract_matching_memory_messages(
                 return last_seen_id, response.get("messages", [])
 
     return last_seen_id, None
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat shims (deprecated — use atelier.tool_policy.ToolPolicy)
+# ---------------------------------------------------------------------------
+# These thin wrappers re-expose the three functions that previously lived
+# here as module-level helpers.  External tests that import them directly
+# from atelier.main continue to work unchanged.
+
+
+def _parse_tool_policy(raw: object) -> tuple[str, ...]:
+    """Normalise a metadata value into a tuple of strings.
+
+    .. deprecated::
+        Import from ``atelier.tool_policy.ToolPolicy`` instead.
+
+    Args:
+        raw: The raw value from ``envelope.metadata``.
+
+    Returns:
+        A tuple of strings, never None.
+    """
+    return ToolPolicy._parse_policy(raw)
+
+
+def _resolve_skills_paths(skills_dirs: tuple[str, ...], base: Path) -> list[str]:
+    """Expand skill directory specs into existing absolute paths.
+
+    .. deprecated::
+        Use ``ToolPolicy(base_dir=base).resolve_skills(list(skills_dirs))``.
+
+    Args:
+        skills_dirs: Tuple of directory names or ``"*"`` wildcard.
+        base: The base skills directory.
+
+    Returns:
+        List of absolute path strings for directories that exist on disk.
+    """
+    return ToolPolicy(base_dir=base)._resolve_paths(skills_dirs)
+
+
+def _filter_mcp_tools(tools: list, patterns: tuple[str, ...]) -> list:
+    """Filter tools by fnmatch patterns.
+
+    .. deprecated::
+        Use ``ToolPolicy(base_dir=Path()).filter_mcp_tools(tools, list(patterns))``.
+
+    Args:
+        tools: List of LangChain ``BaseTool`` instances.
+        patterns: Tuple of fnmatch-style glob patterns.
+
+    Returns:
+        Filtered list of tools.
+    """
+    return ToolPolicy._filter_tools(tools, patterns)
 
 
 if __name__ == "__main__":

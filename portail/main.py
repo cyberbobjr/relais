@@ -4,7 +4,10 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 # Configure logging to standard output
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -14,8 +17,10 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
+from common.config_loader import resolve_config_path
 from common.redis_client import RedisClient
 from common.envelope import Envelope
+from common.role_registry import RoleRegistry
 from common.shutdown import GracefulShutdown
 from common.text_utils import strip_outer_quotes
 from common.user_registry import UserRegistry
@@ -39,6 +44,53 @@ class Portail:
         self._dnd_cached: bool | None = None
         self._dnd_cache_at: float = 0.0
         self._user_registry: UserRegistry = UserRegistry()
+        self._role_registry: RoleRegistry = RoleRegistry()
+        self._load_security_config()
+
+    def _load_security_config(self) -> None:
+        """Load security policy settings from config.yaml.
+
+        Reads ``security.unknown_user_policy`` and ``security.guest_profile``
+        from the config cascade.  Falls back to fail-closed defaults
+        (``deny`` / ``fast``) when the config file is absent or the keys
+        are missing.
+
+        Returns: None
+        """
+        try:
+            config_path: Path = resolve_config_path("config.yaml")
+            raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            security = raw.get("security") or {}
+            policy = str(security.get("unknown_user_policy") or "deny").lower()
+            guest_profile = str(security.get("guest_profile") or "fast")
+        except FileNotFoundError:
+            logger.warning(
+                "Portail: config.yaml not found — defaulting unknown_user_policy=deny"
+            )
+            policy = "deny"
+            guest_profile = "fast"
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Portail: failed to parse config.yaml (%s) — defaulting unknown_user_policy=deny",
+                exc,
+            )
+            policy = "deny"
+            guest_profile = "fast"
+
+        if policy not in ("deny", "guest", "pending"):
+            logger.warning(
+                "Portail: unknown unknown_user_policy=%r — falling back to 'deny'",
+                policy,
+            )
+            policy = "deny"
+
+        self._unknown_user_policy: str = policy
+        self._guest_profile: str = guest_profile
+        logger.info(
+            "Portail: unknown_user_policy=%s, guest_profile=%s",
+            self._unknown_user_policy,
+            self._guest_profile,
+        )
 
     def _enrich_envelope(self, envelope: "Envelope") -> None:
         """Stamp user identity and LLM profile metadata onto the envelope.
@@ -58,6 +110,10 @@ class Portail:
             - ``display_name``: human-readable name.
             - ``custom_prompt_path``: per-user prompt override path, only
               written when the registry value is not ``None``.
+            - ``skills_dirs``: list of skill directory names the role allows
+              (``["*"]`` = unrestricted, ``[]`` = no skills).
+            - ``allowed_mcp_tools``: list of permitted MCP tool identifiers
+              (``["*"]`` = unrestricted, ``[]`` = no MCP tools).
 
         Args:
             envelope: The incoming envelope to enrich in place.
@@ -76,8 +132,59 @@ class Portail:
 
         envelope.metadata["user_role"] = record.role
         envelope.metadata["display_name"] = record.display_name
+        # Skill and MCP tool injection — stamp from role config (fail-closed:
+        # unknown role → empty lists, never absent keys).
+        role_cfg = self._role_registry.get_role(record.role)
+        if role_cfg is not None:
+            envelope.metadata["skills_dirs"] = list(role_cfg.skills_dirs)
+            envelope.metadata["allowed_mcp_tools"] = list(role_cfg.allowed_mcp_tools)
+        else:
+            logger.warning("Unknown role %r for user %s — stamping empty access", record.role, record.display_name)
+            envelope.metadata["skills_dirs"] = []
+            envelope.metadata["allowed_mcp_tools"] = []
+
+        # custom_prompt_path: user-level override takes priority; fallback to role-level prompt
         if record.custom_prompt_path is not None:
             envelope.metadata["custom_prompt_path"] = record.custom_prompt_path
+        elif role_cfg is not None and role_cfg.prompt_path is not None:
+            envelope.metadata["custom_prompt_path"] = role_cfg.prompt_path
+
+    def _apply_guest_stamps(self, envelope: "Envelope") -> None:
+        """Stamp synthetic guest identity onto an envelope for an unknown user.
+
+        Applied when ``unknown_user_policy=guest`` and ``resolve_user()``
+        returned ``None``.  The stamped fields mirror those written by
+        ``_enrich_envelope`` for known users so that downstream bricks
+        receive a consistent envelope regardless of user origin.
+
+        Fields written:
+            - ``user_role``: ``"guest"``
+            - ``display_name``: ``"Guest"``
+            - ``llm_profile``: value of ``self._guest_profile`` (overrides any
+              previously stamped ``llm_profile``).
+            - ``skills_dirs``: resolved from the ``"guest"`` role config, or
+              ``[]`` when the role is absent (fail-closed).
+            - ``allowed_mcp_tools``: same as above.
+
+        Args:
+            envelope: The incoming envelope to enrich in place.
+        """
+        envelope.metadata["user_role"] = "guest"
+        envelope.metadata["display_name"] = "Guest"
+        envelope.metadata["llm_profile"] = getattr(self, "_guest_profile", "fast")
+
+        role_cfg = self._role_registry.get_role("guest")
+        if role_cfg is not None:
+            envelope.metadata["skills_dirs"] = list(role_cfg.skills_dirs)
+            envelope.metadata["allowed_mcp_tools"] = list(role_cfg.allowed_mcp_tools)
+            if role_cfg.prompt_path is not None:
+                envelope.metadata["custom_prompt_path"] = role_cfg.prompt_path
+        else:
+            logger.warning(
+                "guest role not found in registry — stamping empty access (fail-closed)"
+            )
+            envelope.metadata["skills_dirs"] = []
+            envelope.metadata["allowed_mcp_tools"] = []
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: "Envelope") -> None:
         """Track active sessions per user for the Crieur (push notifications).
@@ -223,6 +330,34 @@ class Portail:
 
                             # Enrich envelope with user identity and LLM profile
                             self._enrich_envelope(envelope)
+
+                            # Apply unknown-user policy when identity could not be resolved
+                            if "user_role" not in envelope.metadata:
+                                policy = getattr(self, "_unknown_user_policy", "deny")
+                                if policy == "guest":
+                                    self._apply_guest_stamps(envelope)
+                                elif policy == "pending":
+                                    logger.info(
+                                        "unknown_user_policy=pending — publishing %s to pending_users",
+                                        envelope.sender_id,
+                                    )
+                                    await redis_conn.xadd(
+                                        "relais:admin:pending_users",
+                                        {
+                                            "sender_id": envelope.sender_id,
+                                            "channel": envelope.channel,
+                                            "correlation_id": envelope.correlation_id,
+                                            "timestamp": str(envelope.timestamp),
+                                        },
+                                    )
+                                    continue  # drop — finally:xack s'exécute
+                                else:
+                                    # deny (default) — drop silently
+                                    logger.info(
+                                        "unknown_user_policy=deny — dropping message from %s",
+                                        envelope.sender_id,
+                                    )
+                                    continue  # drop — finally:xack s'exécute
 
                             # Update active session tracking
                             await self._update_active_sessions(redis_conn, envelope)

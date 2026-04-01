@@ -87,7 +87,9 @@ class Sentinelle:
 
                             # ACL check — context-aware, reads access_context/access_scope
                             # injected by Aiguilleur adapters into the envelope metadata.
-                            acl_context: str = envelope.metadata.get("access_context", "dm")
+                            # Sanitize: only "dm" and "group" are valid; default to "dm".
+                            _raw_context = envelope.metadata.get("access_context", "dm")
+                            acl_context: str = _raw_context if _raw_context in {"dm", "group"} else "dm"
                             acl_scope: str | None = envelope.metadata.get("access_scope")
                             is_authorized = self._acl.is_allowed(
                                 envelope.sender_id,
@@ -98,6 +100,7 @@ class Sentinelle:
 
                             if is_authorized:
                                 envelope.add_trace("sentinelle", "ACL verified")
+
                                 await redis_conn.xadd(
                                     self.stream_out, {"payload": envelope.to_json()}
                                 )

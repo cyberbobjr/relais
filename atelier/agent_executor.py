@@ -116,6 +116,9 @@ class AgentExecutor:
         soul_prompt: System prompt assembled by SoulAssembler.
         tools: List of LangChain tools (StructuredTool / BaseTool) to
                expose to the agent.
+        skills: List of absolute directory paths to skill directories,
+                passed directly to ``create_deep_agent(skills=...)``.
+                Defaults to an empty list (no skills injected).
     """
 
     def __init__(
@@ -123,12 +126,14 @@ class AgentExecutor:
         profile: ProfileConfig,
         soul_prompt: str,
         tools: list[BaseTool],
+        skills: list[str] | None = None,
     ) -> None:
         self._profile = profile
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
             system_prompt=soul_prompt,
+            skills=skills or [],
             backend=LocalShellBackend(root_dir=str(Path(__file__).parent.parent.resolve()), virtual_mode=False, inherit_env=False)
         )
 

@@ -71,8 +71,12 @@ _USERS_YAML = dedent("""\
     roles:
       admin:
         actions: ["send", "admin"]
+        skills_dirs: ["*"]
+        allowed_mcp_tools: ["*"]
       user:
         actions: ["send"]
+        skills_dirs: []
+        allowed_mcp_tools: []
 """)
 
 
@@ -92,16 +96,17 @@ def _write_users_yaml(tmp_path: Path, content: str = _USERS_YAML) -> Path:
 
 
 def _make_portail_with_registry(users_yaml_path: Path | None = None):
-    """Construct a Portail instance with a real UserRegistry and mocked Redis.
+    """Construct a Portail instance with a real UserRegistry, RoleRegistry, and mocked Redis.
 
     Args:
-        users_yaml_path: Optional path to users.yaml for the registry.
+        users_yaml_path: Optional path to users.yaml for the registries.
 
     Returns:
         A Portail instance ready for unit testing.
     """
     from portail.main import Portail
     from common.user_registry import UserRegistry
+    from common.role_registry import RoleRegistry
 
     with patch("portail.main.RedisClient"):
         portail = Portail.__new__(Portail)
@@ -114,8 +119,13 @@ def _make_portail_with_registry(users_yaml_path: Path | None = None):
 
         if users_yaml_path is not None:
             portail._user_registry = UserRegistry(config_path=users_yaml_path)
+            portail._role_registry = RoleRegistry(config_path=users_yaml_path)
         else:
             portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
+            portail._role_registry = RoleRegistry(config_path=Path("/nonexistent/users.yaml"))
+
+        portail._unknown_user_policy = "deny"
+        portail._guest_profile = "fast"
 
     return portail
 
@@ -321,6 +331,7 @@ async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) 
     """
     from portail.main import Portail
     from common.user_registry import UserRegistry
+    from common.role_registry import RoleRegistry
     from common.shutdown import GracefulShutdown
 
     path = _write_users_yaml(tmp_path)
@@ -350,6 +361,7 @@ async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) 
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=path)
+    portail._role_registry = RoleRegistry(config_path=path)
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
 
@@ -476,6 +488,7 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
     """
     from portail.main import Portail
     from common.user_registry import UserRegistry
+    from common.role_registry import RoleRegistry
     from common.shutdown import GracefulShutdown
 
     path = _write_users_yaml(tmp_path)
@@ -505,6 +518,7 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=path)
+    portail._role_registry = RoleRegistry(config_path=path)
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
 
@@ -568,16 +582,18 @@ async def test_process_stream_acks_every_message_on_dnd_drop(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_process_stream_unknown_user_still_forwards(tmp_path: Path) -> None:
-    """Unknown users are still forwarded to relais:security (ACL decides fate).
+async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path) -> None:
+    """Unknown users are dropped when unknown_user_policy='deny' (default).
 
-    Portail only enriches — it does not block unknown users.
+    With the deny policy, Portail blocks unknown senders before Sentinelle.
+    The message is ACKed but not forwarded to relais:security.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
     from portail.main import Portail
     from common.user_registry import UserRegistry
+    from common.role_registry import RoleRegistry
     from common.shutdown import GracefulShutdown
 
     path = _write_users_yaml(tmp_path)
@@ -606,7 +622,10 @@ async def test_process_stream_unknown_user_still_forwards(tmp_path: Path) -> Non
     portail.consumer_name = "portail_1"
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
+    portail._unknown_user_policy = "deny"
+    portail._guest_profile = "fast"
     portail._user_registry = UserRegistry(config_path=path)
+    portail._role_registry = RoleRegistry(config_path=path)
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
 
@@ -614,4 +633,80 @@ async def test_process_stream_unknown_user_still_forwards(tmp_path: Path) -> Non
         c for c in redis_conn.xadd.await_args_list
         if c.args[0] == "relais:security"
     ]
-    assert len(security_calls) == 1
+    assert len(security_calls) == 0, "deny policy must drop unknown users"
+    # Message must still be ACKed
+    redis_conn.xack.assert_awaited_once_with(
+        "relais:messages:incoming", "portail_group", b"1-0"
+    )
+
+# ---------------------------------------------------------------------------
+# _enrich_envelope — role-based skill injection (NEW)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enrich_stamps_skills_dirs_for_admin_role(tmp_path: Path) -> None:
+    """_enrich_envelope stamps skills_dirs from the role config for known admin users.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_users_yaml(tmp_path)
+    portail = _make_portail_with_registry(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata.get("skills_dirs") == ["*"]
+
+
+@pytest.mark.unit
+def test_enrich_stamps_allowed_mcp_tools_for_admin_role(tmp_path: Path) -> None:
+    """_enrich_envelope stamps allowed_mcp_tools from the role config for known admin users.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_users_yaml(tmp_path)
+    portail = _make_portail_with_registry(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata.get("allowed_mcp_tools") == ["*"]
+
+
+@pytest.mark.unit
+def test_enrich_stamps_empty_skills_for_user_role(tmp_path: Path) -> None:
+    """_enrich_envelope stamps empty skills_dirs and allowed_mcp_tools for the 'user' role.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_users_yaml(tmp_path)
+    portail = _make_portail_with_registry(path)
+    envelope = _make_envelope(sender_id="discord:user001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata.get("skills_dirs") == []
+    assert envelope.metadata.get("allowed_mcp_tools") == []
+
+
+@pytest.mark.unit
+def test_enrich_unknown_user_does_not_stamp_skills(tmp_path: Path) -> None:
+    """_enrich_envelope does NOT stamp skills_dirs or allowed_mcp_tools for unknown users.
+
+    Fail-closed: absent metadata fields => no access in Atelier.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_users_yaml(tmp_path)
+    portail = _make_portail_with_registry(path)
+    envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert "skills_dirs" not in envelope.metadata
+    assert "allowed_mcp_tools" not in envelope.metadata

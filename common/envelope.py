@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass, field
 import uuid
 import time
@@ -63,7 +64,7 @@ class Envelope:
             channel=parent.channel,
             session_id=parent.session_id,
             correlation_id=parent.correlation_id,
-            metadata=parent.metadata.copy()
+            metadata=copy.deepcopy(parent.metadata)
         )
 
     def add_trace(self, brick: str, action: str) -> None:
@@ -116,7 +117,6 @@ class Envelope:
         Returns:
             A new Envelope instance.
         """
-        import json
         from dataclasses import fields
         payload = json.loads(data)
         
