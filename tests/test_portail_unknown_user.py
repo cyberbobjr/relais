@@ -122,7 +122,7 @@ def _make_portail(
     state without connecting to Redis.
 
     Args:
-        users_yaml_path: Path to the users.yaml to use.
+        users_yaml_path: Path to the portail.yaml to use.
         policy: Value for ``_unknown_user_policy`` (deny | guest | pending).
         guest_profile: Value for ``_guest_profile``.
 
@@ -130,8 +130,7 @@ def _make_portail(
         A Portail instance ready for unit testing.
     """
     from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.role_registry import RoleRegistry
+    from portail.user_registry import UserRegistry
 
     with patch("portail.main.RedisClient"):
         portail = Portail.__new__(Portail)
@@ -140,12 +139,9 @@ def _make_portail(
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
-    portail._dnd_cached = False
-    portail._dnd_cache_at = 0.0
     portail._unknown_user_policy = policy
     portail._guest_profile = guest_profile
     portail._user_registry = UserRegistry(config_path=users_yaml_path)
-    portail._role_registry = RoleRegistry(config_path=users_yaml_path)
 
     return portail
 
@@ -340,7 +336,7 @@ async def test_guest_policy_stamps_user_role_guest(tmp_path: Path) -> None:
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("user_role") == "guest"
+    assert forwarded["metadata"].get("user_record", {}).get("role") == "guest"
 
 
 @pytest.mark.asyncio
@@ -364,7 +360,7 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("display_name") == "Guest"
+    assert forwarded["metadata"].get("user_record", {}).get("display_name") == "Guest"
 
 
 @pytest.mark.asyncio
@@ -388,7 +384,7 @@ async def test_guest_policy_stamps_llm_profile_from_guest_profile(tmp_path: Path
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("llm_profile") == "fast"
+    assert forwarded["metadata"].get("user_record", {}).get("llm_profile") == "fast"
 
 
 @pytest.mark.asyncio
@@ -415,8 +411,9 @@ async def test_guest_policy_stamps_skills_from_guest_role(tmp_path: Path) -> Non
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
     # 'guest' role in _USERS_YAML_WITH_GUEST_ROLE has empty skills_dirs/allowed_mcp_tools
-    assert forwarded["metadata"].get("skills_dirs") == []
-    assert forwarded["metadata"].get("allowed_mcp_tools") == []
+    user_record = forwarded["metadata"].get("user_record", {})
+    assert user_record.get("skills_dirs") == []
+    assert user_record.get("allowed_mcp_tools") == []
 
 
 @pytest.mark.asyncio
@@ -444,10 +441,11 @@ async def test_guest_policy_fail_closed_when_guest_role_absent(tmp_path: Path) -
     ]
     assert len(security_calls) == 1, "guest policy must still forward even without guest role"
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("skills_dirs") == [], (
+    user_record = forwarded["metadata"].get("user_record", {})
+    assert user_record.get("skills_dirs") == [], (
         "fail-closed: skills_dirs must be [] when guest role is absent"
     )
-    assert forwarded["metadata"].get("allowed_mcp_tools") == [], (
+    assert user_record.get("allowed_mcp_tools") == [], (
         "fail-closed: allowed_mcp_tools must be [] when guest role is absent"
     )
 
@@ -631,45 +629,53 @@ async def test_pending_policy_does_not_affect_known_users(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_portail_init_loads_unknown_user_policy_from_config(tmp_path: Path) -> None:
-    """Portail.__init__ reads unknown_user_policy and guest_profile from config.yaml.
+def test_portail_init_loads_unknown_user_policy_from_portail_yaml(tmp_path: Path) -> None:
+    """Portail.__init__ reads unknown_user_policy and guest_profile from portail.yaml.
 
-    Verifies that both attributes are populated at construction time from config.
+    Verifies that both attributes are populated at construction time from UserRegistry
+    (which reads portail.yaml top-level fields).
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
     import yaml
 
-    config_content = {
-        "security": {
-            "unknown_user_policy": "guest",
-            "guest_profile": "precise",
-        }
+    portail_yaml_content = {
+        "unknown_user_policy": "guest",
+        "guest_profile": "precise",
+        "users": {},
+        "roles": {},
     }
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text(yaml.dump(config_content), encoding="utf-8")
+    portail_yaml_file = tmp_path / "portail.yaml"
+    portail_yaml_file.write_text(yaml.dump(portail_yaml_content), encoding="utf-8")
 
-    with patch("portail.main.RedisClient"), \
-         patch("portail.main.resolve_config_path", return_value=config_file):
+    with patch("portail.main.RedisClient"):
         from portail.main import Portail
-        portail = Portail()
+        from portail.user_registry import UserRegistry
+        portail = Portail.__new__(Portail)
+        portail.stream_in = "relais:messages:incoming"
+        portail.stream_out = "relais:security"
+        portail.group_name = "portail_group"
+        portail.consumer_name = "portail_1"
+        portail._user_registry = UserRegistry(config_path=portail_yaml_file)
+        portail._guest_profile = portail._user_registry.guest_profile
+        portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     assert portail._unknown_user_policy == "guest"
     assert portail._guest_profile == "precise"
 
 
 @pytest.mark.unit
-def test_portail_init_defaults_to_deny_when_config_missing() -> None:
-    """Portail defaults to 'deny' when config.yaml is absent or lacks security section.
+def test_portail_init_defaults_to_deny_when_portail_yaml_missing() -> None:
+    """Portail defaults to 'deny' when portail.yaml is absent (permissive mode).
 
-    This ensures fail-closed behaviour at startup.
+    UserRegistry falls back to permissive mode (deny default) when config is missing.
 
     Args: (none)
     """
-    with patch("portail.main.RedisClient"), \
-         patch("portail.main.resolve_config_path", side_effect=FileNotFoundError):
-        from portail.main import Portail
-        portail = Portail()
+    from portail.user_registry import UserRegistry
 
-    assert portail._unknown_user_policy == "deny"
+    registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
+
+    assert registry.unknown_user_policy == "deny"
+    assert registry.guest_profile == "fast"

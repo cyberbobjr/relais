@@ -19,44 +19,38 @@ from sentinelle.acl import ACLManager
 # Shared YAML fixtures
 # ---------------------------------------------------------------------------
 
-_USERS_YAML = dedent("""\
+# sentinelle.yaml format: only access_control and groups (no users/roles)
+_SENTINELLE_YAML = dedent("""\
     access_control:
       default_mode: allowlist
     groups: []
-    users:
-      usr_admin:
-        display_name: "Admin User"
-        role: admin
-        blocked: false
-        llm_profile: default
-        identifiers:
-          discord:
-            dm: "admin001"
-            server: "admin001"
-          telegram:
-            dm: "admin001"
-      usr_user001:
-        display_name: "Regular User"
-        role: user
-        blocked: false
-        llm_profile: default
-        identifiers:
-          discord:
-            dm: "user001"
-    roles:
-      admin:
-        actions: ["send", "admin", "config"]
-        skills_dirs: ["*"]
-        allowed_mcp_tools: ["*"]
-      user:
-        actions: ["send"]
-        skills_dirs: []
-        allowed_mcp_tools: []
+""")
+
+_SENTINELLE_YAML_BLOCKLIST = dedent("""\
+    access_control:
+      default_mode: blocklist
+    groups: []
 """)
 
 
-def _write_users_yaml(tmp_path: Path, content: str = _USERS_YAML) -> Path:
-    """Write a users.yaml file to the given temporary directory.
+def _write_sentinelle_yaml(tmp_path: Path, content: str = _SENTINELLE_YAML) -> Path:
+    """Write a sentinelle.yaml file to the given temporary directory.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+        content: YAML content to write (sentinelle.yaml format).
+
+    Returns:
+        Path to the created file.
+    """
+    p = tmp_path / "sentinelle.yaml"
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+# Keep legacy alias used in reload tests below
+def _write_users_yaml(tmp_path: Path, content: str = _SENTINELLE_YAML) -> Path:
+    """Write a sentinelle.yaml file (legacy alias for backward compat with reload tests).
 
     Args:
         tmp_path: Pytest temporary directory fixture.
@@ -65,9 +59,36 @@ def _write_users_yaml(tmp_path: Path, content: str = _USERS_YAML) -> Path:
     Returns:
         Path to the created file.
     """
-    p = tmp_path / "users.yaml"
-    p.write_text(content, encoding="utf-8")
-    return p
+    return _write_sentinelle_yaml(tmp_path, content)
+
+
+def _make_user_record(
+    *,
+    role: str = "user",
+    blocked: bool = False,
+    actions: list[str] | None = None,
+) -> "UserRecord":
+    """Build a minimal UserRecord for ACL tests.
+
+    Args:
+        role: Role name for the record.
+        blocked: Whether the user is blocked.
+        actions: List of allowed actions; defaults to ["send"].
+
+    Returns:
+        A UserRecord instance.
+    """
+    from common.user_record import UserRecord
+    return UserRecord(
+        display_name="Test User",
+        role=role,
+        blocked=blocked,
+        actions=actions if actions is not None else ["send"],
+        skills_dirs=[],
+        allowed_mcp_tools=[],
+        llm_profile="default",
+        prompt_path=None,
+    )
 
 
 # ===========================================================================
@@ -76,354 +97,228 @@ def _write_users_yaml(tmp_path: Path, content: str = _USERS_YAML) -> Path:
 
 
 class TestACLManagerPermissiveMode:
-    """Tests for ACLManager when no users.yaml is available (permissive mode)."""
+    """Tests for ACLManager when no sentinelle.yaml is available (permissive mode)."""
 
-    def test_is_allowed_returns_true_when_no_users_yaml(self) -> None:
+    def test_is_allowed_returns_true_when_no_config(self) -> None:
         """is_allowed() returns True for any user/channel when no config file exists."""
-        acl = ACLManager(config_path=Path("/nonexistent/path/users.yaml"))
+        acl = ACLManager(config_path=Path("/nonexistent/path/sentinelle.yaml"))
         assert acl.is_allowed("discord:unknown", "discord") is True
 
     def test_is_allowed_returns_true_for_any_channel_in_permissive_mode(self) -> None:
         """Permissive mode allows all channels unconditionally."""
-        acl = ACLManager(config_path=Path("/nonexistent/path/users.yaml"))
+        acl = ACLManager(config_path=Path("/nonexistent/path/sentinelle.yaml"))
         assert acl.is_allowed("discord:anyone", "telegram") is True
 
-    def test_get_user_role_returns_admin_in_permissive_mode(self) -> None:
-        """get_user_role() returns 'admin' for any user_id in permissive mode."""
-        acl = ACLManager(config_path=Path("/nonexistent/path/users.yaml"))
-        assert acl.get_user_role("discord:unknown") == "admin"
+    def test_is_allowed_returns_true_regardless_of_user_record_in_permissive_mode(self) -> None:
+        """Permissive mode returns True even without a user_record."""
+        acl = ACLManager(config_path=Path("/nonexistent/path/sentinelle.yaml"))
+        assert acl.is_allowed("discord:unknown", "discord", user_record=None) is True
 
 
 class TestACLManagerWithConfig:
-    """Tests for ACLManager with a valid users.yaml loaded."""
+    """Tests for ACLManager with a valid sentinelle.yaml loaded."""
 
-    def test_admin_is_allowed_on_all_configured_channels(self, tmp_path: Path) -> None:
-        """Admin user can access every channel where they have an identifier."""
-        config_path = _write_users_yaml(tmp_path)
+    def test_user_with_valid_record_is_allowed(self, tmp_path: Path) -> None:
+        """User with non-blocked user_record is allowed in allowlist mode."""
+        config_path = _write_sentinelle_yaml(tmp_path)
+        acl = ACLManager(config_path=config_path)
+        record = _make_user_record(role="user", blocked=False)
+
+        assert acl.is_allowed("discord:user001", "discord", user_record=record) is True
+
+    def test_user_without_user_record_is_denied_in_allowlist_mode(self, tmp_path: Path) -> None:
+        """No user_record in allowlist mode → denied (fail-closed)."""
+        config_path = _write_sentinelle_yaml(tmp_path)
         acl = ACLManager(config_path=config_path)
 
-        assert acl.is_allowed("discord:admin001", "discord") is True
-        assert acl.is_allowed("telegram:admin001", "telegram") is True
+        assert acl.is_allowed("discord:user001", "discord", user_record=None) is False
 
-    def test_user_is_allowed_on_authorized_channel(self, tmp_path: Path) -> None:
-        """Regular user can access their explicitly authorized channel."""
-        config_path = _write_users_yaml(tmp_path)
+    def test_blocked_user_is_denied_regardless_of_channel(self, tmp_path: Path) -> None:
+        """Blocked user_record always returns False."""
+        config_path = _write_sentinelle_yaml(tmp_path)
         acl = ACLManager(config_path=config_path)
+        record = _make_user_record(role="user", blocked=True)
 
-        assert acl.is_allowed("discord:user001", "discord") is True
+        assert acl.is_allowed("discord:user001", "discord", user_record=record) is False
+        assert acl.is_allowed("discord:user001", "telegram", user_record=record) is False
 
-    def test_user_is_denied_on_unauthorized_channel(self, tmp_path: Path) -> None:
-        """Regular user is denied access to a channel not in their list."""
-        config_path = _write_users_yaml(tmp_path)
+    def test_user_allowed_for_action_in_role(self, tmp_path: Path) -> None:
+        """User with matching action in user_record.actions is allowed."""
+        config_path = _write_sentinelle_yaml(tmp_path)
         acl = ACLManager(config_path=config_path)
+        record = _make_user_record(role="user", actions=["send"])
 
-        assert acl.is_allowed("discord:user001", "telegram") is False
+        assert acl.is_allowed("discord:user001", "discord", action="send", user_record=record) is True
 
-    def test_unknown_user_is_denied_in_strict_mode(self, tmp_path: Path) -> None:
-        """Unknown user_id returns False when users.yaml exists (strict mode)."""
-        config_path = _write_users_yaml(tmp_path)
+    def test_user_denied_for_action_not_in_role(self, tmp_path: Path) -> None:
+        """User without the action in user_record.actions is denied."""
+        config_path = _write_sentinelle_yaml(tmp_path)
+        acl = ACLManager(config_path=config_path)
+        record = _make_user_record(role="user", actions=["send"])
+
+        assert acl.is_allowed("discord:user001", "discord", action="admin", user_record=record) is False
+
+    def test_wildcard_actions_allows_any_command(self, tmp_path: Path) -> None:
+        """user_record with actions=['*'] allows any command."""
+        config_path = _write_sentinelle_yaml(tmp_path)
+        acl = ACLManager(config_path=config_path)
+        record = _make_user_record(role="admin", actions=["*"])
+
+        assert acl.is_allowed("discord:admin001", "discord", action="clear", user_record=record) is True
+        assert acl.is_allowed("discord:admin001", "discord", action="obscure_cmd", user_record=record) is True
+
+    def test_unknown_user_without_record_is_denied(self, tmp_path: Path) -> None:
+        """No user_record returns False in allowlist mode (fail-closed)."""
+        config_path = _write_sentinelle_yaml(tmp_path)
         acl = ACLManager(config_path=config_path)
 
         assert acl.is_allowed("discord:9999999", "discord") is False
 
-    def test_get_user_role_returns_correct_role_for_admin(self, tmp_path: Path) -> None:
-        """get_user_role() returns 'admin' for an admin user."""
-        config_path = _write_users_yaml(tmp_path)
+    def test_blocklist_mode_allows_user_without_record(self, tmp_path: Path) -> None:
+        """In blocklist mode, a sender without user_record is allowed through."""
+        config_path = _write_sentinelle_yaml(tmp_path, _SENTINELLE_YAML_BLOCKLIST)
         acl = ACLManager(config_path=config_path)
 
-        assert acl.get_user_role("discord:admin001") == "admin"
-
-    def test_get_user_role_returns_correct_role_for_user(self, tmp_path: Path) -> None:
-        """get_user_role() returns 'user' for a regular user."""
-        config_path = _write_users_yaml(tmp_path)
-        acl = ACLManager(config_path=config_path)
-
-        assert acl.get_user_role("discord:user001") == "user"
-
-    def test_get_user_role_returns_unknown_for_nonexistent_user(self, tmp_path: Path) -> None:
-        """get_user_role() returns 'unknown' for a user_id not in the config."""
-        config_path = _write_users_yaml(tmp_path)
-        acl = ACLManager(config_path=config_path)
-
-        assert acl.get_user_role("discord:doesnotexist") == "unknown"
-
-    def test_user_denied_for_action_not_in_role(self, tmp_path: Path) -> None:
-        """Regular user (role=user) is denied for an action not in their role definition."""
-        config_path = _write_users_yaml(tmp_path)
-        acl = ACLManager(config_path=config_path)
-
-        # "user" role only has "send" action — "admin" action must be denied
-        assert acl.is_allowed("discord:user001", "discord", action="admin") is False
+        assert acl.is_allowed("discord:unknown999", "discord", user_record=None) is True
 
 
 class TestACLManagerReload:
     """Tests for ACLManager.reload() hot-reload behaviour."""
 
-    def test_reload_picks_up_new_users_from_disk(self, tmp_path: Path) -> None:
-        """reload() re-reads users.yaml and reflects changes made after initial load."""
-        config_path = _write_users_yaml(tmp_path)
+    def test_reload_picks_up_new_groups_from_disk(self, tmp_path: Path) -> None:
+        """reload() re-reads sentinelle.yaml and reflects changes made after initial load."""
+        config_path = _write_sentinelle_yaml(tmp_path)
         acl = ACLManager(config_path=config_path)
 
-        # At this point, "discord:newuser" does not exist
-        assert acl.is_allowed("discord:newuser", "discord") is False
+        # At this point, group "grp_test" does not exist — allowlist mode rejects unknown groups
+        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_test") is False
 
-        # Overwrite the YAML on disk with an additional user
+        # Overwrite the YAML on disk with the new group allowed
         updated_yaml = dedent("""\
             access_control:
               default_mode: allowlist
-            groups: []
-            users:
-              usr_admin:
-                display_name: "Admin User"
-                role: admin
+            groups:
+              - channel: discord
+                group_id: "grp_test"
+                allowed: true
                 blocked: false
-                identifiers:
-                  discord:
-                    dm: "admin001"
-                    server: "admin001"
-                  telegram:
-                    dm: "admin001"
-              usr_user001:
-                display_name: "Regular User"
-                role: user
-                blocked: false
-                identifiers:
-                  discord:
-                    dm: "user001"
-              usr_newuser:
-                display_name: "New User"
-                role: user
-                blocked: false
-                identifiers:
-                  discord:
-                    dm: "newuser"
-            roles:
-              admin:
-                actions: ["send", "admin", "config"]
-              user:
-                actions: ["send"]
         """)
         config_path.write_text(updated_yaml, encoding="utf-8")
 
         acl.reload()
 
-        assert acl.is_allowed("discord:newuser", "discord") is True
+        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_test") is True
 
-    def test_reload_removes_old_users_that_no_longer_exist(self, tmp_path: Path) -> None:
-        """reload() clears previously loaded users that are absent from the updated file."""
-        config_path = _write_users_yaml(tmp_path)
-        acl = ACLManager(config_path=config_path)
-
-        assert acl.is_allowed("discord:user001", "discord") is True
-
-        # Remove user001 from the file
-        minimal_yaml = dedent("""\
+    def test_reload_removes_old_groups_that_no_longer_exist(self, tmp_path: Path) -> None:
+        """reload() clears previously loaded groups that are absent from the updated file."""
+        initial_yaml = dedent("""\
             access_control:
               default_mode: allowlist
-            groups: []
-            users:
-              usr_admin:
-                display_name: "Admin User"
-                role: admin
+            groups:
+              - channel: discord
+                group_id: "grp_existing"
+                allowed: true
                 blocked: false
-                identifiers:
-                  discord:
-                    dm: "admin001"
-            roles:
-              admin:
-                actions: ["send", "admin"]
         """)
-        config_path.write_text(minimal_yaml, encoding="utf-8")
+        config_path = _write_sentinelle_yaml(tmp_path, initial_yaml)
+        acl = ACLManager(config_path=config_path)
+
+        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_existing") is True
+
+        # Remove the group from the file
+        config_path.write_text(_SENTINELLE_YAML, encoding="utf-8")
         acl.reload()
 
-        assert acl.is_allowed("discord:user001", "discord") is False
+        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_existing") is False
 
 
 # ===========================================================================
-# Unknown-user policy tests (migrated from test_sentinelle_policy.py)
+# ACLManager access-mode and command authorization tests
 # ===========================================================================
-
-
-def _make_users_yaml(extra_users: dict[str, dict[str, Any]] | None = None) -> str:
-    """Build a minimal users.yaml YAML string.
-
-    Args:
-        extra_users: Additional user dicts merged into the users mapping.
-
-    Returns:
-        YAML text ready to be written to a tmp file.
-    """
-    users: dict[str, dict[str, Any]] = {
-        "usr_alice": {
-            "display_name": "Alice",
-            "role": "user",
-            "blocked": False,
-            "identifiers": {"discord": {"dm": "111"}},
-        },
-    }
-    if extra_users:
-        users.update(extra_users)
-
-    data: dict[str, Any] = {
-        "access_control": {"default_mode": "allowlist"},
-        "groups": [],
-        "users": users,
-        "roles": {
-            "user": {"actions": ["send"], "skills_dirs": [], "allowed_mcp_tools": []},
-            "admin": {"actions": ["send", "admin"], "skills_dirs": ["*"], "allowed_mcp_tools": ["*"]},
-        },
-    }
-    return yaml.dump(data)
 
 
 @pytest.mark.unit
-class TestUnknownUserPolicyDeny:
-    """T1: unknown user + deny policy → returns False, no side effects."""
+class TestACLManagerAllowlistMode:
+    """Tests for ACLManager in allowlist mode — deny when user_record is absent."""
 
-    def test_deny_returns_false(self, tmp_path: Path) -> None:
-        """ACLManager.check_unknown_user returns False for deny policy.
+    def test_no_user_record_returns_false_in_allowlist(self, tmp_path: Path) -> None:
+        """Missing user_record → False in allowlist mode (fail-closed).
 
         Args:
             tmp_path: pytest built-in temporary directory.
         """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
+        config_path = _write_sentinelle_yaml(tmp_path)
+        acl = ACLManager(config_path=config_path)
 
-        mgr = ACLManager(
-            config_path=users_file,
-            unknown_user_policy="deny",
-        )
-
-        result = mgr.is_allowed("discord:999", "discord")
+        result = acl.is_allowed("discord:999", "discord")
         assert result is False
 
-    def test_deny_does_not_mutate_known_users(self, tmp_path: Path) -> None:
-        """Known user is unaffected by deny policy for unknowns.
+    def test_valid_user_record_returns_true_in_allowlist(self, tmp_path: Path) -> None:
+        """Valid non-blocked user_record → True in allowlist mode.
 
         Args:
             tmp_path: pytest built-in temporary directory.
         """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
+        config_path = _write_sentinelle_yaml(tmp_path)
+        acl = ACLManager(config_path=config_path)
+        record = _make_user_record(role="user", blocked=False)
 
-        mgr = ACLManager(
-            config_path=users_file,
-            unknown_user_policy="deny",
-        )
-
-        assert mgr.is_allowed("discord:111", "discord") is True
+        assert acl.is_allowed("discord:111", "discord", user_record=record) is True
 
 
 @pytest.mark.unit
-class TestUnknownUserPolicyGuest:
-    """T2: unknown user + guest policy → returns True with guest_profile attached."""
+class TestACLManagerBlocklistMode:
+    """Tests for ACLManager in blocklist mode — allow when user_record is absent."""
 
-    def test_guest_returns_true(self, tmp_path: Path) -> None:
-        """ACLManager.is_allowed returns True for unknown user under guest policy.
+    def test_no_user_record_returns_true_in_blocklist(self, tmp_path: Path) -> None:
+        """Missing user_record → True in blocklist mode (admit all by default).
 
         Args:
             tmp_path: pytest built-in temporary directory.
         """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
+        config_path = _write_sentinelle_yaml(tmp_path, _SENTINELLE_YAML_BLOCKLIST)
+        acl = ACLManager(config_path=config_path)
 
-        mgr = ACLManager(
-            config_path=users_file,
-            unknown_user_policy="guest",
-            guest_profile="fast",
-        )
-
-        result = mgr.is_allowed("discord:999", "discord")
+        result = acl.is_allowed("discord:999", "discord")
         assert result is True
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestUnknownUserPolicyPending:
-    """T3: unknown user + pending policy → False + publishes to admin stream."""
+class TestACLManagerNotifyPending:
+    """Tests for ACLManager.notify_pending() — publishes to admin stream."""
 
-    async def test_pending_returns_false(self, tmp_path: Path) -> None:
-        """ACLManager.is_allowed returns False for unknown user under pending policy.
-
-        Args:
-            tmp_path: pytest built-in temporary directory.
-        """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
-
-        mgr = ACLManager(
-            config_path=users_file,
-            unknown_user_policy="pending",
-        )
-
-        result = mgr.is_allowed("discord:999", "discord")
-        assert result is False
-
-    async def test_pending_publishes_to_admin_stream(self, tmp_path: Path) -> None:
+    async def test_notify_pending_publishes_to_admin_stream(self) -> None:
         """notify_pending publishes to relais:admin:pending_users stream.
 
-        Args:
-            tmp_path: pytest built-in temporary directory.
+        Args: (none)
         """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
-
-        mgr = ACLManager(
-            config_path=users_file,
-            unknown_user_policy="pending",
-        )
+        acl = ACLManager(config_path=Path("/nonexistent/sentinelle.yaml"))
 
         redis_mock = AsyncMock()
         redis_mock.xadd = AsyncMock(return_value="0-0")
 
-        await mgr.notify_pending(redis_mock, "discord:999", "discord")
+        await acl.notify_pending(redis_mock, "discord:999", "discord")
 
         redis_mock.xadd.assert_awaited_once()
         call_args = redis_mock.xadd.call_args
         stream_name = call_args[0][0]
         assert stream_name == "relais:admin:pending_users"
 
-    async def test_pending_payload_contains_user_id(self, tmp_path: Path) -> None:
+    async def test_notify_pending_payload_contains_user_id(self) -> None:
         """Payload published to pending_users includes the unknown user_id.
 
-        Args:
-            tmp_path: pytest built-in temporary directory.
+        Args: (none)
         """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
-
-        mgr = ACLManager(
-            config_path=users_file,
-            unknown_user_policy="pending",
-        )
+        acl = ACLManager(config_path=Path("/nonexistent/sentinelle.yaml"))
 
         redis_mock = AsyncMock()
         redis_mock.xadd = AsyncMock(return_value="0-0")
 
-        await mgr.notify_pending(redis_mock, "discord:999", "discord")
+        await acl.notify_pending(redis_mock, "discord:999", "discord")
 
         payload_dict = redis_mock.xadd.call_args[0][1]
         assert "discord:999" in str(payload_dict)
-
-
-@pytest.mark.unit
-class TestUnknownUserPolicyInvalid:
-    """Raise ValueError on unsupported policy string."""
-
-    def test_invalid_policy_raises_value_error(self, tmp_path: Path) -> None:
-        """ACLManager raises ValueError for unknown policy string.
-
-        Args:
-            tmp_path: pytest built-in temporary directory.
-        """
-        users_file = tmp_path / "users.yaml"
-        users_file.write_text(_make_users_yaml(), encoding="utf-8")
-
-        with pytest.raises(ValueError, match="unknown_user_policy"):
-            ACLManager(
-                config_path=users_file,
-                unknown_user_policy="allow_all_and_profit",
-            )
 
 
 # ===========================================================================

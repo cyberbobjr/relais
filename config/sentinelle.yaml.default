@@ -1,0 +1,27 @@
+# Configuration ACL de la Sentinelle RELAIS.
+# Copié dans ~/.relais/config/sentinelle.yaml au premier lancement.
+#
+# Ce fichier contient UNIQUEMENT : access_control et groups.
+# Les utilisateurs et rôles sont dans portail.yaml (chargé par le Portail).
+#
+# ── Contrôle d'accès ─────────────────────────────────────────────────────────
+access_control:
+  # allowlist : tout refuser sauf les enveloppes avec user_record valide
+  # blocklist : tout accepter sauf les enveloppes explicitement bloquées
+  default_mode: allowlist
+  channels: {}
+  # Exemple de surcharge par canal :
+  # channels:
+  #   telegram:
+  #     mode: blocklist
+
+# ── Groupes (WhatsApp, Telegram) ─────────────────────────────────────────────
+# L'autorisation de groupe porte sur le groupe lui-même, pas sur l'expéditeur.
+groups: []
+# Exemple :
+# groups:
+#   - id: grp_famille
+#     channel: whatsapp
+#     group_id: "120363000000000@g.us"
+#     allowed: true
+#     blocked: false

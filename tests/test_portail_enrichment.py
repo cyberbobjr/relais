@@ -1,7 +1,8 @@
-"""Tests for portail.main.Portail — enrichment and session tracking.
+"""Tests for portail.main.Portail — enrichment stamps user_record dict.
 
-TDD — tests written BEFORE implementation changes (RED phase for new behaviour).
-These tests verify the _enrich_envelope method and its integration in _process_stream.
+TDD — tests verify the new _enrich_envelope behaviour: a single
+``user_record`` dict is stamped into envelope.metadata instead of
+individual keys.  Config format is portail.yaml (users + roles).
 """
 
 from __future__ import annotations
@@ -48,10 +49,10 @@ def _make_envelope(
     )
 
 
-_USERS_YAML = dedent("""\
-    access_control:
-      default_mode: allowlist
-    groups: []
+_PORTAIL_YAML = dedent("""\
+    unknown_user_policy: deny
+    guest_profile: fast
+
     users:
       usr_admin:
         display_name: "Admin User"
@@ -64,24 +65,32 @@ _USERS_YAML = dedent("""\
         display_name: "Regular User"
         role: user
         blocked: false
-        custom_prompt_path: "users/discord_user001.md"
+        prompt_path: "users/discord_user001.md"
         identifiers:
           discord:
             dm: "user001"
+
     roles:
       admin:
         actions: ["*"]
         skills_dirs: ["*"]
         allowed_mcp_tools: ["*"]
+        prompt_path: null
       user:
         actions: []
         skills_dirs: []
         allowed_mcp_tools: []
+        prompt_path: null
+      guest:
+        actions: []
+        skills_dirs: []
+        allowed_mcp_tools: []
+        prompt_path: null
 """)
 
 
-def _write_users_yaml(tmp_path: Path, content: str = _USERS_YAML) -> Path:
-    """Write a users.yaml file to the given temporary directory.
+def _write_portail_yaml(tmp_path: Path, content: str = _PORTAIL_YAML) -> Path:
+    """Write a portail.yaml file to the given temporary directory.
 
     Args:
         tmp_path: pytest temporary directory fixture.
@@ -90,23 +99,22 @@ def _write_users_yaml(tmp_path: Path, content: str = _USERS_YAML) -> Path:
     Returns:
         Path to the created file.
     """
-    p = tmp_path / "users.yaml"
+    p = tmp_path / "portail.yaml"
     p.write_text(content, encoding="utf-8")
     return p
 
 
-def _make_portail_with_registry(users_yaml_path: Path | None = None):
-    """Construct a Portail instance with a real UserRegistry, RoleRegistry, and mocked Redis.
+def _make_portail(portail_yaml_path: Path | None = None):
+    """Construct a Portail instance with a real UserRegistry and mocked Redis.
 
     Args:
-        users_yaml_path: Optional path to users.yaml for the registries.
+        portail_yaml_path: Optional path to portail.yaml for the registry.
 
     Returns:
         A Portail instance ready for unit testing.
     """
     from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.role_registry import RoleRegistry
+    from portail.user_registry import UserRegistry
 
     with patch("portail.main.RedisClient"):
         portail = Portail.__new__(Portail)
@@ -115,85 +123,237 @@ def _make_portail_with_registry(users_yaml_path: Path | None = None):
         portail.group_name = "portail_group"
         portail.consumer_name = "portail_1"
 
-        if users_yaml_path is not None:
-            portail._user_registry = UserRegistry(config_path=users_yaml_path)
-            portail._role_registry = RoleRegistry(config_path=users_yaml_path)
+        if portail_yaml_path is not None:
+            portail._user_registry = UserRegistry(config_path=portail_yaml_path)
         else:
-            portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
-            portail._role_registry = RoleRegistry(config_path=Path("/nonexistent/users.yaml"))
-
-        portail._unknown_user_policy = "deny"
-        portail._guest_profile = "fast"
+            portail._user_registry = UserRegistry(
+                config_path=Path("/nonexistent/portail.yaml")
+            )
+        portail._guest_profile = portail._user_registry.guest_profile
+        portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     return portail
 
 
 # ---------------------------------------------------------------------------
-# _enrich_envelope — known user
+# _enrich_envelope — stamps user_record dict for known users
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_enrich_envelope_stamps_user_role(tmp_path: Path) -> None:
-    """_enrich_envelope stamps user_role into envelope.metadata for known users.
+def test_enrich_envelope_stamps_user_record_key(tmp_path: Path) -> None:
+    """_enrich_envelope stamps a 'user_record' key into envelope.metadata.
+
+    The value must be a dict (JSON-serialisable).
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata.get("user_role") == "admin"
+    assert "user_record" in envelope.metadata
+    assert isinstance(envelope.metadata["user_record"], dict)
 
 
 @pytest.mark.unit
-def test_enrich_envelope_stamps_display_name(tmp_path: Path) -> None:
-    """_enrich_envelope stamps display_name into envelope.metadata for known users.
+def test_enrich_envelope_user_record_role(tmp_path: Path) -> None:
+    """user_record['role'] must equal the user's role from portail.yaml.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata.get("display_name") == "Admin User"
+    assert envelope.metadata["user_record"]["role"] == "admin"
 
 
 @pytest.mark.unit
-def test_enrich_envelope_stamps_custom_prompt_path_when_present(tmp_path: Path) -> None:
-    """_enrich_envelope stamps custom_prompt_path when it is set in the registry.
+def test_enrich_envelope_user_record_display_name(tmp_path: Path) -> None:
+    """user_record['display_name'] must match the configured display name.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata["user_record"]["display_name"] == "Admin User"
+
+
+@pytest.mark.unit
+def test_enrich_envelope_user_record_actions_wildcard_for_admin(tmp_path: Path) -> None:
+    """user_record['actions'] equals ['*'] for admin role.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata["user_record"]["actions"] == ["*"]
+
+
+@pytest.mark.unit
+def test_enrich_envelope_user_record_skills_dirs_for_admin(tmp_path: Path) -> None:
+    """user_record['skills_dirs'] equals ['*'] for admin role.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata["user_record"]["skills_dirs"] == ["*"]
+
+
+@pytest.mark.unit
+def test_enrich_envelope_user_record_mcp_tools_for_admin(tmp_path: Path) -> None:
+    """user_record['allowed_mcp_tools'] equals ['*'] for admin role.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata["user_record"]["allowed_mcp_tools"] == ["*"]
+
+
+@pytest.mark.unit
+def test_enrich_envelope_user_record_prompt_path_when_set(tmp_path: Path) -> None:
+    """user_record['prompt_path'] equals the user-level prompt path when present.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    # user001 has prompt_path="users/discord_user001.md"
     envelope = _make_envelope(sender_id="discord:user001", channel="discord")
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata.get("custom_prompt_path") == "users/discord_user001.md"
+    assert envelope.metadata["user_record"]["prompt_path"] == "users/discord_user001.md"
 
 
 @pytest.mark.unit
-def test_enrich_envelope_does_not_stamp_custom_prompt_path_when_none(tmp_path: Path) -> None:
-    """_enrich_envelope does NOT add custom_prompt_path key when UserRecord has None.
-
-    Keys with None values must not be stamped — absent is cleaner than null.
+def test_enrich_envelope_user_record_prompt_path_none_for_admin(tmp_path: Path) -> None:
+    """user_record['prompt_path'] is None when neither user nor role sets it.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
-    # admin001 has no custom_prompt_path
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata["user_record"]["prompt_path"] is None
+
+
+@pytest.mark.unit
+def test_enrich_envelope_user_record_empty_skills_for_user_role(tmp_path: Path) -> None:
+    """user_record['skills_dirs'] equals [] for the 'user' role.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:user001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert envelope.metadata["user_record"]["skills_dirs"] == []
+    assert envelope.metadata["user_record"]["allowed_mcp_tools"] == []
+
+
+# ---------------------------------------------------------------------------
+# _enrich_envelope — individual legacy keys must NOT be present
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enrich_envelope_no_legacy_user_role_key(tmp_path: Path) -> None:
+    """_enrich_envelope must NOT stamp 'user_role' as a top-level metadata key.
+
+    All user data is now under 'user_record'.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert "user_role" not in envelope.metadata
+
+
+@pytest.mark.unit
+def test_enrich_envelope_no_legacy_display_name_key(tmp_path: Path) -> None:
+    """_enrich_envelope must NOT stamp 'display_name' as a top-level metadata key.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert "display_name" not in envelope.metadata
+
+
+@pytest.mark.unit
+def test_enrich_envelope_no_legacy_skills_dirs_key(tmp_path: Path) -> None:
+    """_enrich_envelope must NOT stamp 'skills_dirs' as a top-level metadata key.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+
+    portail._enrich_envelope(envelope)
+
+    assert "skills_dirs" not in envelope.metadata
+
+
+@pytest.mark.unit
+def test_enrich_envelope_no_legacy_custom_prompt_path_key(tmp_path: Path) -> None:
+    """_enrich_envelope must NOT stamp 'custom_prompt_path' as top-level.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    envelope = _make_envelope(sender_id="discord:user001", channel="discord")
 
     portail._enrich_envelope(envelope)
 
@@ -201,138 +361,130 @@ def test_enrich_envelope_does_not_stamp_custom_prompt_path_when_none(tmp_path: P
 
 
 # ---------------------------------------------------------------------------
-# _enrich_envelope — llm_profile resolution
+# _enrich_envelope — llm_profile resolution (still at top level for routing)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_enrich_envelope_llm_profile_uses_channel_profile(tmp_path: Path) -> None:
-    """_enrich_envelope sets llm_profile from channel_profile when present.
+    """user_record['llm_profile'] uses channel_profile when present.
 
-    Priority: channel_profile (from Aiguilleur) > 'default'.
+    The channel_profile stamped by Aiguilleur overrides user/role defaults.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(
         sender_id="discord:admin001",
         channel="discord",
-        metadata={"channel_profile": "fast"},
+        metadata={"channel_profile": "coder"},
     )
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["llm_profile"] == "fast"
+    assert envelope.metadata["user_record"]["llm_profile"] == "coder"
 
 
 @pytest.mark.unit
-def test_enrich_envelope_llm_profile_defaults_to_default_when_no_channel_profile(
-    tmp_path: Path,
-) -> None:
-    """_enrich_envelope sets llm_profile='default' when channel_profile is absent.
+def test_enrich_envelope_llm_profile_defaults_to_default(tmp_path: Path) -> None:
+    """user_record['llm_profile'] defaults to 'default' when channel_profile absent.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["llm_profile"] == "default"
-
-
-@pytest.mark.unit
-def test_enrich_envelope_llm_profile_fallback_when_channel_profile_is_none(
-    tmp_path: Path,
-) -> None:
-    """_enrich_envelope uses 'default' when channel_profile is explicitly None.
-
-    A None value for channel_profile must not be propagated to llm_profile.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
-    envelope = _make_envelope(
-        sender_id="discord:admin001",
-        channel="discord",
-        metadata={"channel_profile": None},
-    )
-
-    portail._enrich_envelope(envelope)
-
-    assert envelope.metadata["llm_profile"] == "default"
+    assert envelope.metadata["user_record"]["llm_profile"] == "default"
 
 
 # ---------------------------------------------------------------------------
-# _enrich_envelope — unknown user
+# _enrich_envelope — unknown user (no user_record stamped)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_enrich_envelope_unknown_user_does_not_stamp_user_role(tmp_path: Path) -> None:
-    """_enrich_envelope leaves user identity fields absent when user is not found.
+def test_enrich_envelope_unknown_user_no_user_record(tmp_path: Path) -> None:
+    """_enrich_envelope does NOT stamp user_record for unknown users.
 
-    For unknown senders, no user_role, display_name, or custom_prompt_path
-    should be added.
+    Downstream (Portail's _process_stream) applies the unknown_user_policy.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
 
     portail._enrich_envelope(envelope)
 
-    assert "user_role" not in envelope.metadata
-    assert "display_name" not in envelope.metadata
+    assert "user_record" not in envelope.metadata
+
+
+# ---------------------------------------------------------------------------
+# _apply_guest_stamps — stamps user_record for guest policy
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_enrich_envelope_unknown_user_still_stamps_llm_profile(tmp_path: Path) -> None:
-    """_enrich_envelope stamps llm_profile even for unknown users.
-
-    The llm_profile must be resolved regardless of whether the user is known.
+def test_apply_guest_stamps_sets_user_record(tmp_path: Path) -> None:
+    """_apply_guest_stamps stamps 'user_record' dict for guest users.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
     envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
 
-    portail._enrich_envelope(envelope)
+    portail._apply_guest_stamps(envelope)
 
-    assert envelope.metadata.get("llm_profile") == "default"
+    assert "user_record" in envelope.metadata
+    assert envelope.metadata["user_record"]["role"] == "guest"
+
+
+@pytest.mark.unit
+def test_apply_guest_stamps_uses_guest_profile(tmp_path: Path) -> None:
+    """_apply_guest_stamps uses the configured guest_profile for llm_profile.
+
+    Args:
+        tmp_path: pytest built-in temporary directory.
+    """
+    path = _write_portail_yaml(tmp_path)
+    portail = _make_portail(path)
+    portail._guest_profile = "fast"
+    envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
+
+    portail._apply_guest_stamps(envelope)
+
+    assert envelope.metadata["user_record"]["llm_profile"] == "fast"
 
 
 # ---------------------------------------------------------------------------
-# _process_stream — enrichment integrated in pipeline
+# _process_stream — integration checks
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) -> None:
-    """_process_stream enriches metadata and forwards to relais:security.
+async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
+    """_process_stream enriches metadata with user_record and forwards to relais:security.
 
-    The forwarded envelope must contain user_role and llm_profile.
+    The forwarded envelope must contain a 'user_record' dict with role and llm_profile.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
     from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.role_registry import RoleRegistry
+    from portail.user_registry import UserRegistry
     from common.shutdown import GracefulShutdown
 
-    path = _write_users_yaml(tmp_path)
+    path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
     payload = envelope.to_json()
 
@@ -342,7 +494,6 @@ async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) 
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
         [],
     ])
-    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
@@ -356,40 +507,40 @@ async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) 
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
-    portail._dnd_cached = None
-    portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=path)
-    portail._role_registry = RoleRegistry(config_path=path)
+    portail._guest_profile = portail._user_registry.guest_profile
+    portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
 
-    # Find the xadd call to relais:security
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
         if c.args[0] == "relais:security"
     ]
     assert len(security_calls) == 1
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("user_role") == "admin"
-    assert forwarded["metadata"].get("llm_profile") == "default"
+    ur = forwarded["metadata"].get("user_record")
+    assert ur is not None
+    assert ur["role"] == "admin"
+    assert ur["llm_profile"] == "default"
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> None:
-    """_process_stream calls _update_active_sessions (not the old _update_session).
+async def test_process_stream_check_uses_user_record_key(tmp_path: Path) -> None:
+    """_process_stream checks for 'user_record' (not 'user_role') to detect known users.
 
-    The Redis HSET must be called with last_seen, channel, and session_id fields.
+    An envelope with a valid user must be forwarded; the check must use
+    'user_record' presence.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
     from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.role_registry import RoleRegistry
+    from portail.user_registry import UserRegistry
     from common.shutdown import GracefulShutdown
 
-    path = _write_users_yaml(tmp_path)
+    path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
     payload = envelope.to_json()
 
@@ -399,7 +550,6 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
         [],
     ])
-    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
@@ -413,23 +563,18 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
-    portail._dnd_cached = None
-    portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=path)
-    portail._role_registry = RoleRegistry(config_path=path)
+    portail._guest_profile = portail._user_registry.guest_profile
+    portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
 
-    # HSET must have been called with the session key and a mapping dict
-    hset_calls = redis_conn.hset.await_args_list
-    assert len(hset_calls) >= 1
-    first_call = hset_calls[0]
-    key_arg = first_call.args[0]
-    assert "relais:active_sessions:" in key_arg
-    mapping = first_call.kwargs.get("mapping", {})
-    assert "last_seen" in mapping
-    assert "channel" in mapping
-    assert "session_id" in mapping
+    security_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == "relais:security"
+    ]
+    # Known user → forwarded (not dropped)
+    assert len(security_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -444,11 +589,10 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
         tmp_path: pytest built-in temporary directory.
     """
     from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.role_registry import RoleRegistry
+    from portail.user_registry import UserRegistry
     from common.shutdown import GracefulShutdown
 
-    path = _write_users_yaml(tmp_path)
+    path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
     payload = envelope.to_json()
 
@@ -458,7 +602,6 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
         [],
     ])
-    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
@@ -472,12 +615,9 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
-    portail._dnd_cached = None
-    portail._dnd_cache_at = 0.0
-    portail._unknown_user_policy = "deny"
-    portail._guest_profile = "fast"
     portail._user_registry = UserRegistry(config_path=path)
-    portail._role_registry = RoleRegistry(config_path=path)
+    portail._guest_profile = portail._user_registry.guest_profile
+    portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
 
@@ -486,79 +626,60 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
         if c.args[0] == "relais:security"
     ]
     assert len(security_calls) == 0, "deny policy must drop unknown users"
-    # Message must still be ACKed
     redis_conn.xack.assert_awaited_once_with(
         "relais:messages:incoming", "portail_group", b"1-0"
     )
 
-# ---------------------------------------------------------------------------
-# _enrich_envelope — role-based skill injection (NEW)
-# ---------------------------------------------------------------------------
 
-
+@pytest.mark.asyncio
 @pytest.mark.unit
-def test_enrich_stamps_skills_dirs_for_admin_role(tmp_path: Path) -> None:
-    """_enrich_envelope stamps skills_dirs from the role config for known admin users.
+async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> None:
+    """_process_stream calls _update_active_sessions with correct fields.
+
+    The Redis HSET must be called with last_seen, channel, and session_id.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
+    from portail.main import Portail
+    from portail.user_registry import UserRegistry
+    from common.shutdown import GracefulShutdown
+
+    path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
+    payload = envelope.to_json()
 
-    portail._enrich_envelope(envelope)
+    redis_conn = AsyncMock()
+    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
+        [],
+    ])
+    redis_conn.xadd = AsyncMock(return_value=b"2-0")
+    redis_conn.xack = AsyncMock(return_value=1)
+    redis_conn.hset = AsyncMock(return_value=1)
+    redis_conn.expire = AsyncMock(return_value=1)
 
-    assert envelope.metadata.get("skills_dirs") == ["*"]
+    shutdown = MagicMock(spec=GracefulShutdown)
+    shutdown.is_stopping.side_effect = [False, False, True]
 
+    portail = Portail.__new__(Portail)
+    portail.stream_in = "relais:messages:incoming"
+    portail.stream_out = "relais:security"
+    portail.group_name = "portail_group"
+    portail.consumer_name = "portail_1"
+    portail._user_registry = UserRegistry(config_path=path)
+    portail._guest_profile = portail._user_registry.guest_profile
+    portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
-@pytest.mark.unit
-def test_enrich_stamps_allowed_mcp_tools_for_admin_role(tmp_path: Path) -> None:
-    """_enrich_envelope stamps allowed_mcp_tools from the role config for known admin users.
+    await portail._process_stream(redis_conn, shutdown=shutdown)
 
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
-    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
-
-    portail._enrich_envelope(envelope)
-
-    assert envelope.metadata.get("allowed_mcp_tools") == ["*"]
-
-
-@pytest.mark.unit
-def test_enrich_stamps_empty_skills_for_user_role(tmp_path: Path) -> None:
-    """_enrich_envelope stamps empty skills_dirs and allowed_mcp_tools for the 'user' role.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
-    envelope = _make_envelope(sender_id="discord:user001", channel="discord")
-
-    portail._enrich_envelope(envelope)
-
-    assert envelope.metadata.get("skills_dirs") == []
-    assert envelope.metadata.get("allowed_mcp_tools") == []
-
-
-@pytest.mark.unit
-def test_enrich_unknown_user_does_not_stamp_skills(tmp_path: Path) -> None:
-    """_enrich_envelope does NOT stamp skills_dirs or allowed_mcp_tools for unknown users.
-
-    Fail-closed: absent metadata fields => no access in Atelier.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    path = _write_users_yaml(tmp_path)
-    portail = _make_portail_with_registry(path)
-    envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
-
-    portail._enrich_envelope(envelope)
-
-    assert "skills_dirs" not in envelope.metadata
-    assert "allowed_mcp_tools" not in envelope.metadata
+    hset_calls = redis_conn.hset.await_args_list
+    assert len(hset_calls) >= 1
+    first_call = hset_calls[0]
+    key_arg = first_call.args[0]
+    assert "relais:active_sessions:" in key_arg
+    mapping = first_call.kwargs.get("mapping", {})
+    assert "last_seen" in mapping
+    assert "channel" in mapping
+    assert "session_id" in mapping

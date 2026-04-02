@@ -6,8 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 # Configure logging to standard output
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
@@ -16,12 +14,11 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
-from common.config_loader import resolve_config_path
 from common.redis_client import RedisClient
 from common.envelope import Envelope
-from common.role_registry import RoleRegistry
 from common.shutdown import GracefulShutdown
-from common.user_registry import UserRegistry
+from common.user_record import UserRecord
+from portail.user_registry import UserRegistry
 
 logger = logging.getLogger("portail")
 
@@ -29,60 +26,24 @@ logger = logging.getLogger("portail")
 class Portail:
     """La brique Le Portail du système RELAIS.
 
-    Responsible for consuming incoming messages from external relays (e.g., Discord),
-    updating session mappings, and forwarding them to La Sentinelle for security validation.
+    Responsible for consuming incoming messages from external relays, enriching
+    envelopes with a single ``user_record`` dict (resolved from portail.yaml),
+    and forwarding them to La Sentinelle for security validation.
+
+    The ``user_record`` dict in ``envelope.metadata`` is the sole carrier of
+    user identity and role data for all downstream bricks.
     """
 
     def __init__(self) -> None:
-        """Initializes Le Portail with default stream and group configurations."""
+        """Initialise Le Portail with Redis stream and group configurations."""
         self.client: RedisClient = RedisClient("portail")
         self.stream_in: str = "relais:messages:incoming"
         self.stream_out: str = "relais:security"
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
         self._user_registry: UserRegistry = UserRegistry()
-        self._role_registry: RoleRegistry = RoleRegistry()
-        self._load_security_config()
-
-    def _load_security_config(self) -> None:
-        """Load security policy settings from config.yaml.
-
-        Reads ``security.unknown_user_policy`` and ``security.guest_profile``
-        from the config cascade.  Falls back to fail-closed defaults
-        (``deny`` / ``fast``) when the config file is absent or the keys
-        are missing.
-
-        Returns: None
-        """
-        try:
-            config_path: Path = resolve_config_path("config.yaml")
-            raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-            security = raw.get("security") or {}
-            policy = str(security.get("unknown_user_policy") or "deny").lower()
-            guest_profile = str(security.get("guest_profile") or "fast")
-        except FileNotFoundError:
-            logger.warning(
-                "Portail: config.yaml not found — defaulting unknown_user_policy=deny"
-            )
-            policy = "deny"
-            guest_profile = "fast"
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Portail: failed to parse config.yaml (%s) — defaulting unknown_user_policy=deny",
-                exc,
-            )
-            policy = "deny"
-            guest_profile = "fast"
-
-        if policy not in ("deny", "guest", "pending"):
-            logger.warning(
-                "Portail: unknown unknown_user_policy=%r — falling back to 'deny'",
-                policy,
-            )
-            policy = "deny"
-
-        self._unknown_user_policy: str = policy
-        self._guest_profile: str = guest_profile
+        self._guest_profile: str = self._user_registry.guest_profile
+        self._unknown_user_policy: str = self._user_registry.unknown_user_policy
         logger.info(
             "Portail: unknown_user_policy=%s, guest_profile=%s",
             self._unknown_user_policy,
@@ -90,98 +51,59 @@ class Portail:
         )
 
     def _enrich_envelope(self, envelope: "Envelope") -> None:
-        """Stamp user identity and LLM profile metadata onto the envelope.
+        """Stamp a single ``user_record`` dict into envelope.metadata.
 
-        Resolves the sender against the UserRegistry and writes known fields
-        into ``envelope.metadata`` in place.  Unknown users are silently
-        skipped — their identity fields are simply absent, which lets the
-        Sentinelle decide what to do.
+        Resolves the sender against the UserRegistry.  When found, writes the
+        fully-merged ``UserRecord.to_dict()`` under ``envelope.metadata["user_record"]``.
+        Unknown users produce no ``user_record`` key — the caller
+        (``_process_stream``) handles them via the configured policy.
 
-        Fields always written:
-            - ``llm_profile``: resolved from ``channel_profile`` metadata key
-              (stamped upstream by the Aiguilleur) or ``"default"`` when absent
-              or ``None``.
+        The ``llm_profile`` field inside ``user_record`` is resolved as:
+        ``channel_profile`` (Aiguilleur) > user/role level > ``"default"``.
 
-        Fields written only for known users:
-            - ``user_role``: the user's role (e.g. ``"admin"``, ``"user"``).
-            - ``display_name``: human-readable name.
-            - ``custom_prompt_path``: per-user prompt override path, only
-              written when the registry value is not ``None``.
-            - ``skills_dirs``: list of skill directory names the role allows
-              (``["*"]`` = unrestricted, ``[]`` = no skills).
-            - ``allowed_mcp_tools``: list of permitted MCP tool identifiers
-              (``["*"]`` = unrestricted, ``[]`` = no MCP tools).
+        Legacy top-level keys (``user_role``, ``display_name``, ``skills_dirs``,
+        ``custom_prompt_path``, ``allowed_mcp_tools``) are NOT written.
 
         Args:
             envelope: The incoming envelope to enrich in place.
         """
-        # llm_profile resolution: channel_profile > "default"
-        channel_profile = envelope.metadata.get("channel_profile")
-        envelope.metadata["llm_profile"] = channel_profile if channel_profile else "default"
-
-        # Identity enrichment — skip silently when user not found
-        record = self._user_registry.resolve_user(
+        record : UserRecord | None = self._user_registry.resolve_user(
             sender_id=envelope.sender_id,
             channel=envelope.channel,
         )
         if record is None:
             return
 
-        envelope.metadata["user_role"] = record.role
-        envelope.metadata["display_name"] = record.display_name
-        # Skill and MCP tool injection — stamp from role config (fail-closed:
-        # unknown role → empty lists, never absent keys).
-        role_cfg = self._role_registry.get_role(record.role)
-        if role_cfg is not None:
-            envelope.metadata["skills_dirs"] = list(role_cfg.skills_dirs)
-            envelope.metadata["allowed_mcp_tools"] = list(role_cfg.allowed_mcp_tools)
-        else:
-            logger.warning("Unknown role %r for user %s — stamping empty access", record.role, record.display_name)
-            envelope.metadata["skills_dirs"] = []
-            envelope.metadata["allowed_mcp_tools"] = []
+        # llm_profile: channel_profile (Aiguilleur) overrides user/role value
+        channel_profile: str | None = envelope.metadata.get("channel_profile")
+        effective_llm_profile: str = (
+            channel_profile if channel_profile else record.llm_profile
+        )
 
-        # custom_prompt_path: user-level override takes priority; fallback to role-level prompt
-        if record.custom_prompt_path is not None:
-            envelope.metadata["custom_prompt_path"] = record.custom_prompt_path
-        elif role_cfg is not None and role_cfg.prompt_path is not None:
-            envelope.metadata["custom_prompt_path"] = role_cfg.prompt_path
+        # Build the user_record dict from the resolved record, overriding
+        # llm_profile with the channel_profile when present.
+        user_record_dict = record.to_dict()
+        user_record_dict["llm_profile"] = effective_llm_profile
+
+        envelope.metadata["user_record"] = user_record_dict
 
     def _apply_guest_stamps(self, envelope: "Envelope") -> None:
-        """Stamp synthetic guest identity onto an envelope for an unknown user.
+        """Stamp a synthetic guest ``user_record`` dict onto an unknown-user envelope.
 
         Applied when ``unknown_user_policy=guest`` and ``resolve_user()``
-        returned ``None``.  The stamped fields mirror those written by
-        ``_enrich_envelope`` for known users so that downstream bricks
-        receive a consistent envelope regardless of user origin.
-
-        Fields written:
-            - ``user_role``: ``"guest"``
-            - ``display_name``: ``"Guest"``
-            - ``llm_profile``: value of ``self._guest_profile`` (overrides any
-              previously stamped ``llm_profile``).
-            - ``skills_dirs``: resolved from the ``"guest"`` role config, or
-              ``[]`` when the role is absent (fail-closed).
-            - ``allowed_mcp_tools``: same as above.
+        returned ``None``.  Uses ``UserRegistry.build_guest_record()`` so that
+        role-level fields (actions, skills_dirs, etc.) are taken from the
+        ``guest`` role config.
 
         Args:
             envelope: The incoming envelope to enrich in place.
         """
-        envelope.metadata["user_role"] = "guest"
-        envelope.metadata["display_name"] = "Guest"
-        envelope.metadata["llm_profile"] = getattr(self, "_guest_profile", "fast")
+        guest_llm_profile = self._guest_profile
+        channel_profile: str | None = envelope.metadata.get("channel_profile")
+        effective_llm_profile: str = channel_profile if channel_profile else guest_llm_profile
 
-        role_cfg = self._role_registry.get_role("guest")
-        if role_cfg is not None:
-            envelope.metadata["skills_dirs"] = list(role_cfg.skills_dirs)
-            envelope.metadata["allowed_mcp_tools"] = list(role_cfg.allowed_mcp_tools)
-            if role_cfg.prompt_path is not None:
-                envelope.metadata["custom_prompt_path"] = role_cfg.prompt_path
-        else:
-            logger.warning(
-                "guest role not found in registry — stamping empty access (fail-closed)"
-            )
-            envelope.metadata["skills_dirs"] = []
-            envelope.metadata["allowed_mcp_tools"] = []
+        guest_record = self._user_registry.build_guest_record(llm_profile=effective_llm_profile)
+        envelope.metadata["user_record"] = guest_record.to_dict()
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: "Envelope") -> None:
         """Track active sessions per user for the Crieur (push notifications).
@@ -196,8 +118,7 @@ class Portail:
             - ``last_seen``: Current epoch timestamp as a float string.
             - ``channel``: The originating channel (e.g. "discord").
             - ``session_id``: The envelope session identifier.
-            - ``display_name``: Present only when ``envelope.metadata`` contains
-              a non-empty ``display_name`` value.
+            - ``display_name``: Present only when available in ``user_record``.
 
         Args:
             redis_conn: Active async Redis connection.
@@ -210,7 +131,8 @@ class Portail:
             "session_id": envelope.session_id,
         }
 
-        display_name: str = envelope.metadata.get("display_name", "")
+        user_record_dict: dict[str, Any] = envelope.metadata.get("user_record") or {}
+        display_name: str = str(user_record_dict.get("display_name") or "")
         if display_name:
             mapping["display_name"] = display_name
 
@@ -225,7 +147,7 @@ class Portail:
             )
 
     async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
-        """Consume incoming messages from Relays and forward to Sentinel.
+        """Consume incoming messages from Relays and forward to Sentinelle.
 
         Exits cleanly when ``shutdown.is_stopping()`` returns True.
 
@@ -273,12 +195,12 @@ class Portail:
                                 f"from {envelope.channel}"
                             )
 
-                            # Enrich envelope with user identity and LLM profile
+                            # Enrich envelope with single user_record dict
                             self._enrich_envelope(envelope)
 
-                            # Apply unknown-user policy when identity could not be resolved
-                            if "user_role" not in envelope.metadata:
-                                policy = getattr(self, "_unknown_user_policy", "deny")
+                            # Apply unknown-user policy when user_record is absent
+                            if "user_record" not in envelope.metadata:
+                                policy = self._unknown_user_policy
                                 if policy == "guest":
                                     self._apply_guest_stamps(envelope)
                                 elif policy == "pending":
@@ -295,14 +217,14 @@ class Portail:
                                             "timestamp": str(envelope.timestamp),
                                         },
                                     )
-                                    continue  # drop — finally:xack s'exécute
+                                    continue  # drop — finally:xack executes
                                 else:
                                     # deny (default) — drop silently
                                     logger.info(
                                         "unknown_user_policy=deny — dropping message from %s",
                                         envelope.sender_id,
                                     )
-                                    continue  # drop — finally:xack s'exécute
+                                    continue  # drop — finally:xack executes
 
                             # Update active session tracking
                             await self._update_active_sessions(redis_conn, envelope)
@@ -343,7 +265,7 @@ class Portail:
                 await asyncio.sleep(1)
 
     async def start(self) -> None:
-        """Starts Le Portail service and its main processing loop.
+        """Start Le Portail service and its main processing loop.
 
         Registers SIGTERM/SIGINT handlers via GracefulShutdown so the process
         exits cleanly when sent a termination signal.

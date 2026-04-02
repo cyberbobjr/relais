@@ -254,7 +254,7 @@ async def test_xack_not_sent_on_generic_exception() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
-    """_handle_message() resolves the LLM profile from envelope.metadata['llm_profile']."""
+    """_handle_message() resolves the LLM profile from user_record.llm_profile in envelope metadata."""
     fast_profile = MagicMock(model="claude-haiku-4-5", max_turns=5)
     default_profile = _default_profile_mock()
     profiles = {"fast": fast_profile, "default": default_profile}
@@ -267,7 +267,7 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
     # Override the stored _profiles to match what the test expects
     atelier._profiles = profiles
 
-    envelope = _make_envelope(metadata={"llm_profile": "fast"})
+    envelope = _make_envelope(metadata={"user_record": {"llm_profile": "fast"}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -880,7 +880,7 @@ async def test_process_stream_passes_user_role_to_assemble_system_prompt() -> No
     included in the assembled system prompt.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(metadata={"user_role": "admin", "llm_profile": "default"})
+    envelope = _make_envelope(metadata={"user_record": {"role": "admin", "llm_profile": "default"}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -1109,11 +1109,11 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
     # Override the skills base dir set at init to point to tmp_path.
     atelier._skills_base_dir = tmp_path
 
-    envelope = _make_envelope(metadata={
+    envelope = _make_envelope(metadata={"user_record": {
         "skills_dirs": ["coding"],
         "allowed_mcp_tools": [],
         "llm_profile": "default",
-    })
+    }})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[

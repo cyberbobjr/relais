@@ -83,7 +83,7 @@ def test_all_layers_assembled_in_order(tmp_path: Path) -> None:
     result = assemble_system_prompt(
         prompts,
         channel="telegram",
-        user_prompt_path=prompts / "users" / "discord_123.md",
+        user_prompt_path="users/discord_123.md",
         user_role="admin",
     )
 
@@ -141,19 +141,62 @@ def test_missing_layer_skipped_silently(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_user_prompt_path_loads_explicit_file(tmp_path: Path) -> None:
-    """user_prompt_path loads the file at the given path (Layer 3).
+def test_user_prompt_path_loads_relative_file(tmp_path: Path) -> None:
+    """user_prompt_path loads a relative path resolved against prompts_dir.
+
+    The path must be relative to prompts_dir; absolute paths are rejected.
 
     Args:
         tmp_path: pytest temporary directory.
     """
     prompts = _make_prompts_dir(tmp_path)
-    user_file = tmp_path / "my_custom_prompt.md"
-    user_file.write_text("USER_PROFILE", encoding="utf-8")
+    _write(prompts / "users" / "discord_123.md", "USER_PROFILE")
 
-    result = assemble_system_prompt(prompts, user_prompt_path=user_file)
+    result = assemble_system_prompt(prompts, user_prompt_path="users/discord_123.md")
 
     assert result == "USER_PROFILE"
+
+
+@pytest.mark.unit
+def test_user_prompt_path_rejects_absolute_path(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """user_prompt_path rejects absolute paths with a warning and skips the layer.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        caplog: pytest log capture fixture.
+    """
+    import logging
+
+    prompts = _make_prompts_dir(tmp_path)
+    absolute_path = tmp_path / "outside_prompts.md"
+    absolute_path.write_text("SHOULD NOT LOAD", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        result = assemble_system_prompt(prompts, user_prompt_path=absolute_path)
+
+    assert result == ""
+    assert any("must be relative" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_user_prompt_path_rejects_traversal(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """user_prompt_path rejects paths that escape prompts_dir via '..'.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        caplog: pytest log capture fixture.
+    """
+    import logging
+
+    prompts = _make_prompts_dir(tmp_path)
+    escape_target = tmp_path / "secret.md"
+    escape_target.write_text("SECRET", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        result = assemble_system_prompt(prompts, user_prompt_path="../secret.md")
+
+    assert result == ""
+    assert any("escapes prompts_dir" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

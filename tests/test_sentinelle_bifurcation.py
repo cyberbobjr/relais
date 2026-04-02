@@ -1,10 +1,11 @@
-"""Tests TDD — Sentinelle command bifurcation (Phase 3 RED).
+"""Tests TDD — Sentinelle command bifurcation with user_record in envelope.
 
 Verifies the new routing logic:
 - Regular messages → relais:tasks (unchanged)
 - Known + authorised commands → relais:commands
 - Unknown commands → inline reply to relais:messages:outgoing:{channel}
 - Known but unauthorised commands → inline reply with permission denied
+- Fail-closed: envelope without user_record → deny
 """
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 import yaml
 
 from common.envelope import Envelope
+from common.user_record import UserRecord
 from sentinelle.acl import ACLManager
 
 
@@ -23,43 +25,80 @@ from sentinelle.acl import ACLManager
 # ---------------------------------------------------------------------------
 
 
-def _make_users_yaml(tmp_path: Path) -> Path:
-    """Write a users.yaml with admin (command wildcard) and user (send only)."""
+def _make_sentinelle_yaml(tmp_path: Path) -> Path:
+    """Write a sentinelle.yaml with allowlist mode (no users, no roles).
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        Path to the written file.
+    """
     content = dedent("""\
         access_control:
           default_mode: allowlist
         groups: []
-        users:
-          usr_admin:
-            display_name: "Admin"
-            role: admin
-            blocked: false
-            identifiers:
-              discord:
-                dm: "admin001"
-          usr_user:
-            display_name: "User"
-            role: user
-            blocked: false
-            identifiers:
-              discord:
-                dm: "user001"
-        roles:
-          admin:
-            actions: ["*"]
-          user:
-            actions: []
     """)
-    p = tmp_path / "users.yaml"
+    p = tmp_path / "sentinelle.yaml"
     p.write_text(content, encoding="utf-8")
     return p
+
+
+def _make_admin_record() -> UserRecord:
+    """Build an admin UserRecord with wildcard actions.
+
+    Returns:
+        Fully configured admin UserRecord.
+    """
+    return UserRecord(
+        display_name="Admin",
+        role="admin",
+        blocked=False,
+        actions=["*"],
+        skills_dirs=["*"],
+        allowed_mcp_tools=["*"],
+        llm_profile="default",
+        prompt_path=None,
+    )
+
+
+def _make_user_record() -> UserRecord:
+    """Build a regular user UserRecord with no commands allowed.
+
+    Returns:
+        Configured user UserRecord.
+    """
+    return UserRecord(
+        display_name="User",
+        role="user",
+        blocked=False,
+        actions=[],
+        skills_dirs=[],
+        allowed_mcp_tools=[],
+        llm_profile="default",
+        prompt_path=None,
+    )
 
 
 def _make_envelope(
     content: str,
     sender_id: str = "discord:admin001",
     channel: str = "discord",
+    user_record: UserRecord | None = None,
 ) -> Envelope:
+    """Build a test Envelope with user_record pre-stamped in metadata.
+
+    Args:
+        content: Message content (may start with '/' for commands).
+        sender_id: Originating user identifier.
+        channel: Originating channel.
+        user_record: Pre-stamped UserRecord. Defaults to admin record.
+
+    Returns:
+        A valid Envelope with user_record in metadata.
+    """
+    if user_record is None:
+        user_record = _make_admin_record()
     return Envelope(
         content=content,
         sender_id=sender_id,
@@ -67,13 +106,20 @@ def _make_envelope(
         session_id="sess-001",
         correlation_id="corr-001",
         timestamp=0.0,
-        metadata={"user_role": "admin"},
+        metadata={"user_record": user_record.to_dict()},
         media_refs=[],
     )
 
 
 def _make_redis(envelope: Envelope) -> AsyncMock:
-    """Return a mock Redis with the envelope pre-loaded in xreadgroup."""
+    """Return a mock Redis with the envelope pre-loaded in xreadgroup.
+
+    Args:
+        envelope: The envelope to return from xreadgroup.
+
+    Returns:
+        Configured AsyncMock Redis client.
+    """
     redis = AsyncMock()
     redis.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
     redis.xreadgroup = AsyncMock(side_effect=[
@@ -86,6 +132,11 @@ def _make_redis(envelope: Envelope) -> AsyncMock:
 
 
 def _shutdown_after_first_batch() -> MagicMock:
+    """Return a GracefulShutdown mock that stops after one batch.
+
+    Returns:
+        Configured GracefulShutdown mock.
+    """
     from common.shutdown import GracefulShutdown
     shutdown = MagicMock(spec=GracefulShutdown)
     shutdown.is_stopping.side_effect = [False, False, True]
@@ -115,7 +166,7 @@ class TestSentinelleNormalMessageRouting:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -136,7 +187,7 @@ class TestSentinelleNormalMessageRouting:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -168,7 +219,7 @@ class TestSentinelleAuthorisedCommandRouting:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -189,7 +240,7 @@ class TestSentinelleAuthorisedCommandRouting:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -210,7 +261,7 @@ class TestSentinelleAuthorisedCommandRouting:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -248,7 +299,7 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -269,7 +320,7 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -291,7 +342,7 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -312,7 +363,7 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -332,15 +383,11 @@ class TestSentinelleUnauthorisedCommandRejection:
     async def test_unauthorised_command_sends_permission_denied_reply(
         self, tmp_path: Path
     ) -> None:
-        """User /clear (no 'command' wildcard) → permission-denied reply."""
+        """User /clear (no actions) → permission-denied reply."""
         from sentinelle.main import Sentinelle
 
-        # User role has only "send", not "command"
-        env = _make_envelope(
-            "/clear",
-            sender_id="discord:user001",
-        )
-        env.metadata["user_role"] = "user"
+        user = _make_user_record()
+        env = _make_envelope("/clear", sender_id="discord:user001", user_record=user)
         redis = _make_redis(env)
 
         sentinel = Sentinelle.__new__(Sentinelle)
@@ -349,7 +396,7 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -363,8 +410,8 @@ class TestSentinelleUnauthorisedCommandRejection:
         """Permission-denied reply mentions 'clear' in its content."""
         from sentinelle.main import Sentinelle
 
-        env = _make_envelope("/clear", sender_id="discord:user001")
-        env.metadata["user_role"] = "user"
+        user = _make_user_record()
+        env = _make_envelope("/clear", sender_id="discord:user001", user_record=user)
         redis = _make_redis(env)
 
         sentinel = Sentinelle.__new__(Sentinelle)
@@ -373,7 +420,7 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -388,8 +435,8 @@ class TestSentinelleUnauthorisedCommandRejection:
         """Unauthorised known command must NOT be forwarded to relais:commands."""
         from sentinelle.main import Sentinelle
 
-        env = _make_envelope("/clear", sender_id="discord:user001")
-        env.metadata["user_role"] = "user"
+        user = _make_user_record()
+        env = _make_envelope("/clear", sender_id="discord:user001", user_record=user)
         redis = _make_redis(env)
 
         sentinel = Sentinelle.__new__(Sentinelle)
@@ -398,7 +445,7 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 
@@ -410,8 +457,8 @@ class TestSentinelleUnauthorisedCommandRejection:
         """Unauthorised command message is ACKed after reply is sent."""
         from sentinelle.main import Sentinelle
 
-        env = _make_envelope("/clear", sender_id="discord:user001")
-        env.metadata["user_role"] = "user"
+        user = _make_user_record()
+        env = _make_envelope("/clear", sender_id="discord:user001", user_record=user)
         redis = _make_redis(env)
 
         sentinel = Sentinelle.__new__(Sentinelle)
@@ -420,7 +467,87 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.stream_commands = "relais:commands"
         sentinel.group_name = "sentinelle_group"
         sentinel.consumer_name = "sentinelle_1"
-        sentinel._acl = ACLManager(config_path=_make_users_yaml(tmp_path))
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
+
+        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+
+        redis.xack.assert_awaited_once_with("relais:security", "sentinelle_group", b"1-0")
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: no user_record in envelope → deny
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestSentinelleFailClosed:
+    """Envelope without user_record is denied (fail-closed)."""
+
+    async def test_missing_user_record_drops_message(self, tmp_path: Path) -> None:
+        """Envelope without user_record key is dropped (not forwarded).
+
+        Sentinelle must deny messages that Portail failed to enrich.
+
+        Args:
+            tmp_path: pytest built-in temporary directory.
+        """
+        from sentinelle.main import Sentinelle
+
+        # Envelope with NO user_record in metadata
+        env = Envelope(
+            content="bonjour",
+            sender_id="discord:admin001",
+            channel="discord",
+            session_id="sess-001",
+            correlation_id="corr-001",
+            timestamp=0.0,
+            metadata={},
+            media_refs=[],
+        )
+        redis = _make_redis(env)
+
+        sentinel = Sentinelle.__new__(Sentinelle)
+        sentinel.stream_in = "relais:security"
+        sentinel.stream_out = "relais:tasks"
+        sentinel.stream_commands = "relais:commands"
+        sentinel.group_name = "sentinelle_group"
+        sentinel.consumer_name = "sentinelle_1"
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
+
+        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+
+        tasks_calls = [c for c in redis.xadd.await_args_list
+                       if c.args[0] == "relais:tasks"]
+        assert len(tasks_calls) == 0, "missing user_record must deny the message"
+
+    async def test_missing_user_record_still_acked(self, tmp_path: Path) -> None:
+        """Envelope without user_record is ACKed (not left in PEL).
+
+        Args:
+            tmp_path: pytest built-in temporary directory.
+        """
+        from sentinelle.main import Sentinelle
+
+        env = Envelope(
+            content="bonjour",
+            sender_id="discord:admin001",
+            channel="discord",
+            session_id="sess-001",
+            correlation_id="corr-001",
+            timestamp=0.0,
+            metadata={},
+            media_refs=[],
+        )
+        redis = _make_redis(env)
+
+        sentinel = Sentinelle.__new__(Sentinelle)
+        sentinel.stream_in = "relais:security"
+        sentinel.stream_out = "relais:tasks"
+        sentinel.stream_commands = "relais:commands"
+        sentinel.group_name = "sentinelle_group"
+        sentinel.consumer_name = "sentinelle_1"
+        sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
         await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
 

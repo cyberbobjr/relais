@@ -151,8 +151,9 @@ class Atelier:
                 envelope.sender_id,
             )
 
-            # 1. Resolve LLM profile
-            profile_name = envelope.metadata.get("llm_profile", "default")
+            # 1. Resolve LLM profile — read from user_record dict stamped by Portail
+            ur: dict = envelope.metadata.get("user_record") or {}
+            profile_name = ur.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)
 
             # 2. Request context from Souvenir
@@ -162,8 +163,8 @@ class Atelier:
             soul_prompt = assemble_system_prompt(
                 prompts_dir=_PROMPTS_DIR,
                 channel=envelope.channel,
-                user_prompt_path=envelope.metadata.get("custom_prompt_path"),
-                user_role=envelope.metadata.get("user_role"),
+                user_prompt_path=ur.get("prompt_path"),
+                user_role=ur.get("role"),
             )
 
             # 4. Select MCP servers for this profile.
@@ -180,13 +181,13 @@ class Atelier:
             stream_pub: StreamPublisher | None = None
             stream_callback = None
 
-            # 5a. Resolve per-user skills and MCP tool policy from envelope metadata
-            # stamped by Portail from RoleRegistry.
+            # 5a. Resolve per-user skills and MCP tool policy from user_record
+            # dict stamped by Portail (consolidated identity envelope).
             skills = self._tool_policy.resolve_skills(
-                envelope.metadata.get("skills_dirs")
+                ur.get("skills_dirs")
             )
             mcp_patterns = self._tool_policy.parse_mcp_patterns(
-                envelope.metadata.get("allowed_mcp_tools")
+                ur.get("allowed_mcp_tools")
             )
 
             session_manager = McpSessionManager(profile, mcp_servers)
@@ -195,7 +196,7 @@ class Atelier:
                     await session_manager.start_all(stack)
                     mcp_tools = self._tool_policy.filter_mcp_tools(
                         await make_mcp_tools(session_manager),
-                        envelope.metadata.get("allowed_mcp_tools"),
+                        ur.get("allowed_mcp_tools"),
                     )
                 else:
                     mcp_tools = []

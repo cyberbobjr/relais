@@ -1,4 +1,14 @@
-"""ACL manager for La Sentinelle — context-aware access control from users.yaml."""
+"""ACL manager for La Sentinelle — context-aware access control from sentinelle.yaml.
+
+The ACLManager no longer resolves user identity internally. Instead, callers
+(Sentinelle._process_stream) pass a ``user_record`` hydrated from
+``envelope.metadata["user_record"]`` — populated upstream by Le Portail.
+
+This enforces single-responsibility:
+- Le Portail: user identity, role merging, guest policy → stamps ``user_record``
+- La Sentinelle / ACLManager: access-control mode (allowlist/blocklist),
+  group authorization, blocked check, command action check
+"""
 
 from __future__ import annotations
 
@@ -11,100 +21,48 @@ from typing import Any
 import yaml
 
 from common.config_loader import resolve_config_path
-from common.user_registry import UserRecord, UserRegistry
+from common.user_record import UserRecord
 
 logger = logging.getLogger("sentinelle.acl")
 
-_VALID_UNKNOWN_USER_POLICIES: frozenset[str] = frozenset({"deny", "guest", "pending"})
-
 
 class ACLManager:
-    """Loads users.yaml and verifies context-aware access rights.
+    """Loads sentinelle.yaml and verifies context-aware access rights.
 
     Falls back to permissive mode (allow all) when no config file is found,
     logging a WARNING to alert operators.
 
-    Identity is resolved via a ``(channel, context, raw_id)`` tuple. *context*
-    is the access point within a channel (e.g. ``"dm"`` vs ``"server"`` for
-    Discord). Group access (WhatsApp/Telegram) is resolved by ``scope_id``
-    (the group_id), not by the individual sender.
-
     Two global ACL modes:
 
-    - ``"allowlist"`` (default): only explicitly declared, non-blocked users/
-      groups are admitted.  Unknown senders are handled by
-      ``unknown_user_policy``.
-    - ``"blocklist"``: everybody is admitted except explicitly blocked users/
-      groups.  Unknown senders are admitted silently.
+    - ``"allowlist"`` (default): envelopes without a valid ``user_record``
+      are denied.  Group authorization uses the ``groups`` config.
+    - ``"blocklist"``: admits all envelopes unless the ``user_record`` is
+      explicitly blocked.
 
     The mode can be overridden per channel in ``access_control.channels``.
 
-    The ``unknown_user_policy`` parameter controls what happens when a sender
-    is not listed in users.yaml (allowlist mode only):
-
-    - ``"deny"`` (default): reject the message, return False.
-    - ``"guest"``: allow the message using ``guest_profile``; no memory, no tools.
-    - ``"pending"``: reject and publish a notification to
-      ``relais:admin:pending_users`` via :meth:`notify_pending`.
+    ``user_record`` is passed in by the caller (Sentinelle) rather than
+    resolved internally.  When ``user_record=None`` in allowlist mode, the
+    call returns ``False`` (fail-closed).
 
     Args:
-        config_path: Explicit path to users.yaml. When None, falls back to
-            ``~/.relais/config/users.yaml`` then ``config/users.yaml.default``.
-        unknown_user_policy: One of ``"deny"``, ``"guest"``, or ``"pending"``.
-            Defaults to ``"deny"``.
-        guest_profile: LLM profile name assigned to guest users. Only used
-            when ``unknown_user_policy`` is ``"guest"``. Defaults to ``"fast"``.
-
-    Raises:
-        ValueError: ``unknown_user_policy`` is not one of the accepted values.
+        config_path: Explicit path to sentinelle.yaml.  When ``None``, the
+            standard config-cascade is tried
+            (``sentinelle.yaml`` → ``sentinelle.yaml.default``).
     """
 
     def __init__(
         self,
         config_path: Path | None = None,
-        unknown_user_policy: str = "deny",
-        guest_profile: str = "fast",
-        user_registry: UserRegistry | None = None,
     ) -> None:
-        """Initialises ACLManager, validates policy, and loads user configuration.
-
-        User identity resolution is delegated to ``UserRegistry``.  A registry
-        instance is created automatically when ``user_registry`` is not supplied
-        (dependency injection is supported for testing).
+        """Initialise ACLManager and load ACL configuration from sentinelle.yaml.
 
         Args:
-            config_path: Optional explicit path to users.yaml.
-            unknown_user_policy: Policy applied to senders absent from users.yaml.
-            guest_profile: Profile name for guest users (only used with ``"guest"``
-                policy).
-            user_registry: Optional pre-constructed ``UserRegistry`` to delegate
-                sender-identity lookups to.  When ``None`` a new instance is
-                created using the resolved ``config_path``.
-
-        Raises:
-            ValueError: ``unknown_user_policy`` is not ``"deny"``, ``"guest"``,
-                or ``"pending"``.
+            config_path: Optional explicit path to sentinelle.yaml.
         """
-        if unknown_user_policy not in _VALID_UNKNOWN_USER_POLICIES:
-            raise ValueError(
-                f"Invalid unknown_user_policy '{unknown_user_policy}'. "
-                f"Must be one of: {sorted(_VALID_UNKNOWN_USER_POLICIES)}"
-            )
-
-        self._unknown_user_policy: str = unknown_user_policy
-        self._guest_profile: str = guest_profile
         self._config_path: Path | None = self._resolve_path(config_path)
-
-        # User identity lookups are delegated to UserRegistry.
-        self._user_registry: UserRegistry = (
-            user_registry if user_registry is not None
-            else UserRegistry(config_path=config_path)
-        )
-
-        # ACL-only lookup tables populated by _load()
         # (channel, group_id) → group dict
         self._groups: dict[tuple[str, str], dict[str, Any]] = {}
-        self._roles: dict[str, dict[str, Any]] = {}
         self._access_control: dict[str, Any] = {"default_mode": "allowlist"}
         self._permissive: bool = False
         self._load()
@@ -115,8 +73,8 @@ class ACLManager:
 
     @property
     def unknown_user_policy(self) -> str:
-        """The configured policy for unknown senders."""
-        return self._unknown_user_policy
+        """Return 'deny' — kept for interface compatibility with Sentinelle main."""
+        return "deny"
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,40 +87,36 @@ class ACLManager:
         context: str = "dm",
         scope_id: str | None = None,
         action: str | None = None,
+        user_record: UserRecord | None = None,
     ) -> bool:
-        """Checks whether sender_id may send a message or execute a command.
+        """Check whether sender_id may send a message or execute a command.
 
-        For normal messages, call without ``action`` (or ``action=None``): only
-        identity/blocklist/mode checks are performed — the role's ``actions`` list
-        is **not** consulted.
+        The ``user_record`` parameter carries the pre-hydrated user identity
+        stamped by Le Portail into ``envelope.metadata["user_record"]``.
+        When ``user_record`` is ``None`` and the mode is ``"allowlist"``,
+        the call returns ``False`` (fail-closed).
 
-        For slash commands, pass ``action=<command_name>`` (e.g. ``action="clear"``):
-        the role's ``actions`` list is checked.  A role with ``"*"`` in its actions
-        may execute any command; otherwise the command name must appear explicitly.
+        For normal messages (``action=None``), only blocked/mode checks apply.
+
+        For slash commands (``action=<command_name>``), ``user_record.actions``
+        is checked.  A record with ``"*"`` in actions may execute any command;
+        otherwise the command name must appear explicitly.
 
         For group messages (``context="group"``), authorization is based on the
         group identified by ``scope_id``, not the individual sender.
 
-        For unknown senders in allowlist mode, the ``unknown_user_policy`` applies:
-
-        - ``"deny"``: returns False.
-        - ``"guest"``: returns True.
-        - ``"pending"``: returns False; caller must follow up with
-          :meth:`notify_pending`.
-
-        In blocklist mode, unknown senders are admitted unless explicitly blocked.
-        In permissive mode (no users.yaml found), always returns True.
+        In permissive mode (no sentinelle.yaml found), always returns ``True``.
 
         Args:
             sender_id: The sender identifier, e.g. ``"discord:123456789"``.
-                For REST, this is ``"rest:{api_key}"``.
-            channel: The originating channel, e.g. ``"discord"`` or ``"telegram"``.
-            context: Access context within the channel. For Discord: ``"dm"`` or
-                ``"server"``. For WhatsApp/Telegram: ``"dm"`` or ``"group"``.
+            channel: The originating channel, e.g. ``"discord"``.
+            context: Access context within the channel.  ``"dm"`` or ``"group"``.
                 Defaults to ``"dm"``.
             scope_id: Group identifier when ``context`` is ``"group"``.
-            action: Slash command name to authorize (e.g. ``"clear"``), or ``None``
-                for normal message sending.
+            action: Slash command name to authorize (e.g. ``"clear"``), or
+                ``None`` for normal message sending.
+            user_record: Pre-hydrated user record from ``envelope.metadata``.
+                When ``None`` in allowlist mode, the call returns ``False``.
 
         Returns:
             True if the request is authorized, False otherwise.
@@ -175,53 +129,33 @@ class ACLManager:
         if context == "group" and scope_id is not None:
             return self._check_group(channel, scope_id, mode)
 
-        user : UserRecord | None = self._resolve_user(sender_id, channel, context)
-
-        if user is None:
+        if user_record is None:
             if mode == "blocklist":
                 return True
-            return self._apply_unknown_user_policy(sender_id, channel)
+            logger.warning(
+                "ACL deny — no user_record for sender %s on %s (allowlist mode)",
+                sender_id,
+                channel,
+            )
+            return False
 
-        if user.blocked:
+        if user_record.blocked:
             logger.warning("ACL deny — blocked user %s on %s", sender_id, channel)
             return False
 
-        # For normal messages (action=None), identity/blocklist/mode is sufficient.
+        # Normal messages: identity check is sufficient.
         if action is None:
             return True
 
-        role_name: str = user.role
-        role_def: dict[str, Any] = self._roles.get(role_name, {})
-        allowed_actions: list[str] = role_def.get("actions", [])
-
+        # Command authorization: check user_record.actions directly.
+        allowed_actions: list[str] = list(user_record.actions)
         if "*" in allowed_actions or action in allowed_actions:
             return True
 
         logger.debug(
-            "ACL deny — role %s does not allow command /%s", role_name, action
+            "ACL deny — role %s does not allow command /%s", user_record.role, action
         )
         return False
-
-    def get_user_role(self, sender_id: str) -> str:
-        """Returns the role assigned to sender_id, or 'unknown' if not found.
-
-        Args:
-            sender_id: The sender identifier, e.g. ``"discord:123456789"``.
-
-        Returns:
-            Role name string: ``"admin"``, ``"user"``, or ``"unknown"``.
-        """
-        if self._permissive:
-            return "admin"
-
-        # Derive channel from the "channel:raw_id" sender_id format.
-        channel = sender_id.split(":", 1)[0] if ":" in sender_id else ""
-        record: UserRecord | None = self._user_registry.resolve_user(
-            sender_id, channel
-        )
-        if record is None:
-            return "unknown"
-        return record.role or "unknown"
 
     async def notify_pending(
         self,
@@ -229,15 +163,15 @@ class ACLManager:
         sender_id: str,
         channel: str,
     ) -> None:
-        """Publishes an unknown-user notification to relais:admin:pending_users.
+        """Publish an unknown-user notification to relais:admin:pending_users.
 
-        Should be called by Sentinelle after :meth:`is_allowed` returns False
-        for a sender under the ``"pending"`` policy.
+        Kept for interface compatibility.  Should be called by Sentinelle after
+        :meth:`is_allowed` returns False.
 
         Args:
             redis_conn: Active async Redis connection exposing ``xadd``.
-            sender_id: The sender identifier that was not found in users.yaml.
-            channel: The channel on which the unknown sender sent a message.
+            sender_id: The sender identifier.
+            channel: The channel on which the sender sent a message.
         """
         payload: dict[str, str] = {
             "user_id": sender_id,
@@ -256,15 +190,11 @@ class ACLManager:
         )
 
     def reload(self) -> None:
-        """Reloads users.yaml from disk.
+        """Reload sentinelle.yaml from disk, rebuilding ACL tables.
 
-        Delegates user-index reload to ``UserRegistry`` and reloads its own
-        ACL-specific tables (groups, roles, access_control).
-        Useful for hot-reload triggered by the admin channel.
+        Useful for hot-reload triggered by an admin command.
         """
-        self._user_registry.reload()
         self._groups = {}
-        self._roles = {}
         self._access_control = {"default_mode": "allowlist"}
         self._permissive = False
         self._load()
@@ -274,28 +204,8 @@ class ACLManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _resolve_user(
-        self,
-        sender_id: str,
-        channel: str,
-        context: str = "dm",
-    ) -> UserRecord | None:
-        """Resolves a UserRecord from sender_id, channel, and context.
-
-        Delegates the lookup entirely to ``UserRegistry``.
-
-        Args:
-            sender_id: Full sender identifier (``"discord:123456789"``).
-            channel: The originating channel.
-            context: Access context within the channel.
-
-        Returns:
-            ``UserRecord`` if found, ``None`` otherwise.
-        """
-        return self._user_registry.resolve_user(sender_id, channel, context)
-
     def _check_group(self, channel: str, scope_id: str, mode: str) -> bool:
-        """Evaluates whether a group is authorized.
+        """Evaluate whether a group is authorized.
 
         Args:
             channel: The originating channel.
@@ -321,7 +231,7 @@ class ACLManager:
         return bool(group.get("allowed", True))
 
     def _get_mode(self, channel: str) -> str:
-        """Returns the effective ACL mode for the given channel.
+        """Return the effective ACL mode for the given channel.
 
         Channel-level overrides in ``access_control.channels`` take precedence
         over the global ``default_mode``.
@@ -339,41 +249,8 @@ class ACLManager:
             or self._access_control.get("default_mode", "allowlist")
         )
 
-    def _apply_unknown_user_policy(self, sender_id: str, channel: str) -> bool:
-        """Applies the configured unknown_user_policy for an absent sender.
-
-        Args:
-            sender_id: The sender identifier not found in users.yaml.
-            channel: The originating channel.
-
-        Returns:
-            True when the policy permits the message (``"guest"``),
-            False otherwise (``"deny"`` or ``"pending"``).
-        """
-        if self._unknown_user_policy == "guest":
-            logger.info(
-                "ACL [guest]: unknown user %s on %s allowed with profile '%s'",
-                sender_id,
-                channel,
-                self._guest_profile,
-            )
-            return True
-
-        if self._unknown_user_policy == "pending":
-            logger.warning(
-                "ACL [pending]: unknown user %s on %s — queued for admin review",
-                sender_id,
-                channel,
-            )
-            return False
-
-        logger.warning(
-            "ACL [deny]: unknown user %s on %s — rejected", sender_id, channel
-        )
-        return False
-
     def _resolve_path(self, config_path: Path | None) -> Path | None:
-        """Resolves which config file to use.
+        """Resolve which config file to use.
 
         Args:
             config_path: Caller-supplied path, or None for auto-discovery.
@@ -384,7 +261,7 @@ class ACLManager:
         if config_path is not None:
             return config_path if config_path.exists() else None
 
-        for filename in ("users.yaml", "users.yaml.default"):
+        for filename in ("sentinelle.yaml", "sentinelle.yaml.default"):
             try:
                 return resolve_config_path(filename)
             except FileNotFoundError:
@@ -393,15 +270,14 @@ class ACLManager:
         return None
 
     def _load(self) -> None:
-        """Parses users.yaml and populates ACL-specific lookup tables.
+        """Parse sentinelle.yaml and populate ACL-specific lookup tables.
 
-        Loads ``access_control``, ``roles``, and ``groups`` from the config
-        file.  User-identity indexes are owned by ``UserRegistry``; this method
-        does not touch them.
+        Loads ``access_control`` and ``groups`` from the config file.
+        User identity is NOT loaded here — that is Le Portail's responsibility.
 
         Enters permissive mode when the file cannot be found or parsed.
 
-        Expected users.yaml schema (dict-keyed users):
+        Expected sentinelle.yaml schema:
 
         .. code-block:: yaml
 
@@ -416,16 +292,12 @@ class ACLManager:
                 group_id: "120363@g.us"
                 allowed: true
                 blocked: false
-
-            roles:
-              admin:
-                actions: ["*"]   # wildcard = toutes les commandes autorisées
         """
         if self._config_path is None:
             logger.warning(
-                "ACL: users.yaml not found in any config search path — "
+                "ACL: sentinelle.yaml not found in any config search path — "
                 "running in PERMISSIVE mode (all requests allowed). "
-                "Create %s/config/users.yaml to enable ACL enforcement.",
+                "Create %s/config/sentinelle.yaml to enable ACL enforcement.",
                 "~/.relais",
             )
             self._permissive = True
@@ -444,7 +316,6 @@ class ACLManager:
             return
 
         self._access_control = data.get("access_control") or {"default_mode": "allowlist"}
-        self._roles = data.get("roles") or {}
 
         # Index groups by (channel, group_id)
         for group in data.get("groups") or []:

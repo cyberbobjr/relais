@@ -33,8 +33,8 @@ def _project_file(relative: str) -> Path:
 CONFIG_YAML_DEFAULTS = [
     "config/config.yaml.default",
     "config/profiles.yaml.default",
-    "config/users.yaml.default",
-    "config/reply_policy.yaml.default",
+    "config/portail.yaml.default",
+    "config/sentinelle.yaml.default",
     "config/mcp_servers.yaml.default",
 ]
 

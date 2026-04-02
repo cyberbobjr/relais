@@ -37,10 +37,11 @@ def assemble_system_prompt(
             channels/, and policies/ sub-directories.
         channel: Name of the active channel (e.g. ``"telegram"``). When
             provided the file ``channels/{channel}_default.md`` is loaded.
-        user_prompt_path: Explicit path to a per-user prompt override file,
-            as configured in ``users.yaml`` (``custom_prompt_path`` field).
-            When provided and the file exists, it is loaded as Layer 3.
-            A missing file is logged at WARNING level.
+        user_prompt_path: Relative path to a per-user prompt override file,
+            as configured in ``portail.yaml`` (``prompt_path`` field), relative
+            to *prompts_dir*.  Absolute paths and paths that escape *prompts_dir*
+            are rejected with a WARNING and skipped.  A missing file is logged
+            at WARNING level.
         user_role: Role name of the sender (e.g. ``"admin"``).  When provided
             the file ``roles/{user_role}.md`` is loaded.
 
@@ -59,9 +60,17 @@ def assemble_system_prompt(
     if user_role is not None:
         _append_safe(layers, base / "roles", f"{user_role}.md", base)
 
-    # Layer 3 — per-user override (explicit path from users.yaml)
+    # Layer 3 — per-user override (relative path from portail.yaml, must stay within base)
     if user_prompt_path is not None:
-        _append_file(layers, Path(user_prompt_path), warn_if_missing=True)
+        _up = Path(user_prompt_path)
+        if _up.is_absolute():
+            logger.warning("User prompt path must be relative to prompts_dir, skipping: %s", _up)
+        else:
+            candidate = (base / _up).resolve()
+            if not str(candidate).startswith(str(base.resolve())):
+                logger.warning("User prompt path escapes prompts_dir, skipping: %s", candidate)
+            else:
+                _append_file(layers, candidate, warn_if_missing=True)
 
     # Layer 4 — channel formatting
     if channel is not None:

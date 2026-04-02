@@ -16,6 +16,7 @@ from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 from common.command_utils import is_command, extract_command_name, KNOWN_COMMANDS
+from common.user_record import UserRecord
 from sentinelle.acl import ACLManager
 
 logger = logging.getLogger("sentinelle")
@@ -58,19 +59,21 @@ class Sentinelle:
         envelope: Envelope,
         acl_context: str,
         acl_scope: str | None,
+        user_record: UserRecord | None = None,
     ) -> None:
         """Route an authenticated command envelope after ACL identity check.
 
         Unknown commands receive an inline rejection.  Known commands are
         checked against the per-command action in the role's *actions* list
-        (or the "command" wildcard); unauthorised ones get a permission
-        reply, authorised ones are forwarded to ``relais:commands``.
+        (or the wildcard); unauthorised ones get a permission reply, authorised
+        ones are forwarded to ``relais:commands``.
 
         Args:
             redis_conn: Active Redis connection.
             envelope: The command envelope (content starts with '/').
             acl_context: Already-sanitised access context ("dm" or "group").
             acl_scope: Optional scope_id from envelope metadata.
+            user_record: Pre-hydrated UserRecord from envelope metadata.
         """
         cmd_name = extract_command_name(envelope.content)
 
@@ -89,6 +92,7 @@ class Sentinelle:
             context=acl_context,
             scope_id=acl_scope,
             action=cmd_name,
+            user_record=user_record,
         )
         if cmd_authorized:
             await asyncio.gather(
@@ -156,24 +160,33 @@ class Sentinelle:
                                 f"from {envelope.sender_id}"
                             )
 
-                            # ACL check — context-aware, reads access_context/access_scope
-                            # injected by Aiguilleur adapters into the envelope metadata.
-                            # Sanitize: only "dm" and "group" are valid; default to "dm".
+                            # Deserialize user_record from envelope metadata (stamped by Portail).
+                            # Fail-closed: missing user_record → deny (do not forward).
                             _raw_context = envelope.metadata.get("access_context", "dm")
                             acl_context: str = _raw_context if _raw_context in {"dm", "group"} else "dm"
                             acl_scope: str | None = envelope.metadata.get("access_scope")
+
+                            _ur_dict: dict | None = envelope.metadata.get("user_record")
+                            user_record: UserRecord | None = (
+                                UserRecord.from_dict(_ur_dict) if _ur_dict else None
+                            )
+
                             is_authorized = self._acl.is_allowed(
                                 envelope.sender_id,
                                 envelope.channel,
                                 context=acl_context,
                                 scope_id=acl_scope,
+                                user_record=user_record,
                             )
 
                             if is_authorized:
                                 envelope.add_trace("sentinelle", "ACL verified")
 
                                 if is_command(envelope.content):
-                                    await self._handle_command(redis_conn, envelope, acl_context, acl_scope)
+                                    await self._handle_command(
+                                        redis_conn, envelope, acl_context, acl_scope,
+                                        user_record=user_record,
+                                    )
                                 else:
                                     await asyncio.gather(
                                         redis_conn.xadd(self.stream_out, {"payload": envelope.to_json()}),
@@ -190,10 +203,6 @@ class Sentinelle:
                                 logger.warning(
                                     f"Unauthorized message {envelope.correlation_id} dropped."
                                 )
-                                if self._acl.unknown_user_policy == "pending":
-                                    await self._acl.notify_pending(
-                                        redis_conn, envelope.sender_id, envelope.channel
-                                    )
                                 await redis_conn.xadd("relais:logs", {
                                     "level": "WARN",
                                     "brick": "sentinelle",

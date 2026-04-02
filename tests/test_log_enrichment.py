@@ -16,8 +16,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch, call
 import pytest
 
 from common.envelope import Envelope
-from common.user_registry import UserRegistry
-from common.role_registry import RoleRegistry
+from portail.user_registry import UserRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +87,7 @@ async def test_portail_xadd_includes_correlation_id(tmp_path: Path) -> None:
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
-    portail._role_registry = RoleRegistry()
+
     portail._unknown_user_policy = "guest"
     portail._guest_profile = "fast"
 
@@ -132,7 +131,7 @@ async def test_portail_xadd_includes_sender_id(tmp_path: Path) -> None:
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
     portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
-    portail._role_registry = RoleRegistry()
+
     portail._unknown_user_policy = "guest"
     portail._guest_profile = "fast"
 

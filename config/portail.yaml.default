@@ -1,0 +1,104 @@
+# Registry des utilisateurs RELAIS — chargé par le Portail.
+# Copié dans ~/.relais/config/portail.yaml au premier lancement.
+#
+# Ce fichier contient : utilisateurs, rôles, et politique inconnue.
+# La Sentinelle lit sentinelle.yaml (access_control + groups seulement).
+#
+# ── Politique utilisateur inconnu ────────────────────────────────────────────
+# deny    : rejeter le message (défaut, plus sécurisé)
+# guest   : accepter avec le rôle guest et le profil guest_profile
+# pending : rejeter et publier dans relais:admin:pending_users pour révision
+unknown_user_policy: deny
+
+# Profil LLM attribué aux utilisateurs guest (utilisé seulement si
+# unknown_user_policy=guest).
+guest_profile: fast
+
+# ── Utilisateurs ──────────────────────────────────────────────────────────────
+users:
+
+  # Compte système interne — utilisé par les briques pour s'identifier
+  usr_system:
+    display_name: "Système RELAIS"
+    role: admin
+    blocked: false
+    notes: "Compte interne — ne pas supprimer"
+
+  # Propriétaire principal — accès complet
+  usr_admin:
+    display_name: "Administrateur"
+    role: admin
+    blocked: false
+    prompt_path: null   # optionnel : chemin vers un prompt utilisateur personnalisé
+    # Identifiants par canal et contexte d'accès.
+    # context "dm"     → message privé direct
+    # context "server" → mention dans un serveur Discord
+    # Pour les groupes WhatsApp/Telegram, voir sentinelle.yaml section groups.
+    # Pour REST, les clés API sont rattachées à ce compte.
+    identifiers:
+      discord:
+        dm: null        # ID Discord numérique, ex: "123456789012345678"
+        server: null    # même ID ou null pour interdire les mentions serveur
+      telegram:
+        dm: null        # ID Telegram numérique
+      whatsapp:
+        dm: null        # Numéro international, ex: "+33600000000"
+      rest:
+        api_keys: []    # Liste de clés API rattachées à ce compte
+    notes: "Compte administrateur principal"
+
+  # Exemple d'utilisateur standard — à personnaliser ou supprimer
+  usr_exemple:
+    display_name: "Utilisateur Exemple"
+    role: user
+    blocked: false
+    prompt_path: null   # ex: "users/discord_123456789.md"
+    identifiers:
+      discord:
+        dm: null
+    notes: "Exemple — remplacer ou supprimer"
+
+# ── Rôles ─────────────────────────────────────────────────────────────────────
+# actions : noms des commandes slash autorisées.
+#   ["*"]              → toutes les commandes (wildcard)
+#   ["clear", "help"]  → uniquement /clear et /help
+#   []                 → aucune commande autorisée
+#
+# skills_dirs : répertoires de skills accessibles (relatifs à paths.skills)
+#   null ou []    → aucun skill
+#   ["*"]         → tous les répertoires (accès illimité)
+#   ["dir1", …]   → liste d'autorisations explicites
+#
+# allowed_mcp_tools : outils MCP autorisés
+#   null ou []    → aucun outil MCP
+#   ["*"]         → tous les outils (accès illimité)
+#   ["server__tool", "server__*", …] → liste ou glob
+#
+# llm_profile : profil LLM pour ce rôle (fallback si pas de llm_profile
+#   sur l'utilisateur). null = fallback sur "default".
+#
+# prompt_path : chemin relatif (depuis prompts/) vers un overlay de prompt
+#   pour tous les utilisateurs de ce rôle (fallback si pas de prompt_path
+#   sur l'utilisateur). null = pas d'overlay de rôle.
+#
+roles:
+  admin:
+    actions: ["*"]
+    skills_dirs: ["*"]
+    allowed_mcp_tools: ["*"]
+    llm_profile: null
+    prompt_path: null
+  user:
+    actions: []
+    skills_dirs: []
+    allowed_mcp_tools: []
+    llm_profile: null
+    prompt_path: null
+  guest:
+    # Rôle attribué aux utilisateurs inconnus si unknown_user_policy=guest
+    # [] = aucune commande slash autorisée pour les invités
+    actions: []
+    skills_dirs: []
+    allowed_mcp_tools: []
+    llm_profile: null
+    prompt_path: null

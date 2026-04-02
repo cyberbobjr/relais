@@ -158,7 +158,7 @@ async def test_update_active_sessions_stores_required_fields() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_update_active_sessions_stores_display_name_from_metadata() -> None:
-    """When metadata contains display_name, it is persisted in the hash.
+    """When metadata contains display_name inside user_record, it is persisted in the hash.
 
     This allows the Crieur to personalise push notifications without an
     extra lookup.
@@ -166,7 +166,7 @@ async def test_update_active_sessions_stores_display_name_from_metadata() -> Non
     portail = _make_portail()
     envelope = _make_envelope(
         sender_id="discord:777",
-        metadata={"display_name": "Alice"},
+        metadata={"user_record": {"display_name": "Alice"}},
     )
     redis_conn = AsyncMock()
     redis_conn.hset = AsyncMock()
