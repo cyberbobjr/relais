@@ -1,4 +1,4 @@
-"""Tests for portail.main.Portail — enrichment, DND, command drop, session tracking.
+"""Tests for portail.main.Portail — enrichment and session tracking.
 
 TDD — tests written BEFORE implementation changes (RED phase for new behaviour).
 These tests verify the _enrich_envelope method and its integration in _process_stream.
@@ -70,11 +70,11 @@ _USERS_YAML = dedent("""\
             dm: "user001"
     roles:
       admin:
-        actions: ["send", "admin"]
+        actions: ["*"]
         skills_dirs: ["*"]
         allowed_mcp_tools: ["*"]
       user:
-        actions: ["send"]
+        actions: []
         skills_dirs: []
         allowed_mcp_tools: []
 """)
@@ -114,8 +114,6 @@ def _make_portail_with_registry(users_yaml_path: Path | None = None):
         portail.stream_out = "relais:security"
         portail.group_name = "portail_group"
         portail.consumer_name = "portail_1"
-        portail._dnd_cached = False
-        portail._dnd_cache_at = 0.0
 
         if users_yaml_path is not None:
             portail._user_registry = UserRegistry(config_path=users_yaml_path)
@@ -344,7 +342,7 @@ async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) 
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
         [],
     ])
-    redis_conn.get = AsyncMock(return_value=None)   # DND off
+    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
@@ -378,106 +376,6 @@ async def test_process_stream_enriches_and_forwards_to_security(tmp_path: Path) 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_process_stream_drops_dnd_message(tmp_path: Path) -> None:
-    """DND mode: message is not forwarded to relais:security.
-
-    The message must be dropped (and ACKed) when DND is active.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
-
-    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
-    payload = envelope.to_json()
-
-    redis_conn = AsyncMock()
-    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
-    redis_conn.xreadgroup = AsyncMock(side_effect=[
-        [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
-    ])
-    redis_conn.get = AsyncMock(return_value=b"1")   # DND active
-    redis_conn.xadd = AsyncMock(return_value=b"2-0")
-    redis_conn.xack = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
-
-    portail = Portail.__new__(Portail)
-    portail.stream_in = "relais:messages:incoming"
-    portail.stream_out = "relais:security"
-    portail.group_name = "portail_group"
-    portail.consumer_name = "portail_1"
-    portail._dnd_cached = None
-    portail._dnd_cache_at = 0.0
-    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
-
-    security_calls = [
-        c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == "relais:security"
-    ]
-    assert len(security_calls) == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_process_stream_drops_command_message(tmp_path: Path) -> None:
-    """Command messages (/clear etc.) are not forwarded to relais:security.
-
-    Commands are delegated to Commandant and must be dropped by Portail.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
-
-    envelope = _make_envelope(
-        content="/clear",
-        sender_id="discord:admin001",
-        channel="discord",
-    )
-    payload = envelope.to_json()
-
-    redis_conn = AsyncMock()
-    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
-    redis_conn.xreadgroup = AsyncMock(side_effect=[
-        [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
-    ])
-    redis_conn.get = AsyncMock(return_value=None)   # DND off
-    redis_conn.xadd = AsyncMock(return_value=b"2-0")
-    redis_conn.xack = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
-
-    portail = Portail.__new__(Portail)
-    portail.stream_in = "relais:messages:incoming"
-    portail.stream_out = "relais:security"
-    portail.group_name = "portail_group"
-    portail.consumer_name = "portail_1"
-    portail._dnd_cached = None
-    portail._dnd_cache_at = 0.0
-    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
-
-    security_calls = [
-        c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == "relais:security"
-    ]
-    assert len(security_calls) == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
 async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> None:
     """_process_stream calls _update_active_sessions (not the old _update_session).
 
@@ -501,7 +399,7 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
         [],
     ])
-    redis_conn.get = AsyncMock(return_value=None)   # DND off
+    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
@@ -536,52 +434,6 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_process_stream_acks_every_message_on_dnd_drop(tmp_path: Path) -> None:
-    """Every consumed message is ACKed regardless of processing outcome.
-
-    XACK must be called in the finally block even for DND drops.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    from portail.main import Portail
-    from common.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
-
-    envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
-    payload = envelope.to_json()
-
-    redis_conn = AsyncMock()
-    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
-    redis_conn.xreadgroup = AsyncMock(side_effect=[
-        [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
-    ])
-    redis_conn.get = AsyncMock(return_value=b"1")   # DND active → drop
-    redis_conn.xadd = AsyncMock(return_value=b"2-0")
-    redis_conn.xack = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
-
-    portail = Portail.__new__(Portail)
-    portail.stream_in = "relais:messages:incoming"
-    portail.stream_out = "relais:security"
-    portail.group_name = "portail_group"
-    portail.consumer_name = "portail_1"
-    portail._dnd_cached = None
-    portail._dnd_cache_at = 0.0
-    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
-
-    redis_conn.xack.assert_awaited_once_with(
-        "relais:messages:incoming", "portail_group", b"1-0"
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
 async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path) -> None:
     """Unknown users are dropped when unknown_user_policy='deny' (default).
 
@@ -606,7 +458,7 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
         [],
     ])
-    redis_conn.get = AsyncMock(return_value=None)   # DND off
+    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)

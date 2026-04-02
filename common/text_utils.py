@@ -5,7 +5,7 @@ def strip_outer_quotes(text: str) -> str:
     """Strip symmetric single or double quotes wrapping the entire string.
 
     Handles the common messaging-client behaviour where users paste slash
-    commands surrounded by quotes (e.g. ``"/clear"`` or ``'/dnd'``).
+    commands surrounded by quotes (e.g. ``"/clear"`` or ``'/help'``).
     Only outer quotes are removed when they are symmetric and wrap the full
     string (after stripping whitespace).
 

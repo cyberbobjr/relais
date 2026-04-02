@@ -25,12 +25,14 @@ The main pipeline flows through these bricks in order:
 
 2. **Portail** (`portail/`) - Consumer enriching message context
    - Consumes: `relais:messages:incoming`
-   - Validates Envelope format, resolves user from `UserRegistry` (users.yaml), applies reply_policy (DND/vacation/in_meeting)
+   - Validates Envelope format, resolves user from `UserRegistry` (users.yaml), applies reply_policy (vacation/in_meeting)
    - Stamps contextual metadata: `user_role`, `display_name`, `llm_profile` (resolved from `channel_profile`), `custom_prompt_path` (optional)
    - Produces: `relais:security`
 
 3. **Sentinelle** (`sentinelle/`) - Bidirectional security checkpoint
-   - **Incoming**: Consumes `relais:security`, ACL validation (users.yaml), produces `relais:tasks` (or refuses if ACL fails)
+   - **Incoming**: Consumes `relais:security`, ACL validation (users.yaml), then bifurcates:
+     - Slash command (`/cmd`): checks KNOWN_COMMANDS + command-level ACL (`action=cmd_name`) → routes to `relais:commands` or sends inline rejection reply
+     - Normal message: produces `relais:tasks` (or drops silently if ACL fails)
    - **Outgoing**: Consumes `relais:messages:outgoing_pending` (single shared stream), applies outgoing guardrails, produces `relais:messages:outgoing:{channel}`
 
 4. **Atelier** (`atelier/`) - Transformer executing LLM calls via `deepagents.create_deep_agent()`
@@ -90,7 +92,7 @@ The main pipeline flows through these bricks in order:
 ### Redis Streams & Consumer Groups
 
 - **At-least-once delivery**: Consumer groups with PEL (Pending Entry List) and XACK acknowledgment
-- **Stream naming**: `relais:messages:incoming`, `relais:security`, `relais:tasks`, `relais:messages:outgoing_pending`, `relais:messages:outgoing:{channel}`, `relais:memory:*`
+- **Stream naming**: `relais:messages:incoming`, `relais:security`, `relais:tasks`, `relais:commands`, `relais:messages:outgoing_pending`, `relais:messages:outgoing:{channel}`, `relais:memory:*`
 - **Initialization**: Each brick creates its consumer group on startup (idempotent)
 - **Resilience**: Failed messages left in PEL are automatically re-delivered; poison pills sent to DLQ
 

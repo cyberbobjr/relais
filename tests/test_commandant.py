@@ -1,7 +1,7 @@
 """Tests TDD — Commandant brick.
 
 Tests for commands (parse_command, CommandResult, CommandSpec, COMMAND_REGISTRY,
-handle_clear, handle_dnd, handle_brb, handle_help)
+handle_clear, handle_help)
 and Commandant main consumer loop.
 """
 import json
@@ -26,9 +26,6 @@ def sample_envelope() -> Envelope:
 @pytest.fixture
 def mock_redis() -> AsyncMock:
     redis = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.set = AsyncMock()
-    redis.delete = AsyncMock()
     redis.xadd = AsyncMock()
     redis.xreadgroup = AsyncMock(return_value=[])
     redis.xack = AsyncMock()
@@ -48,22 +45,6 @@ def test_parse_clear_command():
     assert result is not None
     assert result.command == "clear"
     assert result.args == []
-
-
-@pytest.mark.unit
-def test_parse_dnd_command():
-    from commandant.commands import parse_command
-    result = parse_command("/dnd")
-    assert result is not None
-    assert result.command == "dnd"
-
-
-@pytest.mark.unit
-def test_parse_brb_command():
-    from commandant.commands import parse_command
-    result = parse_command("/brb")
-    assert result is not None
-    assert result.command == "brb"
 
 
 @pytest.mark.unit
@@ -182,11 +163,9 @@ def test_parse_command_empty_quotes_returns_none():
 
 @pytest.mark.unit
 def test_command_registry_contains_all_commands():
-    """COMMAND_REGISTRY doit contenir clear, dnd, brb et help."""
+    """COMMAND_REGISTRY doit contenir clear et help."""
     from commandant.commands import COMMAND_REGISTRY
     assert "clear" in COMMAND_REGISTRY
-    assert "dnd" in COMMAND_REGISTRY
-    assert "brb" in COMMAND_REGISTRY
     assert "help" in COMMAND_REGISTRY
 
 
@@ -231,68 +210,6 @@ async def test_handle_clear_does_not_publish_confirmation(mock_redis, sample_env
     expected_stream = f"relais:messages:outgoing:{sample_envelope.channel}"
     calls = [str(c) for c in mock_redis.xadd.call_args_list]
     assert not any(expected_stream in c for c in calls)
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_handle_dnd_sets_redis_key(mock_redis, sample_envelope):
-    """handle_dnd fait SET relais:state:dnd 1 (sans TTL)."""
-    from commandant.commands import handle_dnd
-    await handle_dnd(sample_envelope, mock_redis)
-
-    mock_redis.set.assert_called_once_with("relais:state:dnd", "1")
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_handle_dnd_publishes_confirmation(mock_redis):
-    """handle_dnd publie une confirmation sur le canal."""
-    from commandant.commands import handle_dnd
-    sample_envelope_dnd = Envelope(
-        content="/dnd",
-        sender_id="discord:123456",
-        channel="discord",
-        session_id="session_abc",
-    )
-    await handle_dnd(sample_envelope_dnd, mock_redis)
-
-    expected_stream = "relais:messages:outgoing:discord"
-    calls = [str(c) for c in mock_redis.xadd.call_args_list]
-    assert any(expected_stream in c for c in calls)
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_handle_brb_deletes_redis_key(mock_redis):
-    """handle_brb fait DEL relais:state:dnd."""
-    from commandant.commands import handle_brb
-    sample_envelope_brb = Envelope(
-        content="/brb",
-        sender_id="discord:123456",
-        channel="discord",
-        session_id="session_abc",
-    )
-    await handle_brb(sample_envelope_brb, mock_redis)
-
-    mock_redis.delete.assert_called_once_with("relais:state:dnd")
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_handle_brb_publishes_confirmation(mock_redis):
-    """handle_brb publie une confirmation sur le canal."""
-    from commandant.commands import handle_brb
-    sample_envelope_brb = Envelope(
-        content="/brb",
-        sender_id="discord:123456",
-        channel="discord",
-        session_id="session_abc",
-    )
-    await handle_brb(sample_envelope_brb, mock_redis)
-
-    expected_stream = "relais:messages:outgoing:discord"
-    calls = [str(c) for c in mock_redis.xadd.call_args_list]
-    assert any(expected_stream in c for c in calls)
 
 
 @pytest.mark.asyncio

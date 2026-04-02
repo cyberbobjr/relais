@@ -202,7 +202,7 @@ Voir section 23 pour le détail fonctionnel.
 | 📊 **Le Tableau** | `tableau/` | Admin + Relay | TUI bidirectionnel |
 | 🧵 **Le Tisserand** | `tisserand/` | Interceptor Chain | Extensions in-process |
 | 🔍 **Le Scrutateur** | `scrutateur/` | Pure Observer | Prometheus + Loki + ES |
-| 🎮 **Le Commandant** | `commandant/` | Transformer | Commandes globales hors-LLM (`/clear`, `/dnd`, `/brb`) |
+| 🎮 **Le Commandant** | `commandant/` | Transformer | Commandes globales hors-LLM (`/clear`) |
 
 ---
 
@@ -480,7 +480,7 @@ Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier
 
 ### Rôle
 
-Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` et `RoleRegistry` (users.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`, `skills_dirs`, `allowed_mcp_tools`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (DND, vacation, in_meeting) et route vers La Sentinelle.
+Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` et `RoleRegistry` (users.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`, `skills_dirs`, `allowed_mcp_tools`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (vacation, in_meeting) et route **tout message accepté** vers La Sentinelle — y compris les commandes slash. Le Portail ne filtre pas les commandes et ne gère pas d'état DND.
 
 **`unknown_user_policy`** (champ `config.yaml:security:unknown_user_policy`) :
 - `deny` (défaut) : drop silencieux
@@ -496,10 +496,15 @@ Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserReg
 **Architecture clarifiée :**
 
 1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `users.yaml`, stampe `user_role`, `display_name`, `llm_profile` (résolu depuis `channel_profile` de l'Aiguilleur).
-2. **La Sentinelle** effectue la **sécurité pure** : vérifie l'ACL (users.yaml : `blocked`, `allowed_channels`), applique guardrails (bidirectionnel).
+2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : vérifie l'ACL (users.yaml : `blocked`, `allowed_channels`), bifurque commandes et messages normaux, applique guardrails (bidirectionnel).
 
 > **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
-> Elle valide l'ACL en lecture depuis `users.yaml` et transmet l'enveloppe enrichie inchangée vers `relais:tasks` (flux entrant).
+> En flux entrant, elle valide l'ACL et bifurque :
+> - **Message normal** → publie vers `relais:tasks`
+> - **Commande connue + autorisée** (`action=<cmd>` dans le rôle) → publie vers `relais:commands`
+> - **Commande inconnue** → réponse inline `"Commande inconnue : /xxx"`, ACK sans forward
+> - **Commande non autorisée** → réponse inline `"Vous n'avez pas la permission d'exécuter /xxx"`, ACK sans forward
+>
 > En flux sortant, elle consomme `relais:messages:outgoing_pending`, applique les guardrails sortants, et publie vers `relais:messages:outgoing:{channel}`.
 
 ### Les 3 rôles humains
@@ -558,9 +563,9 @@ users:
 
 roles:
   admin:
-    actions: ["send", "command", "admin"]
+    actions: ["*"]       # "*" = toutes les commandes slash autorisées
   user:
-    actions: ["send"]
+    actions: []          # [] = aucune commande slash autorisée (messages normaux OK via default_mode)
 ```
 
 ### Politique utilisateur inconnu
@@ -824,31 +829,29 @@ L'Archiviste est un observer pur — il consomme sans jamais publier.
 
 ### Rôle
 
-Le Commandant intercepte les messages textuels commençant par `/` avant qu'ils n'atteignent le pipeline LLM. Il exécute l'action demandée immédiatement et répond directement à l'utilisateur sur le canal d'origine. Aucun token LLM n'est consommé.
+Le Commandant exécute les commandes slash autorisées hors-LLM. Il reçoit uniquement les enveloppes pré-filtrées par La Sentinelle : commandes connues **et** autorisées pour le rôle de l'utilisateur. Il exécute l'action demandée immédiatement et répond directement à l'utilisateur sur le canal d'origine. Aucun token LLM n'est consommé.
 
-**Taxonomie :** Transformer — consomme `relais:messages:incoming`, publie vers `relais:messages:outgoing:{channel}` et/ou `relais:memory:request`.
+**Taxonomie :** Transformer — consomme `relais:commands`, publie vers `relais:messages:outgoing:{channel}` et/ou `relais:memory:request`.
 
 ### Architecture
 
 ```
-relais:messages:incoming
-  ├─► [Le Portail]      (portail_group)      — pipeline normal
-  └─► [Le Commandant]   (commandant_group)   — interception des commandes
+relais:security
+  ▼
+SENTINELLE (entrant)
+  ├─► [message normal]          → relais:tasks         (→ Atelier)
+  ├─► [commande connue + ACL OK] → relais:commands     (→ Commandant)
+  ├─► [commande inconnue]       → réponse inline "Commande inconnue : /xxx"
+  └─► [commande non autorisée]  → réponse inline "Vous n'avez pas la permission..."
 ```
 
-Le Commandant possède son propre consumer group sur `relais:messages:incoming`. Pour chaque message lu :
-- Si le contenu commence par `/` → intercepte, traite, ACK, répond sur `outgoing:{channel}`
-- Sinon → ACK immédiatement sans action (le Portail traite de son côté dans son groupe)
-
-Le pipeline normal n'est jamais perturbé : les deux consumer groups sont indépendants.
+Le Commandant consomme `relais:commands` (`commandant_group`). Toutes les enveloppes arrivant ici ont déjà passé l'ACL identité et l'ACL commande. Le Commandant ACK chaque message qu'il dépile, qu'un handler existe ou non.
 
 ### Commandes supportées
 
 | Commande | Description | Portée |
 |---|---|---|
 | `/clear` | Efface l'historique de la session courante | Session courante |
-| `/dnd` | Active le mode "Do Not Disturb" — suspend toutes les réponses LLM | Global (tous canaux) |
-| `/brb` | Désactive le mode DND — reprend le pipeline normal | Global (tous canaux) |
 
 ### Comportement détaillé
 
@@ -861,34 +864,19 @@ Le pipeline normal n'est jamais perturbé : les deux consumer groups sont indép
    - Les `user_facts` sont **conservés**
 3. Le Souvenir répond sur `relais:messages:outgoing:{channel}` : `"✓ Historique de conversation effacé."` (confirmation envoyée par `ClearHandler` après le vrai nettoyage, si `envelope_json` est présent dans la requête)
 
-#### `/dnd`
-
-1. Le Commandant écrit `SET relais:state:dnd 1` dans Redis (sans TTL — persistant jusqu'au `/brb`)
-2. Le Portail consulte cette clé avant tout routage. Si présente : ACK le message sans le transmettre à La Sentinelle
-3. Le Commandant répond : `"Mode silencieux activé. Utilisez /brb pour reprendre."`
-
-#### `/brb`
-
-1. Le Commandant exécute `DEL relais:state:dnd`
-2. Le pipeline reprend normalement dès le message suivant
-3. Le Commandant répond : `"De retour ! Je vous écoute."`
-
 ### Accès Redis requis
 
 | Opération | Stream / Clé |
 |---|---|
-| XREADGROUP (lecture) | `relais:messages:incoming` |
+| XREADGROUP (lecture) | `relais:commands` |
 | XADD (réponse canal) | `relais:messages:outgoing:*` |
 | XADD (effacement mémoire) | `relais:memory:request` |
-| SET / DEL (état DND) | `relais:state:dnd` |
-
-Le Portail doit avoir accès en lecture à `relais:state:dnd` (GET).
 
 ### Extensibilité
 
-Toute nouvelle commande hors-LLM s'ajoute dans Le Commandant sans toucher aux autres briques. Le registre des commandes est un dictionnaire `{"/nom": handler_function}` — ajout en O(1).
+Toute nouvelle commande hors-LLM s'ajoute dans Le Commandant sans toucher aux autres briques. Le registre des commandes est un dictionnaire `{"/nom": handler_function}` — ajout en O(1). Les commandes doivent également être déclarées dans `KNOWN_COMMANDS` (`common/command_utils.py`) pour être reconnues par La Sentinelle.
 
-Les commandes inconnues sont ignorées silencieusement (ACK + pas de réponse) afin de ne pas bloquer les messages légitimes commençant par `/` sur certains canaux (ex: commandes Slack natives).
+La détection et le rejet des commandes inconnues ou non autorisées sont entièrement gérés par La Sentinelle — le Commandant ne reçoit que des commandes valides et autorisées.
 
 ---
 
@@ -1118,15 +1106,6 @@ Voir section 9. Résumé des modes :
 | `manual` | Notification owner uniquement |
 | `auto_immediate` | Réponse JARVIS sans délai |
 | `auto_deferred` | Attente N sec, puis JARVIS |
-
-### Suspension dynamique via commandes
-
-Le mode DND ("Do Not Disturb") peut être activé et désactivé à la volée par l'utilisateur via des commandes textuelles (voir section 24). Lorsque DND est actif, Le Portail supprime silencieusement tous les messages entrants avant tout routage vers La Sentinelle — aucune réponse LLM n'est produite.
-
-| Commande | Effet |
-|---|---|
-| `/dnd` | Active le mode DND global — Le Portail ignore tous les messages |
-| `/brb` | Désactive le mode DND — reprise normale du pipeline |
 
 ---
 

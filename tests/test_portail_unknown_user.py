@@ -167,7 +167,7 @@ def _build_redis_conn(payload: str) -> AsyncMock:
             [],
         ]
     )
-    redis_conn.get = AsyncMock(return_value=None)  # DND off
+    redis_conn.get = AsyncMock(return_value=None)
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)

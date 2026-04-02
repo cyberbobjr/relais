@@ -145,8 +145,12 @@ PIPELINE CORE
 │   ▼
 │ SENTINELLE (consumer — bidirectionnel)
 │ ├─ [ENTRANT] Consomme relais:security
-│ ├─ [ENTRANT] Vérifie ACL (users.yaml)
-│ ├─ [ENTRANT] Publie si accepté
+│ ├─ [ENTRANT] Vérifie ACL identité (users.yaml)
+│ ├─ [ENTRANT] Bifurque :
+│ │   ├─ message normal → relais:tasks
+│ │   ├─ commande connue + ACL OK → relais:commands
+│ │   ├─ commande inconnue → réponse inline "Commande inconnue : /xxx"
+│ │   └─ commande non autorisée → réponse inline "Vous n'avez pas la permission..."
 │   ▼
 │ relais:tasks (security-cleared)
 │   ▼
@@ -632,7 +636,7 @@ Chaque brick a mot de passe séparé (`.env`). Atelier a accès aux streams de s
 ```yaml
 # redis.conf
 user portail +@all ~* >$REDIS_PASS_PORTAIL
-user sentinelle +@all ~relais:security ~relais:tasks ~relais:messages:outgoing_pending ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SENTINELLE
+user sentinelle +@all ~relais:security ~relais:tasks ~relais:commands ~relais:messages:outgoing_pending ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SENTINELLE
 user atelier +@all ~relais:tasks ~relais:messages:outgoing_pending ~relais:messages:streaming:* ~relais:logs >$REDIS_PASS_ATELIER
 user souvenir +@all ~relais:memory:* ~relais:messages:outgoing:* ~relais:logs >$REDIS_PASS_SOUVENIR
 ```
@@ -687,9 +691,9 @@ users:
 
 roles:
   admin:
-    actions: ["send", "command", "admin"]
+    actions: ["*"]       # "*" = toutes les commandes slash autorisées
   user:
-    actions: ["send"]
+    actions: []          # [] = aucune commande slash autorisée (messages normaux OK via default_mode)
 ```
 
 ### Guardrails LLM
@@ -880,11 +884,19 @@ Souvenir consomme deux streams:
 
 ## Le Commandant — Ajouter une commande
 
-Le Commandant intercepte les messages commençant par `/` **avant** qu'ils n'entrent dans le pipeline LLM. Il opère en parallèle du Portail sur le stream `relais:messages:incoming`, via son propre consumer group `commandant_group`.
+Le Commandant exécute les commandes slash hors-LLM pré-validées par La Sentinelle. Il consomme `relais:commands` (`commandant_group`) — toutes les enveloppes arrivant ici ont déjà passé l'ACL identité et l'ACL commande. Le Portail ne filtre plus les commandes.
 
 ### Architecture du registre
 
-Tout — handler, nom, description — vit dans **`commandant/commands.py`** : source unique de vérité. Il n'y a pas de fichier séparé pour les handlers ni de `DISPATCH` dict.
+Deux sources de vérité complémentaires :
+
+- **`common/command_utils.py`** — déclare `KNOWN_COMMANDS` (frozenset) : liste des commandes reconnues par La Sentinelle pour le routage vers `relais:commands`. **À mettre à jour en même temps que `commandant/commands.py`.**
+- **`commandant/commands.py`** — déclare `COMMAND_REGISTRY` (handlers) : tout — handler, nom, description.
+
+```python
+# common/command_utils.py
+KNOWN_COMMANDS: frozenset[str] = frozenset({"clear", "help"})
+```
 
 ```python
 # commandant/commands.py
@@ -897,24 +909,25 @@ class CommandSpec:
 
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
     "clear": CommandSpec(name="clear", description="...", handler=handle_clear),
-    "dnd":   CommandSpec(name="dnd",   description="...", handler=handle_dnd),
-    "brb":   CommandSpec(name="brb",   description="...", handler=handle_brb),
     "help":  CommandSpec(name="help",  description="...", handler=handle_help),
 }
-
-# Dérivé automatiquement — ne pas modifier manuellement
-KNOWN_COMMANDS: frozenset[str] = frozenset(COMMAND_REGISTRY)
 ```
 
 `/help` construit sa réponse en itérant sur `COMMAND_REGISTRY.values()` — il se met à jour automatiquement quand une nouvelle commande est ajoutée.
 
-### Ajouter une commande en 2 étapes
+### Ajouter une commande en 3 étapes
 
-Ajouter une commande ne touche qu'**un seul fichier** : `commandant/commands.py`.
+**Déclarer dans `common/command_utils.py`, implémenter dans `commandant/commands.py`, tester.**
 
 **Exemple: ajouter `/status` qui retourne l'état du pipeline**
 
-#### Étape 1 — Écrire le handler puis l'enregistrer (`commandant/commands.py`)
+#### Étape 1 — Déclarer dans `common/command_utils.py`
+
+```python
+KNOWN_COMMANDS: frozenset[str] = frozenset({"clear", "help", "status"})
+```
+
+#### Étape 2 — Écrire le handler puis l'enregistrer (`commandant/commands.py`)
 
 ```python
 # 1a. Définir le handler (avant COMMAND_REGISTRY dans le fichier)
@@ -935,7 +948,7 @@ async def handle_status(envelope: Envelope, redis_conn: Any) -> None:
     )
 
 
-# 1b. Ajouter l'entrée dans COMMAND_REGISTRY
+# 2b. Ajouter l'entrée dans COMMAND_REGISTRY
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
     # ... entrées existantes ...
     "status": CommandSpec(
@@ -946,20 +959,9 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
 }
 ```
 
-`KNOWN_COMMANDS` se met à jour automatiquement. `/help` liste la commande sans autre modification.
-
-#### Étape 2 — Écrire les tests (`tests/test_commandant.py`)
+#### Étape 3 — Écrire les tests (`tests/test_commandant.py`)
 
 ```python
-@pytest.mark.unit
-def test_parse_status_command():
-    from commandant.commands import parse_command
-    result = parse_command("/status")
-    assert result is not None
-    assert result.command == "status"
-    assert result.args == []
-
-
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_status_publishes_confirmation(mock_redis):
@@ -986,79 +988,12 @@ async def test_handle_status_publishes_confirmation(mock_redis):
 | Utiliser `Envelope.from_parent(envelope, text)` pour la réponse | Préserve `session_id`, `correlation_id`, `channel` |
 | Handler défini **avant** `COMMAND_REGISTRY` dans le fichier | Python évalue les noms au moment de la construction du dict |
 | Actions Redis complexes → déléguer via stream | Ex: `/clear` → `XADD relais:memory:request {action: clear}` (Souvenir traite) |
-| Pas de TTL sur `relais:state:*` | Les états (DND...) doivent survivre aux redémarrages Redis |
+| Déclarer dans `KNOWN_COMMANDS` **avant** tout test | La Sentinelle rejette les commandes absentes de `KNOWN_COMMANDS` |
 
-### Commandes qui ont besoin d'Atelier (LLM)
-
-> **Principe :** Le Commandant est conçu pour les commandes **hors-LLM** (réponse immédiate, état Redis). Si la commande nécessite un appel LLM, le handler peut injecter une enveloppe synthétique directement dans `relais:security` pour court-circuiter le Portail tout en passant par Sentinelle (vérification ACL) puis Atelier.
-
-**Quand utiliser ce pattern :**
-
-- La commande transforme ou prépare un message à soumettre au LLM (ex: `/résume`, `/reformule`)
-- La commande a besoin d'un traitement LLM mais pas de la gestion de session du Portail
-
-**Quand NE PAS utiliser ce pattern :**
-
-- Le message n'a pas besoin d'être une commande `/` — préférer un message normal qui traverse le pipeline complet
-- La commande a besoin de la mise à jour de session (`relais:active_sessions`) — le Portail doit être dans la boucle
-
-**Exemple : `/résume` qui demande à Atelier de résumer la conversation**
-
-```python
-# Dans commandant/commands.py
-
-async def handle_resume(envelope: Envelope, redis_conn: Any) -> None:
-    """Injecte une demande de résumé dans le pipeline LLM.
-
-    Court-circuite le Portail (pas de mise à jour de session) mais passe
-    par Sentinelle (vérification ACL) puis Atelier (exécution LLM).
-
-    Args:
-        envelope: L'enveloppe du message /résume reçu.
-        redis_conn: Connexion Redis async active.
-    """
-    # Construire un message LLM à partir de la commande
-    llm_request = Envelope.from_parent(
-        envelope,
-        "Résume notre conversation en 3 points clés.",
-    )
-    llm_request.add_trace("commandant", "command /resume → injected into pipeline")
-
-    # Publier directement sur relais:security (après Portail, avant Sentinelle)
-    await redis_conn.xadd(
-        "relais:security",
-        {"payload": llm_request.to_json()},
-    )
-    logger.info(
-        "Resume request injected into pipeline for session=%s",
-        envelope.session_id,
-    )
-
-
-COMMAND_REGISTRY: dict[str, CommandSpec] = {
-    # ... entrées existantes ...
-    "resume": CommandSpec(
-        name="resume",
-        description="Demande à l'IA de résumer la conversation en cours.",
-        handler=handle_resume,
-    ),
-}
-```
-
-**Circuit résultant :**
+### Permissions Redis du Commandant
 
 ```
-Discord: "/resume"
-    │
-    ├─► COMMANDANT  → handle_resume() → XADD relais:security ──► SENTINELLE ──► ATELIER
-    │                                                               (ACL check)   (LLM)
-    └─► PORTAIL     → _is_command() → drop (ACK sans forward)
-```
-
-**Important — permissions Redis :** le user `commandant` doit avoir accès à `relais:security` dans `config/redis.conf` :
-
-```
-user commandant on >pass_commandant ~relais:messages:incoming ~relais:messages:outgoing:* ~relais:memory:request ~relais:security ~relais:state:* ~relais:logs +@all
+user commandant on >pass_commandant ~relais:commands ~relais:messages:outgoing:* ~relais:memory:request ~relais:logs +@all
 ```
 
 ### Vérification

@@ -79,48 +79,6 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
     logger.info("Clear request sent for session=%s", envelope.session_id)
 
 
-async def handle_dnd(envelope: Envelope, redis_conn: Any) -> None:
-    """Active le mode DND global en posant la clé relais:state:dnd.
-
-    Pas de TTL : la clé persiste jusqu'à /brb ou suppression manuelle.
-
-    Args:
-        envelope: L'enveloppe du message /dnd reçu.
-        redis_conn: Connexion Redis async active.
-    """
-    await redis_conn.set("relais:state:dnd", "1")
-    logger.info("DND mode activated by sender=%s", envelope.sender_id)
-
-    response = Envelope.from_parent(
-        envelope,
-        "✓ Mode DND activé — je ne répondrai plus jusqu'à /brb.",
-    )
-    await redis_conn.xadd(
-        f"relais:messages:outgoing:{envelope.channel}",
-        {"payload": response.to_json()},
-    )
-
-
-async def handle_brb(envelope: Envelope, redis_conn: Any) -> None:
-    """Désactive le mode DND global en supprimant la clé relais:state:dnd.
-
-    Args:
-        envelope: L'enveloppe du message /brb reçu.
-        redis_conn: Connexion Redis async active.
-    """
-    await redis_conn.delete("relais:state:dnd")
-    logger.info("DND mode deactivated by sender=%s", envelope.sender_id)
-
-    response = Envelope.from_parent(
-        envelope,
-        "✓ Je suis de retour ! Pipeline de réponse réactivé.",
-    )
-    await redis_conn.xadd(
-        f"relais:messages:outgoing:{envelope.channel}",
-        {"payload": response.to_json()},
-    )
-
-
 async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
     """Retourne la liste de toutes les commandes disponibles avec leur description.
 
@@ -152,16 +110,6 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         name="clear",
         description="Efface l'historique de conversation (Redis + SQLite).",
         handler=handle_clear,
-    ),
-    "dnd": CommandSpec(
-        name="dnd",
-        description="Active le mode Ne Pas Déranger — les messages entrants sont ignorés.",
-        handler=handle_dnd,
-    ),
-    "brb": CommandSpec(
-        name="brb",
-        description="Désactive le mode Ne Pas Déranger — reprend le pipeline normalement.",
-        handler=handle_brb,
     ),
     "help": CommandSpec(
         name="help",

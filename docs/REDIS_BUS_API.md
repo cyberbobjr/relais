@@ -71,8 +71,8 @@ Every pipeline stream message wraps its content in an **Envelope**.
 
 ### `relais:messages:incoming`
 
-**Direction**: Aiguilleur → Portail, Commandant
-**Consumer groups**: `portail_group`, `commandant_group`
+**Direction**: Aiguilleur → Portail
+**Consumer groups**: `portail_group`
 
 Carries raw inbound messages from external channel adapters before any validation.
 
@@ -130,6 +130,29 @@ XADD relais:tasks * payload <Envelope JSON>
 ```
 
 No additional metadata is added by Sentinelle beyond what Portail set.
+
+---
+
+### `relais:commands`
+
+**Direction**: Sentinelle → Commandant
+**Consumer group**: `commandant_group`
+
+Carries slash-command envelopes that have passed both identity ACL (allowlist check) and
+command-level ACL (`action=<command_name>` check).  Only known commands (present in
+`KNOWN_COMMANDS`) arrive here — unknown commands are rejected inline by Sentinelle before
+reaching this stream.
+
+```
+XADD relais:commands * payload <Envelope JSON>
+```
+
+The envelope content is the raw slash command (e.g. `/clear`).  All metadata
+stamped by Portail (user_role, display_name, llm_profile, …) is preserved.
+
+**XACK contract**: Commandant ACKs every message it dequeues, regardless of whether a
+handler exists for the command name.  Post-ACL unknown-command filtering at this layer
+is intentionally absent — Sentinelle is the sole gatekeeper for command validity.
 
 ---
 
@@ -379,24 +402,6 @@ Each list element is a JSON string:
 
 ---
 
-### `relais:state:dnd` (String, not Stream)
-
-**Writers**: Commandant (`SET` on `/dnd`, `DEL` on `/brb`)
-**Readers**: Portail (checked before forwarding each message)
-**Primitive**: Redis String
-
-Global Do-Not-Disturb flag. When set, Portail drops all incoming messages silently (ACKs the stream entry without forwarding to `relais:security`).
-
-```
-SET relais:state:dnd 1    # /dnd — activate DND (no TTL)
-DEL relais:state:dnd      # /brb — deactivate DND
-GET relais:state:dnd      # → "1" or nil
-```
-
-No TTL is set — the flag persists until explicitly removed by `/brb`.
-
----
-
 ## Pub/Sub Channels
 
 ### `relais:streaming:start:{channel}`
@@ -453,9 +458,10 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 
 | Stream | Consumer group(s) | Brick |
 |--------|------------------|-------|
-| `relais:messages:incoming` | `portail_group`, `commandant_group` | Portail, Commandant |
+| `relais:messages:incoming` | `portail_group` | Portail |
 | `relais:security` | `sentinelle_group` | Sentinelle |
 | `relais:tasks` | `atelier_group` | Atelier |
+| `relais:commands` | `commandant_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group`, `souvenir_outgoing_group` | Aiguilleur, Souvenir |
 | `relais:memory:request` | `souvenir_group` | Souvenir |

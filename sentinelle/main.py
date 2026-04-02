@@ -15,6 +15,7 @@ logging.basicConfig(
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
+from common.command_utils import is_command, extract_command_name, KNOWN_COMMANDS
 from sentinelle.acl import ACLManager
 
 logger = logging.getLogger("sentinelle")
@@ -32,11 +33,81 @@ class Sentinelle:
         self.client: RedisClient = RedisClient("sentinelle")
         self.stream_in: str = "relais:security"
         self.stream_out: str = "relais:tasks"
+        self.stream_commands: str = "relais:commands"
         self.group_name: str = "sentinelle_group"
         self.consumer_name: str = "sentinelle_1"
         self.outgoing_group_name: str = "sentinelle_outgoing_group"
         self.outgoing_consumer_name: str = "sentinelle_outgoing_1"
         self._acl: ACLManager = ACLManager()
+
+    async def _reply_inline(self, redis_conn: Any, envelope: Envelope, message: str) -> None:
+        """Send a short reply directly to the channel's outgoing stream.
+
+        Args:
+            redis_conn: Active Redis connection.
+            envelope: The originating envelope (used to derive channel and parent metadata).
+            message: Plain-text reply content.
+        """
+        reply = Envelope.create_response_to(envelope, message)
+        out_stream = f"relais:messages:outgoing:{envelope.channel}"
+        await redis_conn.xadd(out_stream, {"payload": reply.to_json()})
+
+    async def _handle_command(
+        self,
+        redis_conn: Any,
+        envelope: Envelope,
+        acl_context: str,
+        acl_scope: str | None,
+    ) -> None:
+        """Route an authenticated command envelope after ACL identity check.
+
+        Unknown commands receive an inline rejection.  Known commands are
+        checked against the per-command action in the role's *actions* list
+        (or the "command" wildcard); unauthorised ones get a permission
+        reply, authorised ones are forwarded to ``relais:commands``.
+
+        Args:
+            redis_conn: Active Redis connection.
+            envelope: The command envelope (content starts with '/').
+            acl_context: Already-sanitised access context ("dm" or "group").
+            acl_scope: Optional scope_id from envelope metadata.
+        """
+        cmd_name = extract_command_name(envelope.content)
+
+        if cmd_name is None:
+            logger.error("extract_command_name returned None for content=%r", envelope.content)
+            return
+
+        if cmd_name not in KNOWN_COMMANDS:
+            await self._reply_inline(redis_conn, envelope, f"Commande inconnue : /{cmd_name}")
+            logger.info("Unknown command /%s from %s — replied inline", cmd_name, envelope.sender_id)
+            return
+
+        cmd_authorized = self._acl.is_allowed(
+            envelope.sender_id,
+            envelope.channel,
+            context=acl_context,
+            scope_id=acl_scope,
+            action=cmd_name,
+        )
+        if cmd_authorized:
+            await asyncio.gather(
+                redis_conn.xadd(self.stream_commands, {"payload": envelope.to_json()}),
+                redis_conn.xadd("relais:logs", {
+                    "level": "INFO",
+                    "brick": "sentinelle",
+                    "correlation_id": envelope.correlation_id,
+                    "sender_id": envelope.sender_id,
+                    "message": f"Routed command /{cmd_name} to relais:commands",
+                }),
+            )
+        else:
+            await self._reply_inline(
+                redis_conn, envelope, f"Vous n'avez pas la permission d'exécuter /{cmd_name}"
+            )
+            logger.warning(
+                "Unauthorised command /%s from %s — replied inline", cmd_name, envelope.sender_id
+            )
 
     async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
         """Consume security checks from Gateway and forward approved messages.
@@ -101,19 +172,20 @@ class Sentinelle:
                             if is_authorized:
                                 envelope.add_trace("sentinelle", "ACL verified")
 
-                                await redis_conn.xadd(
-                                    self.stream_out, {"payload": envelope.to_json()}
-                                )
-                                await redis_conn.xadd("relais:logs", {
-                                    "level": "INFO",
-                                    "brick": "sentinelle",
-                                    "correlation_id": envelope.correlation_id,
-                                    "sender_id": envelope.sender_id,
-                                    "message": (
-                                        f"Approved {envelope.correlation_id} to atelier"
-                                    ),
-                                    "content_preview": envelope.content[:60] if envelope.content else "",
-                                })
+                                if is_command(envelope.content):
+                                    await self._handle_command(redis_conn, envelope, acl_context, acl_scope)
+                                else:
+                                    await asyncio.gather(
+                                        redis_conn.xadd(self.stream_out, {"payload": envelope.to_json()}),
+                                        redis_conn.xadd("relais:logs", {
+                                            "level": "INFO",
+                                            "brick": "sentinelle",
+                                            "correlation_id": envelope.correlation_id,
+                                            "sender_id": envelope.sender_id,
+                                            "message": f"Approved {envelope.correlation_id} to atelier",
+                                            "content_preview": envelope.content[:60] if envelope.content else "",
+                                        }),
+                                    )
                             else:
                                 logger.warning(
                                     f"Unauthorized message {envelope.correlation_id} dropped."

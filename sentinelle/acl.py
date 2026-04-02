@@ -128,9 +128,17 @@ class ACLManager:
         channel: str,
         context: str = "dm",
         scope_id: str | None = None,
-        action: str = "send",
+        action: str | None = None,
     ) -> bool:
-        """Checks whether sender_id may perform action in the given channel/context.
+        """Checks whether sender_id may send a message or execute a command.
+
+        For normal messages, call without ``action`` (or ``action=None``): only
+        identity/blocklist/mode checks are performed — the role's ``actions`` list
+        is **not** consulted.
+
+        For slash commands, pass ``action=<command_name>`` (e.g. ``action="clear"``):
+        the role's ``actions`` list is checked.  A role with ``"*"`` in its actions
+        may execute any command; otherwise the command name must appear explicitly.
 
         For group messages (``context="group"``), authorization is based on the
         group identified by ``scope_id``, not the individual sender.
@@ -153,7 +161,8 @@ class ACLManager:
                 ``"server"``. For WhatsApp/Telegram: ``"dm"`` or ``"group"``.
                 Defaults to ``"dm"``.
             scope_id: Group identifier when ``context`` is ``"group"``.
-            action: The action to authorize. Defaults to ``"send"``.
+            action: Slash command name to authorize (e.g. ``"clear"``), or ``None``
+                for normal message sending.
 
         Returns:
             True if the request is authorized, False otherwise.
@@ -166,7 +175,7 @@ class ACLManager:
         if context == "group" and scope_id is not None:
             return self._check_group(channel, scope_id, mode)
 
-        user = self._resolve_user(sender_id, channel, context)
+        user : UserRecord | None = self._resolve_user(sender_id, channel, context)
 
         if user is None:
             if mode == "blocklist":
@@ -177,16 +186,21 @@ class ACLManager:
             logger.warning("ACL deny — blocked user %s on %s", sender_id, channel)
             return False
 
+        # For normal messages (action=None), identity/blocklist/mode is sufficient.
+        if action is None:
+            return True
+
         role_name: str = user.role
         role_def: dict[str, Any] = self._roles.get(role_name, {})
         allowed_actions: list[str] = role_def.get("actions", [])
-        if action not in allowed_actions:
-            logger.debug(
-                "ACL deny — role %s does not allow action %s", role_name, action
-            )
-            return False
 
-        return True
+        if "*" in allowed_actions or action in allowed_actions:
+            return True
+
+        logger.debug(
+            "ACL deny — role %s does not allow command /%s", role_name, action
+        )
+        return False
 
     def get_user_role(self, sender_id: str) -> str:
         """Returns the role assigned to sender_id, or 'unknown' if not found.
@@ -405,7 +419,7 @@ class ACLManager:
 
             roles:
               admin:
-                actions: ["send", "command", "admin"]
+                actions: ["*"]   # wildcard = toutes les commandes autorisées
         """
         if self._config_path is None:
             logger.warning(

@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,8 +21,8 @@ from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.role_registry import RoleRegistry
 from common.shutdown import GracefulShutdown
-from common.text_utils import strip_outer_quotes
 from common.user_registry import UserRegistry
+
 logger = logging.getLogger("portail")
 
 
@@ -41,8 +40,6 @@ class Portail:
         self.stream_out: str = "relais:security"
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
-        self._dnd_cached: bool | None = None
-        self._dnd_cache_at: float = 0.0
         self._user_registry: UserRegistry = UserRegistry()
         self._role_registry: RoleRegistry = RoleRegistry()
         self._load_security_config()
@@ -227,40 +224,6 @@ class Portail:
                 exc,
             )
 
-    @staticmethod
-    def _is_command(content: str) -> bool:
-        """Retourne True si le contenu est une commande Commandant.
-
-        Gère les deux formes acceptées :
-        - ``/clear``      — slash direct
-        - ``"/clear"``    — entre guillemets doubles
-        - ``'/clear'``    — entre quotes simples
-
-        Args:
-            content: Contenu brut de l'enveloppe.
-
-        Returns:
-            True si le message commence par '/' suivi d'au moins un caractère
-            (après strip et dépouillage des guillemets éventuels), False sinon.
-        """
-        stripped = strip_outer_quotes(content)
-        return stripped.startswith("/") and len(stripped) > 1
-
-    async def _check_dnd(self, redis_conn: Any) -> bool:
-        """Retourne True si le mode DND est actif, avec cache 1 seconde.
-
-        Args:
-            redis_conn: Connexion Redis async active.
-
-        Returns:
-            True si relais:state:dnd est positionné.
-        """
-        now = time.monotonic()
-        if self._dnd_cached is None or now - self._dnd_cache_at >= 1.0:
-            self._dnd_cached = bool(await redis_conn.get("relais:state:dnd"))
-            self._dnd_cache_at = now
-        return self._dnd_cached
-
     async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
         """Consume incoming messages from Relays and forward to Sentinel.
 
@@ -309,24 +272,6 @@ class Portail:
                                 f"Received message: {envelope.correlation_id} "
                                 f"from {envelope.channel}"
                             )
-
-                            # Drop commands — handled exclusively by Commandant
-                            if self._is_command(envelope.content):
-                                logger.debug(
-                                    "Command message — delegated to Commandant, skipping: %s",
-                                    envelope.correlation_id,
-                                )
-                                continue  # Le finally:xack s'exécute quand même
-
-                            # Check DND mode — drop message if active
-                            dnd_active = await self._check_dnd(redis_conn)
-                            if dnd_active:
-                                logger.info(
-                                    "DND active — dropping message %s from %s",
-                                    envelope.correlation_id,
-                                    envelope.sender_id,
-                                )
-                                continue  # Le finally:xack s'exécute quand même
 
                             # Enrich envelope with user identity and LLM profile
                             self._enrich_envelope(envelope)

@@ -20,16 +20,15 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 └────────┼────────────────┼────────────────┼────────────────────┘
          └────────────────┴────────────────┘
                           │ relais:messages:incoming
-              ┌───────────┴────────────┐
-              ▼                        ▼
-┌─────────────────────────┐  ┌─────────────────────────────────────────────┐
-│ COMMANDANT              │  │ PORTAIL — Enrichissement contextuel         │
-│  Commandes hors-LLM     │  │  Consomme : relais:messages:incoming        │
-│  /clear /dnd /brb       │  │  Résout utilisateur (UserRegistry)          │
-│  (consumer group dédié) │  │  Stamp métadonnées : user_role, llm_profile │
-└─────────────────────────┘  │  Applique reply_policy, Check DND            │
-                             │  Produit  : relais:security                 │
-                             └─────────────────────────────────────────────┘
+                          ▼
+             ┌─────────────────────────────────────────────┐
+             │ PORTAIL — Enrichissement contextuel         │
+             │  Consomme : relais:messages:incoming        │
+             │  Résout utilisateur (UserRegistry)          │
+             │  Stamp métadonnées : user_role, llm_profile │
+             │  Applique reply_policy                       │
+             │  Produit  : relais:security                 │
+             └─────────────────────────────────────────────┘
                           │
                     relais:security
                           │
@@ -37,26 +36,27 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 ┌─────────────────────────────────────────────────────────────┐
 │ SENTINELLE — Sécurité (point de contrôle bidirectionnel)    │
 │  [ENTRANT] Consomme : relais:security                       │
-│  Vérifie les ACL (users.yaml)                               │
-│  [ENTRANT] Produit  : relais:tasks                          │
+│  Vérifie ACL (users.yaml)                                   │
+│  · Message normal    → relais:tasks                         │
+│  · Commande autorisée → relais:commands                     │
+│  · Commande inconnue / non-autorisée → reply inline         │
 └─────────────────────────────────────────────────────────────┘
-                          │
-                     relais:tasks
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ ATELIER — Cerveau LLM  (moteur : AgentExecutor DeepAgents/LangGraph) │
-│  Consomme : relais:tasks                                        │
-│  · Personnalité SOUL + historique Souvenir → system prompt      │
-│  · AgentExecutor (DeepAgents/LangGraph) — boucle agentique, streaming live │
-│  · Appel direct au provider LLM (ANTHROPIC_API_KEY)             │
-│  · Serveurs MCP : outils externes (stdio · SSE · HTTP)          │
-│  · Outils internes (@tool) : list_skills, read_skill            │
-│  · Retries avec backoff configurable                            │
-│  Produit  : relais:messages:outgoing_pending           (réponse)│
-│             relais:streaming:{channel}:{cid}    (chunks live)   │
-│             relais:tasks:failed                 (DLQ)           │
-└─────────────────────────────────────────────────────────────────┘
+               │                         │
+          relais:tasks            relais:commands
+               │                         │
+               ▼                         ▼
+┌──────────────────────────────────────────────────┐  ┌─────────────────────────┐
+│ ATELIER — Cerveau LLM  (AgentExecutor DeepAgents)│  │ COMMANDANT              │
+│  Consomme : relais:tasks                         │  │  Commandes hors-LLM     │
+│  · SOUL + Souvenir → system prompt               │  │  /clear · /help · ...   │
+│  · Boucle agentique, streaming live              │  │  Consomme : relais:commands│
+│  · Serveurs MCP : outils externes (stdio · SSE) │  └─────────────────────────┘
+│  · Outils internes (@tool) : list_skills, …      │
+│  · Retries avec backoff configurable             │
+│  Produit  : relais:messages:outgoing_pending     │
+│             relais:streaming:{channel}:{cid}     │
+│             relais:tasks:failed  (DLQ)           │
+└──────────────────────────────────────────────────┘
           │                        │                   │
 relais:messages:outgoing_pending       │       relais:logs /
           │                   relais:memory:*   relais:events:*
@@ -102,27 +102,26 @@ flowchart TD
     end
 
     AIG_IN -->|"relais:messages:incoming"| PORTAIL
-    AIG_IN -->|"relais:messages:incoming"| COMMANDANT
-
-    subgraph COMMANDANT["COMMANDANT — Commandes hors-LLM"]
-        CM["consumer group dédié\n/clear · /dnd · /brb\n(parallel, hors pipeline LLM)"]
-    end
-
-    COMMANDANT -->|"relais:state:dnd SET/DEL"| PORTAIL
-    COMMANDANT -->|"relais:memory:request clear"| SOUVENIR
-    COMMANDANT -->|"relais:messages:outgoing:{ch}"| AIG_OUT
 
     subgraph PORTAIL["PORTAIL — Enrichissement contextuel"]
-        P["Résout utilisateur (UserRegistry)\nStamp user_role, display_name, llm_profile\nApplique reply_policy, Check DND"]
+        P["Résout utilisateur (UserRegistry)\nStamp user_role, display_name, llm_profile\nApplique reply_policy"]
     end
 
     PORTAIL -->|"relais:security"| SENTINELLE
 
     subgraph SENTINELLE["SENTINELLE — Sécurité (bidirectionnel)"]
-        S["[ENTRANT] ACL users.yaml\n[SORTANT] Pass-through outgoing_pending → outgoing"]
+        S["[ENTRANT] ACL users.yaml\nMessage normal → relais:tasks\nCommande autorisée → relais:commands\nCommande inconnue/non-autorisée → reply inline\n[SORTANT] Pass-through outgoing_pending → outgoing"]
     end
 
     SENTINELLE -->|"relais:tasks"| ATELIER
+    SENTINELLE -->|"relais:commands"| COMMANDANT
+
+    subgraph COMMANDANT["COMMANDANT — Commandes hors-LLM"]
+        CM["Consomme : relais:commands\n/clear · /help · …\n(hors pipeline LLM)"]
+    end
+
+    COMMANDANT -->|"relais:memory:request clear"| SOUVENIR
+    COMMANDANT -->|"relais:messages:outgoing:{ch}"| AIG_OUT
 
     subgraph ATELIER["ATELIER — Cerveau LLM  (moteur : AgentExecutor DeepAgents/LangGraph)"]
         A["AgentExecutor (DeepAgents/LangGraph) — boucle agentique · streaming live\nSOUL system prompt + historique mémoire (Souvenir)\nServeurs MCP : outils externes (stdio · SSE)\nOutils internes : @tool (list_skills, read_skill)\nRetries backoff configurable · DLQ"]

@@ -11,31 +11,12 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-from commandant.commands import COMMAND_REGISTRY, KNOWN_COMMANDS, parse_command
+from commandant.commands import COMMAND_REGISTRY, parse_command
 from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
-from common.text_utils import strip_outer_quotes
 
 logger = logging.getLogger("commandant")
-
-
-def _is_unknown_command(content: str) -> bool:
-    """Retourne True si le contenu ressemble à une commande slash non reconnue.
-
-    Détecte les messages du type ``/foo`` ou ``"/foo"`` qui commencent par '/'
-    mais ne correspondent à aucune entrée de KNOWN_COMMANDS. Les messages
-    ordinaires (sans slash) renvoient False.
-
-    Args:
-        content: Contenu brut de l'enveloppe.
-
-    Returns:
-        True si le message commence par '/' après strip/dequote et a au moins
-        un caractère après le slash, False sinon.
-    """
-    stripped = strip_outer_quotes(content)
-    return stripped.startswith("/") and len(stripped) > 1
 
 
 class Commandant:
@@ -48,7 +29,7 @@ class Commandant:
 
     def __init__(self) -> None:
         self.client: RedisClient = RedisClient("commandant")
-        self.stream_in: str = "relais:messages:incoming"
+        self.stream_in: str = "relais:commands"
         self.group_name: str = "commandant_group"
         self.consumer_name: str = "commandant_1"
 
@@ -108,21 +89,6 @@ class Commandant:
                                         result.command,
                                         envelope.sender_id,
                                     )
-                            elif _is_unknown_command(envelope.content):
-                                known = ", ".join(f"/{c}" for c in sorted(KNOWN_COMMANDS))
-                                response = Envelope.from_parent(
-                                    envelope,
-                                    f"Commande inconnue. Commandes disponibles : {known}",
-                                )
-                                await redis_conn.xadd(
-                                    f"relais:messages:outgoing:{envelope.channel}",
-                                    {"payload": response.to_json()},
-                                )
-                                logger.info(
-                                    "Unknown command from sender=%s: %s",
-                                    envelope.sender_id,
-                                    envelope.content[:60],
-                                )
 
                         except Exception as inner_exc:
                             logger.error(

@@ -81,7 +81,11 @@ users:
 #
 roles:
   admin:
-    actions: ["send", "command", "admin"]
+    # actions : noms des commandes slash autorisées pour ce rôle.
+    #   ["*"]              → toutes les commandes (wildcard)
+    #   ["clear", "help"]  → uniquement /clear et /help
+    #   []                 → aucune commande autorisée (le plus restrictif)
+    actions: ["*"]
     skills_dirs: ["*"]
     allowed_mcp_tools: ["*"]
     # prompt_path : chemin relatif (depuis prompts/) vers un overlay de prompt
@@ -90,12 +94,14 @@ roles:
     # Exemple : "roles/admin.md"
     prompt_path: null
   user:
-    actions: ["send"]
+    # [] = aucune commande slash autorisée pour ce rôle (comportement le plus sécurisé)
+    actions: []
     skills_dirs: []
     allowed_mcp_tools: []
     prompt_path: null
   guest:
     # Rôle attribué aux utilisateurs inconnus si unknown_user_policy=guest
+    # [] = aucune commande slash autorisée pour les invités
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
