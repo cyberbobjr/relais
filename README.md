@@ -25,8 +25,7 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
              │ PORTAIL — Enrichissement contextuel         │
              │  Consomme : relais:messages:incoming        │
              │  Résout utilisateur (UserRegistry)          │
-             │  Stamp métadonnées : user_role, llm_profile │
-             │  Applique reply_policy                       │
+             │  Stamp metadata["user_record"] (dict unique)│
              │  Produit  : relais:security                 │
              └─────────────────────────────────────────────┘
                           │
@@ -36,7 +35,7 @@ RELAIS est une architecture micro-brique pour un assistant IA autonome et modula
 ┌─────────────────────────────────────────────────────────────┐
 │ SENTINELLE — Sécurité (point de contrôle bidirectionnel)    │
 │  [ENTRANT] Consomme : relais:security                       │
-│  Vérifie ACL (users.yaml)                                   │
+│  Vérifie ACL (sentinelle.yaml, lit user_record)             │
 │  · Message normal    → relais:tasks                         │
 │  · Commande autorisée → relais:commands                     │
 │  · Commande inconnue / non-autorisée → reply inline         │
@@ -104,13 +103,13 @@ flowchart TD
     AIG_IN -->|"relais:messages:incoming"| PORTAIL
 
     subgraph PORTAIL["PORTAIL — Enrichissement contextuel"]
-        P["Résout utilisateur (UserRegistry)\nStamp user_role, display_name, llm_profile\nApplique reply_policy"]
+        P["Résout utilisateur (UserRegistry)\nStamp metadata[\"user_record\"] (dict unique)\nPortail = seul écrivain de l'identité utilisateur"]
     end
 
     PORTAIL -->|"relais:security"| SENTINELLE
 
     subgraph SENTINELLE["SENTINELLE — Sécurité (bidirectionnel)"]
-        S["[ENTRANT] ACL users.yaml\nMessage normal → relais:tasks\nCommande autorisée → relais:commands\nCommande inconnue/non-autorisée → reply inline\n[SORTANT] Pass-through outgoing_pending → outgoing"]
+        S["[ENTRANT] ACL sentinelle.yaml (lit user_record)\nMessage normal → relais:tasks\nCommande autorisée → relais:commands\nCommande inconnue/non-autorisée → reply inline\n[SORTANT] Pass-through outgoing_pending → outgoing"]
     end
 
     SENTINELLE -->|"relais:tasks"| ATELIER
@@ -245,7 +244,8 @@ Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (ut
 │   ├── config.yaml          Configuration système principale
 │   ├── litellm.yaml         Modèles LLM et proxy
 │   ├── profiles.yaml        Profils LLM (température, tokens, résilience)
-│   ├── users.yaml           Registre des utilisateurs et ACL
+│   ├── portail.yaml         Registre des utilisateurs et rôles (chargé par Portail)
+│   ├── sentinelle.yaml      ACL de la Sentinelle (access_control + groups)
 │   ├── channels.yaml        Canaux actifs, streaming, redémarrages (Aiguilleur + Atelier)
 │   ├── mcp_servers.yaml     Serveurs MCP (outils externes)
 │   └── HEARTBEAT.md         Tâches CRON planifiées
@@ -354,7 +354,7 @@ uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --
 
 ### `profiles.yaml` — Profils LLM
 
-Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est résolu dans cet ordre de priorité : **`profile` dans `channels.yaml`** (canal gagne toujours) → `llm.default_profile` dans `config.yaml` (fallback système). Le champ `llm_profile` dans `users.yaml` n'est plus utilisé pour la résolution du modèle.
+Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est résolu dans cet ordre de priorité : **`profile` dans `channels.yaml`** (canal gagne toujours) → `llm_profile` dans `user_record` (rôle utilisateur) → `llm.default_profile` dans `config.yaml` (fallback système).
 
 Le champ `model` utilise le format `provider:model-id` (ex. `anthropic:claude-haiku-4-5`). Les champs `base_url` et `api_key_env` sont **obligatoires** dans chaque profil — déclarez-les explicitement même si leur valeur est `null`.
 
@@ -404,33 +404,22 @@ profiles:
 
 ---
 
-### `users.yaml` — Registre des utilisateurs (ACL)
+### `portail.yaml` — Registre des utilisateurs et rôles
 
-Chargé par la Sentinelle. Détermine si un utilisateur est autorisé et quel profil LLM lui est assigné.
-L'identité est contextuelle : `(canal, contexte, id_brut)` — ex. Discord distingue `dm` et `server`.
+Chargé exclusivement par le **Portail**. Contient : utilisateurs, rôles, et politique utilisateur inconnu.
+Le Portail est le **seul écrivain** de l'identité utilisateur — il stampe `envelope.metadata["user_record"]`
+(dict `UserRecord.to_dict()`) avec toutes les infos de rôle déjà fusionnées.
 
 ```yaml
-access_control:
-  default_mode: allowlist       # "allowlist" (défaut) | "blocklist"
-  channels:                     # Surcharges optionnelles par canal
-    # telegram:
-    #   mode: blocklist
-
-groups: []                      # Groupes WhatsApp / Telegram — autorisation par group_id
-# Exemple :
-# groups:
-#   - channel: whatsapp
-#     group_id: "120363000000000@g.us"
-#     allowed: true
-#     blocked: false
-#     llm_profile: fast
+unknown_user_policy: deny   # "deny" | "guest" | "pending"
+guest_profile: fast         # Profil LLM pour les guests (si policy=guest)
 
 users:
   usr_mon_utilisateur:
     display_name: "Prénom Nom"
     role: user                            # "admin" | "user" | "guest"
     blocked: false
-    custom_prompt_path: null             # Chemin relatif (depuis prompts/) vers un overlay personnel.
+    prompt_path: null                    # Chemin relatif (depuis prompts/) vers un overlay personnel.
                                          # Ex : "users/discord_123456789.md"
                                          # Priorité maximale — écrase le prompt de rôle.
     identifiers:
@@ -443,40 +432,56 @@ users:
 
 roles:
   admin:
-    actions: ["send", "command", "admin"]
+    actions: ["*"]
     skills_dirs: ["*"]
     allowed_mcp_tools: ["*"]
-    prompt_path: null                    # Overlay de rôle — chargé pour tous les utilisateurs "admin"
-                                         # si aucun custom_prompt_path personnel n'est défini.
+    llm_profile: null
+    prompt_path: null                    # Overlay de rôle — chargé pour tous les utilisateurs "admin".
                                          # Ex : "roles/admin.md"
   user:
-    actions: ["send"]
+    actions: []
     skills_dirs: []
     allowed_mcp_tools: []
+    llm_profile: null
     prompt_path: null
   guest:
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
-    prompt_path: null                    # Utilisé quand unknown_user_policy=guest
+    llm_profile: null
+    prompt_path: null
 ```
 
-**Modes ACL :**
-- `allowlist` : seuls les utilisateurs/groupes déclarés sont admis. Politique pour les inconnus : `deny` (rejet), `guest` (profil limité) ou `pending` (notif admin).
-- `blocklist` : tous admis sauf les utilisateurs/groupes marqués `blocked: true`.
-
-**Rôles :** entièrement libres — créez autant de rôles que nécessaire dans la section `roles:`. Chaque rôle définit ses `actions`, `skills_dirs`, `allowed_mcp_tools` et `prompt_path`. Le rôle `guest` est conventionnel : il est attribué aux inconnus quand `unknown_user_policy: guest`.
-
 **Priorité des prompts :**
-`custom_prompt_path` (niveau utilisateur) > `prompt_path` (niveau rôle) > absent
+`prompt_path` (niveau utilisateur) > `prompt_path` (niveau rôle) > absent
 
 > `usr_system` est un compte interne utilisé par les briques — ne pas supprimer.
 
 ---
 
+### `sentinelle.yaml` — ACL de la Sentinelle
+
+Chargé exclusivement par la **Sentinelle**. Contient uniquement : `access_control` et `groups`.
+Les utilisateurs et rôles sont dans `portail.yaml`. La Sentinelle lit `user_record` depuis
+`envelope.metadata` (stampé par Portail) — elle ne résout pas l'identité elle-même.
+
+```yaml
+access_control:
+  default_mode: allowlist       # "allowlist" (défaut) | "blocklist"
+  channels: {}                  # Surcharges optionnelles par canal
+
+groups: []                      # Groupes WhatsApp / Telegram — autorisation par group_id
+```
+
+**Modes ACL :**
+- `allowlist` : enveloppes sans `user_record` valide rejetées. Groupes autorisés via `groups`.
+- `blocklist` : tout admis sauf `user_record.blocked == true`.
+
+---
+
 ### Politique utilisateurs inconnus — `unknown_user_policy`
 
-Configuré dans `config.yaml` (`security.unknown_user_policy`). Détermine le comportement du Portail face à un `sender_id` absent de `users.yaml` :
+Configuré dans `portail.yaml` (clé racine `unknown_user_policy`). Détermine le comportement du Portail face à un `sender_id` absent de `portail.yaml` :
 
 | Valeur | Comportement |
 |--------|-------------|
@@ -585,7 +590,7 @@ mcp_servers:
 - `stdio` : processus local via stdin/stdout — l'Atelier spawne le serveur comme sous-processus (recommandé pour outils CLI)
 - `sse` : Server-Sent Events — connexion à un serveur HTTP existant (recommandé pour services distants persistants)
 
-> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `users.yaml:roles:`.
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` issus de `user_record` (stampé par Portail depuis `portail.yaml:roles:`).
 
 ---
 
@@ -596,12 +601,12 @@ L'Atelier assemble le system prompt à partir de **5 couches optionnelles** lues
 | Couche | Répertoire | Convention de nom | Déclencheur |
 |--------|-----------|-------------------|-------------|
 | 1 — Personnalité | `prompts/soul/` | `SOUL.md` (fixe) | Toujours chargé (warning si absent) |
-| 2 — Rôle | _(libre)_ | _(libre)_ | Quand `roles.{role}.prompt_path` est défini dans `users.yaml` |
-| 3 — Utilisateur | _(libre)_ | _(libre)_ | Quand `users.{user}.custom_prompt_path` est défini dans `users.yaml` |
+| 2 — Rôle | _(libre)_ | _(libre)_ | Quand `roles.{role}.prompt_path` est défini dans `portail.yaml` |
+| 3 — Utilisateur | _(libre)_ | _(libre)_ | Quand `users.{user}.prompt_path` est défini dans `portail.yaml` |
 | 4 — Canal | `prompts/channels/` | `{channel}_default.md` | Quand un canal est actif |
 | 5 — Politique | `prompts/policies/` | `{policy}.md` | Quand `reply_policy` est actif |
 
-Les chemins des couches 2 et 3 sont des chemins relatifs configurés explicitement dans `users.yaml` — aucune convention de nom magique. Les couches présentes sont concaténées dans l'ordre avec `---` comme séparateur. Une **6e couche** (faits mémoire long-terme sur l'utilisateur) est ajoutée dynamiquement par le Souvenir — elle ne correspond à aucun fichier sur disque.
+Les chemins des couches 2 et 3 sont des chemins relatifs configurés explicitement dans `portail.yaml` — aucune convention de nom magique. Les couches présentes sont concaténées dans l'ordre avec `---` comme séparateur. Une **6e couche** (faits mémoire long-terme sur l'utilisateur) est ajoutée dynamiquement par le Souvenir — elle ne correspond à aucun fichier sur disque.
 
 **Exemples de fichiers à créer :**
 
@@ -609,10 +614,10 @@ Les chemins des couches 2 et 3 sont des chemins relatifs configurés expliciteme
 # Personnalité — toujours active
 ~/.relais/prompts/soul/SOUL.md
 
-# Overlay pour le rôle "admin" — déclaré dans users.yaml : roles.admin.prompt_path: "roles/admin.md"
+# Overlay pour le rôle "admin" — déclaré dans portail.yaml : roles.admin.prompt_path: "roles/admin.md"
 ~/.relais/prompts/roles/admin.md
 
-# Override personnel — déclaré dans users.yaml : users.usr_xxx.custom_prompt_path: "users/alice.md"
+# Override personnel — déclaré dans portail.yaml : users.usr_xxx.prompt_path: "users/alice.md"
 ~/.relais/prompts/users/alice.md
 
 # Formatage Telegram (canal "telegram")

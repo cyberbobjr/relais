@@ -70,7 +70,8 @@ Toute la configuration personnalisée, les skills, les logs et les médias sont 
 ├── config/
 │   ├── config.yaml               ← surcharge /opt/relais/config/config.yaml
 │   ├── profiles.yaml             ← profils personnalisés
-│   ├── users.yaml                ← registry utilisateurs
+│   ├── portail.yaml              ← registry utilisateurs + rôles (Portail)
+│   ├── sentinelle.yaml           ← ACL Sentinelle (access_control + groups)
 │   ├── mcp_servers.yaml          ← MCP servers additionnels
 │   └── HEARTBEAT.md              ← tâches planifiées personnalisées
 │
@@ -121,7 +122,7 @@ Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers
 | Le Forgeron | Lit/écrit dans `~/.relais/skills/auto/` |
 | L'Atelier | Charge les skills depuis `~/.relais/skills/` |
 | Le Souvenir | DB dans `~/.relais/storage/memory.db` |
-| Le Portail | Charge `~/.relais/config/users.yaml` (UserRegistry + RoleRegistry) |
+| Le Portail | Charge `~/.relais/config/portail.yaml` (UserRegistry — users + rôles fusionnés) |
 | Le Vigile | Charge `~/.relais/soul/SOUL.md` pour hot reload |
 | Le Veilleur | Lit `~/.relais/config/HEARTBEAT.md` + backup vers `~/.relais/backup/` |
 | Tous | Config chargée via cascade automatique |
@@ -495,8 +496,8 @@ Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserReg
 
 **Architecture clarifiée :**
 
-1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `users.yaml`, stampe `user_role`, `display_name`, `llm_profile` (résolu depuis `channel_profile` de l'Aiguilleur).
-2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : vérifie l'ACL (users.yaml : `blocked`, `allowed_channels`), bifurque commandes et messages normaux, applique guardrails (bidirectionnel).
+1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `portail.yaml`, stampe `envelope.metadata["user_record"]` (dict `UserRecord` fusionné — rôle + utilisateur). Portail est le **seul écrivain** de l'identité utilisateur.
+2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : lit `user_record` depuis `envelope.metadata` (chargé par Portail), vérifie `blocked`, bifurque commandes et messages normaux, applique guardrails (bidirectionnel). Config ACL dans `sentinelle.yaml`.
 
 > **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
 > En flux entrant, elle valide l'ACL et bifurque :

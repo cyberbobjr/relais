@@ -134,10 +134,11 @@ PIPELINE CORE
 │   ▼
 │ PORTAIL (consumer)
 │ ├─ Valide format (Envelope)
-│ ├─ Résout utilisateur (UserRegistry)
-│ ├─ Stamp métadonnées : user_role, display_name, llm_profile, custom_prompt_path,
-│ │   skills_dirs, allowed_mcp_tools (depuis RoleRegistry)
-│ ├─ Applique unknown_user_policy (deny / guest / pending)
+│ ├─ Résout utilisateur (UserRegistry — portail.yaml)
+│ ├─ Stamp metadata["user_record"] : dict UserRecord fusionné (rôle + utilisateur)
+│ │   (display_name, role, blocked, actions, skills_dirs, allowed_mcp_tools,
+│ │    llm_profile, prompt_path)
+│ ├─ Applique unknown_user_policy (deny / guest / pending) — config dans portail.yaml
 │ │   └─ [pending] publie dans relais:admin:pending_users, puis drop
 │ └─ Publie si accepté
 │   ▼
@@ -145,7 +146,7 @@ PIPELINE CORE
 │   ▼
 │ SENTINELLE (consumer — bidirectionnel)
 │ ├─ [ENTRANT] Consomme relais:security
-│ ├─ [ENTRANT] Vérifie ACL identité (users.yaml)
+│ ├─ [ENTRANT] Vérifie ACL (sentinelle.yaml, lit user_record depuis envelope.metadata)
 │ ├─ [ENTRANT] Bifurque :
 │ │   ├─ message normal → relais:tasks
 │ │   ├─ commande connue + ACL OK → relais:commands
@@ -155,7 +156,7 @@ PIPELINE CORE
 │ relais:tasks (security-cleared)
 │   ▼
 │ ATELIER (transformer)
-│ ├─ Charge SOUL + contexte long-term (+ user_role depuis metadata)
+│ ├─ Charge SOUL + contexte long-term (user_role et prompt_path depuis user_record)
 │ ├─ Exécute boucle agentique via AgentExecutor (deepagents.create_deep_agent)
 │ ├─ Streams output token-by-token → relais:messages:streaming:{channel}:{correlation_id}
 │ ├─ Publie réponse si succès
@@ -195,7 +196,7 @@ Pour les canaux dont `streaming: true` dans `channels.yaml`, Atelier publie à l
 
 **Métadonnées du stream `relais:messages:outgoing_pending`:**
 
-Hérités de `relais:security` : `llm_profile`, `user_role`, `display_name`, `custom_prompt_path` (optionnel), `skills_dirs`, `allowed_mcp_tools`
+Hérités de `relais:security` : `user_record` (dict UserRecord fusionné — source unique d'identité)
 Ajoutés par Atelier : `user_message`, `traces`
 
 > **Note :** Atelier lit `channels.yaml` **une seule fois au démarrage** pour construire la liste des canaux
@@ -377,8 +378,8 @@ Chaque brick charge config.yaml en ce ordre:
 
 | Brick | Config fichiers |
 |-------|-----------------|
-| Portail | `config.yaml`, `users.yaml` (via `UserRegistry` + `RoleRegistry`) |
-| Sentinelle | `config.yaml`, `users.yaml`, `guardrails.yaml` |
+| Portail | `config.yaml`, `portail.yaml` (via `portail.UserRegistry`) |
+| Sentinelle | `config.yaml`, `sentinelle.yaml`, `guardrails.yaml` |
 | Atelier | `config.yaml`, `profiles.yaml`, `soul/SOUL.md`, `mcp_servers.yaml` |
 | Souvenir | `config.yaml`, `~/.relais/storage/memory.db` (SQLite via Alembic) |
 | Archiviste | `config.yaml` (retention policy) |
@@ -398,7 +399,7 @@ config.yaml > llm.default_profile   (fallback système)
 
 **Responsabilité du stamping :** l'**Aiguilleur** lit `ChannelConfig.profile` (champ optionnel dans `channels.yaml`) et stampe `envelope.metadata["llm_profile"]` lors de la création de chaque enveloppe entrante. Si le canal n'a pas de `profile`, l'Aiguilleur utilise `get_default_llm_profile()` de `common/config_loader.py` (lit `config.yaml > llm.default_profile`, fallback `"default"`).
 
-**L'Atelier** lit `envelope.metadata.get("llm_profile", "default")` pour charger le `ProfileConfig` depuis `profiles.yaml`.
+**L'Atelier** lit `envelope.metadata.get("user_record", {}).get("llm_profile") or "default"` pour charger le `ProfileConfig` depuis `profiles.yaml`.
 
 **La Sentinelle ne stampe jamais `llm_profile`** — elle transmet l'enveloppe inchangée.
 
@@ -413,7 +414,7 @@ from common.config_loader import get_relais_home, resolve_config_path, resolve_s
 home = get_relais_home()            # ~/.relais  (ou $RELAIS_HOME si défini)
 
 # Résolution de fichier de config avec cascade
-path = resolve_config_path("users.yaml")   # cascade: ~/.relais/config/ → /opt/relais/config/ → ./config/
+path = resolve_config_path("portail.yaml")   # cascade: ~/.relais/config/ → /opt/relais/config/ → ./config/
 
 # Répertoire de stockage persistant (SQLite, etc.)
 storage = resolve_storage_dir()     # ~/.relais/storage/  (créé si absent)
@@ -440,7 +441,7 @@ if __name__ == "__main__":
 ```
 
 **Fichiers créés automatiquement:**
-- `config/*.yaml` (config, profiles, users, mcp_servers, HEARTBEAT)
+- `config/*.yaml` (config, profiles, portail, sentinelle, mcp_servers, HEARTBEAT)
 - `soul/SOUL.md` et variants (`SOUL_concise.md`, `SOUL_professional.md`)
 - **Prompt templates canaux** (`telegram_default.md`, etc.)
 - Répertoires de stockage: `logs/`, `storage/`, `backup/`, `media/`, `skills/`
@@ -476,16 +477,16 @@ common/
 │   ├── (dépends: asyncio, signal)
 │   └── (uses: logging)
 │
-├── user_registry.py
-│   ├── (dépends: yaml, pathlib)
-│   └── (uses: config_loader)
-│
-├── role_registry.py
-│   ├── (dépends: yaml, dataclasses, pathlib)
-│   └── (uses: config_loader, user_registry [users.yaml])
+├── user_record.py
+│   └── (dépends: dataclasses — partagé Portail/Sentinelle/Atelier)
 │
 └── markdown_converter.py
     └── (dépends: re, html2text [opt])
+
+portail/
+└── user_registry.py
+    ├── (dépends: yaml, pathlib, dataclasses)
+    └── (uses: config_loader, user_record [portail.yaml — users + roles fusionnés])
 
 Exports (utilisés par briques)
 ├── Envelope, PushEnvelope, MediaRef
@@ -493,8 +494,8 @@ Exports (utilisés par briques)
 ├── GracefulShutdown
 ├── initialize_user_dir()
 ├── ConfigLoader
-├── UserRegistry, UserRecord
-├── RoleRegistry, RoleConfig
+├── UserRecord                    ← common/user_record.py (lecture seule pour Sentinelle/Atelier)
+├── portail.UserRegistry          ← portail/user_registry.py (Portail seul)
 ├── convert_md_to_telegram()
 ├── convert_md_to_slack_mrkdwn()
 ├── strip_markdown()
@@ -506,9 +507,10 @@ Exports (utilisés par briques)
 1. `config_loader` (basique, pas de dépendance)
 2. `envelope` (structures)
 3. `redis_client` (factory)
-4. `user_registry`, `role_registry` (dépendent config_loader)
-5. `shutdown`, `markdown_converter` (indépendantes)
-6. `init` (optionnel, au démarrage)
+4. `user_record` (dataclass partagée)
+5. `portail.user_registry` (Portail seulement — dépend config_loader + user_record)
+6. `shutdown`, `markdown_converter` (indépendantes)
+7. `init` (optionnel, au démarrage)
 
 ---
 
@@ -643,22 +645,18 @@ user souvenir +@all ~relais:memory:* ~relais:messages:outgoing:* ~relais:logs >$
 
 ### Sentinelle ACL
 
-L'ACL est contextuelle : l'identité est résolue via un triplet `(channel, context, raw_id)`.
-Le contexte (`dm`, `server`, `group`) est injecté par l'Aiguilleur dans `envelope.metadata["access_context"]`.
+La Sentinelle ne résout **pas** l'identité utilisateur — elle reçoit `user_record` (dict `UserRecord`)
+depuis `envelope.metadata["user_record"]`, stampé en amont par le Portail.
+`sentinelle.yaml` contient uniquement `access_control` et `groups`.
 
 **Deux modes globaux** (surchargeables par canal via `access_control.channels`) :
-- `allowlist` (défaut) : tout refuser sauf les expéditeurs déclarés explicitement.
-- `blocklist` : tout accepter sauf les expéditeurs marqués `blocked: true`.
+- `allowlist` (défaut) : enveloppes sans `user_record` valide rejetées. Groupes autorisés via `groups`.
+- `blocklist` : tout admis sauf `user_record.blocked == true`.
 
-**Politique utilisateur inconnu** (mode allowlist, paramètre global sur `ACLManager`) :
-- `deny` (défaut) : rejet silencieux, message loggué.
-- `guest` : accepté avec le profil LLM `guest_profile` (pas de mémoire, pas d'outils).
-- `pending` : rejeté + notification publiée dans `relais:admin:pending_users`.
-
-**Mode permissif** : si aucun `users.yaml` n'est trouvé, l'ACL est désactivée avec un WARNING.
+**Mode permissif** : si aucun `sentinelle.yaml` n'est trouvé, l'ACL est désactivée avec un WARNING.
 
 ```yaml
-# ~/.relais/config/users.yaml
+# ~/.relais/config/sentinelle.yaml
 access_control:
   default_mode: allowlist       # "allowlist" | "blocklist"
   channels:                     # Surcharges optionnelles par canal
@@ -666,34 +664,11 @@ access_control:
       mode: blocklist
 
 groups:                         # Groupes WhatsApp / Telegram (autorisation par group_id)
-  - channel: whatsapp
+  - id: grp_famille
+    channel: whatsapp
     group_id: "120363000000000@g.us"
     allowed: true
     blocked: false
-    llm_profile: fast
-
-users:
-  usr_admin:
-    display_name: "Administrateur"
-    role: admin
-    blocked: false
-    llm_profile: precise
-    identifiers:
-      discord:
-        dm: "123456789012345678"    # ID Discord — accès DM
-        server: "123456789012345678" # même ID — accès mentions serveur
-      telegram:
-        dm: "987654321"
-      whatsapp:
-        dm: "+33600000000"
-      rest:
-        api_keys: ["clé-api-1"]
-
-roles:
-  admin:
-    actions: ["*"]       # "*" = toutes les commandes slash autorisées
-  user:
-    actions: []          # [] = aucune commande slash autorisée (messages normaux OK via default_mode)
 ```
 
 ### Guardrails LLM
@@ -1025,7 +1000,7 @@ pytest tests/test_commandant.py::test_handle_help_lists_all_command_names -v
 
 ### ACL denied?
 
-1. Vérifier `~/.relais/config/users.yaml`
+1. Vérifier `~/.relais/config/portail.yaml` (utilisateurs/rôles) et `~/.relais/config/sentinelle.yaml` (ACL)
 2. Logs Sentinelle: grep "acl_denied"
 3. Message en DLQ, chercher raison
 
