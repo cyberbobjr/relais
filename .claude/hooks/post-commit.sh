@@ -21,8 +21,8 @@ nohup "$CLAUDE_BIN" --dangerously-skip-permissions -p \
    - docs/ARCHITECTURE.md
    - .claude/plan/relais-implementation.md
    Focus on: new or modified bricks/services, changed Redis stream names or schemas, updated configuration keys (channels.yaml, profiles.yaml, mcp_servers.yaml), modified pipeline flows, new dependencies in pyproject.toml, changed Envelope fields or ACL rules. Do NOT rewrite accurate documentation.
-3. Re-index the project with jCodemunch: call mcp__jcodemunch__index_folder with path='/Users/benjaminmarchand/IdeaProjects/relais' and incremental=true." \
-4. Update all todo plans located in ".claude/todo/" dir, these plans focused on todo features or todo improvements that are still relevant after the commit. Update the todo plans files accordingly to changes made by the commits." \
+3. Re-index the project with jCodemunch: call mcp__jcodemunch__index_folder with path='/Users/benjaminmarchand/IdeaProjects/relais' and incremental=true.
+4. Update all todo plans located in \".claude/todo/\" dir, these plans focused on todo features or todo improvements that are still relevant after the commit. Update the todo plans files accordingly to changes made by the commits." \
 >> "$LOG" 2>&1 &
 
 echo "[$(date)] claude lancé en arrière-plan (PID $!)" >> "$LOG"

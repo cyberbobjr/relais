@@ -231,7 +231,7 @@ Ce champ est résolu par le **Portail** en `llm_profile` et stampé sur `relais:
 
 | Champ | Type | Valeur | Source |
 |-------|------|--------|--------|
-| `llm_profile` | `string` | Nom du profil LLM résolu | `channel_profile` (incoming) → `"default"` |
+| `llm_profile` | `string` | Nom du profil LLM résolu | `channel_profile` (Aiguilleur) → `user.llm_profile` (portail.yaml) → `role.llm_profile` (portail.yaml) → `"default"` |
 
 Ce champ est présent sur toutes les enveloppes enrichies. L'Atelier le lit via `envelope.metadata.get("llm_profile", "default")` pour charger le `ProfileConfig` approprié depuis `profiles.yaml`.
 

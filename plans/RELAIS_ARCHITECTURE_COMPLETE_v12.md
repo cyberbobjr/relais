@@ -627,7 +627,6 @@ atelier/
 ├── mcp_session_manager.py  # Cycle de vie des serveurs MCP
 ├── tool_policy.py          # ToolPolicy — résolution skills_dirs + filtrage MCP (fail-closed)
 ├── mcp_loader.py           # Chargement config MCP servers
-├── profile_loader.py       # ProfileConfig, ResilienceConfig
 ├── soul_assembler.py       # Assemblage prompt système
 └── stream_publisher.py     # Publication chunks Redis
 ```
@@ -951,11 +950,13 @@ Message utilisateur                                      N tokens
 
 Le profil actif pour un message entrant est résolu dans cet ordre strict (le premier trouvé gagne) :
 
-1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["llm_profile"]`)
-2. **`config.yaml > llm.default_profile`** — profil système par défaut
-3. **`"default"`** — valeur de repli ultime si `llm.default_profile` est absent de `config.yaml`
+1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["channel_profile"]`, résolu par le Portail)
+2. **`users.yaml:llm_profile`** — préférence par utilisateur (portail.yaml, champ optionnel ; `null` = pas de préférence)
+3. **`roles.<role>.llm_profile`** — préférence par rôle (portail.yaml, champ optionnel)
+4. **`config.yaml > llm.default_profile`** — profil système par défaut
+5. **`"default"`** — valeur de repli ultime si `llm.default_profile` est absent de `config.yaml`
 
-> Le champ `llm_profile` dans `users.yaml` n'est **pas** utilisé pour la résolution du modèle — il s'agit d'une métadonnée informative uniquement.
+> La résolution est effectuée par le **Portail** (`portail/main.py`) et le résultat est stampé dans `envelope.metadata["llm_profile"]` sur le stream `relais:security`. Le champ `user.llm_profile` dans portail.yaml est donc **actif** — `null` signifie "pas de préférence, laisser le canal ou le rôle décider".
 
 ```yaml
 profiles:
@@ -1260,6 +1261,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── init.py                        ← initialize_user_dir()
 │   ├── user_registry.py               ← UserRegistry + UserRecord
 │   ├── role_registry.py               ← RoleRegistry + RoleConfig (skills_dirs, allowed_mcp_tools)
+│   ├── profile_loader.py              ← ProfileConfig + ResilienceConfig (shared by Atelier + Souvenir)
 │   └── markdown_converter.py
 │
 ├── aiguilleur/

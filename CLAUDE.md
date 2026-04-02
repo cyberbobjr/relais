@@ -69,6 +69,7 @@ The main pipeline flows through these bricks in order:
   - `redis_client.py`: Async Redis factory with per-brick ACL (password per service)
   - `config_loader.py`: YAML config cascade (user > system > project)
   - `user_registry.py`: UserRegistry and UserRecord for user resolution from users.yaml
+  - `profile_loader.py`: ProfileConfig and ResilienceConfig — loads LLM profiles from profiles.yaml; shared by Atelier and Souvenir
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings

@@ -110,7 +110,7 @@ XADD relais:security * payload <Envelope JSON>
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (from incoming metadata) → `"default"`. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
+| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (Aiguilleur) → `user.llm_profile` (portail.yaml) → `role.llm_profile` (portail.yaml) → `"default"`. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
 | `user_role` | `string` | User role resolved from `UserRegistry` (users.yaml) — used by Atelier for role-based prompt layer selection. |
 | `display_name` | `string` | User display name from `UserRegistry` (users.yaml). |
 | `custom_prompt_path` | `string` (optional) | Custom prompt override path if defined in user profile (users.yaml). |

@@ -354,7 +354,13 @@ uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --
 
 ### `profiles.yaml` — Profils LLM
 
-Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est résolu dans cet ordre de priorité : **`profile` dans `channels.yaml`** (canal gagne toujours) → `llm_profile` dans `user_record` (rôle utilisateur) → `llm.default_profile` dans `config.yaml` (fallback système).
+Chaque profil définit le comportement LLM pour une catégorie d'usage. Le profil actif est résolu par le **Portail** dans cet ordre de priorité (le premier trouvé gagne) :
+
+1. **`channels.yaml : profile`** — profil du canal d'origine (stampé par l'Aiguilleur)
+2. **`portail.yaml : users.<id>.llm_profile`** — préférence par utilisateur (`null` = pas de préférence)
+3. **`portail.yaml : roles.<role>.llm_profile`** — préférence par rôle (`null` = pas de préférence)
+4. **`config.yaml : llm.default_profile`** — profil système par défaut
+5. **`"default"`** — repli ultime
 
 Le champ `model` utilise le format `provider:model-id` (ex. `anthropic:claude-haiku-4-5`). Les champs `base_url` et `api_key_env` sont **obligatoires** dans chaque profil — déclarez-les explicitement même si leur valeur est `null`.
 
