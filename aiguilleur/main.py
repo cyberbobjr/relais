@@ -1,7 +1,45 @@
-"""AIGUILLEUR entry point — unified channel adapter supervisor.
+"""Aiguilleur brick — unified channel adapter supervisor.
 
-Loads channel configurations from channels.yaml and starts one adapter
-per enabled channel.  Handles SIGTERM/SIGINT for graceful shutdown.
+Functional role
+---------------
+Entry point for all external channel integrations (Discord, Telegram, etc.).
+Loads channel definitions from channels.yaml and spawns one adapter per
+enabled channel.  Acts as the ingestion boundary: each adapter translates
+external API events into Envelope messages and pushes them onto the Redis bus.
+
+Technical overview
+------------------
+``AiguilleurManager`` reads channels.yaml and instantiates either:
+
+* ``NativeAiguilleur`` — Python adapters (e.g. DiscordAiguilleur) run in a
+  dedicated OS thread via ``asyncio.run``.
+* ``ExternalAiguilleur`` — non-Python adapters launched as subprocesses via
+  ``subprocess.Popen``.
+
+Automatic restart uses exponential backoff: ``min(2 ** restart_count, 30)``
+seconds, up to 5 restarts per channel before the adapter is marked as failed.
+
+Each adapter stamps ``envelope.metadata["channel_profile"]`` from
+``ChannelConfig.profile`` (channels.yaml) → ``get_default_llm_profile()``
+(config.yaml: llm.default_profile) → ``"default"`` (resolved by Portail).
+
+Redis channels
+--------------
+Produced (by each adapter):
+  - relais:messages:incoming:{channel}  — one stream per enabled channel
+
+Consumed (by the corresponding relay adapter process):
+  - relais:messages:outgoing:{channel}  — outbound replies routed back to the
+    external API by the same adapter
+
+Processing flow
+---------------
+  (1) Load channels.yaml; skip disabled entries.
+  (2) For each enabled channel: instantiate NativeAiguilleur or
+      ExternalAiguilleur depending on the adapter type.
+  (3) Start all adapters (threads / subprocesses) concurrently.
+  (4) Monitor adapter health; restart with exponential backoff on crash.
+  (5) On SIGTERM / SIGINT: signal all adapters to stop, await clean exit.
 """
 
 import logging

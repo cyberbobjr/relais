@@ -1,3 +1,67 @@
+"""Sentinelle brick — bidirectional security checkpoint.
+
+Functional role
+---------------
+Guards both directions of the pipeline.  On the *incoming* path it performs
+ACL validation and routes authorized messages toward the right processor:
+slash commands go to Commandant, normal messages go to Atelier.  On the
+*outgoing* path it receives fully assembled replies from the pending stream
+and fans them out to the correct per-channel output stream.
+
+Technical overview
+------------------
+``Sentinelle`` runs two concurrent asyncio loops:
+
+* ``_process_stream`` (incoming) — consumes ``relais:security``, extracts the
+  ``user_record`` stamped by Portail, calls ``ACLManager`` for role-based
+  access control, detects slash commands via ``is_command`` /
+  ``extract_command_name`` / ``KNOWN_COMMANDS`` (common.command_utils), and
+  either routes to ``relais:commands`` or rejects inline with a reply
+  envelope.
+* ``_process_outgoing_stream`` (outgoing) — consumes
+  ``relais:messages:outgoing_pending``, applies outgoing guardrails (currently
+  a passthrough), and publishes the envelope to
+  ``relais:messages:outgoing:{channel}``.
+
+``ACLManager`` (sentinelle.acl) resolves role-based permissions from
+users.yaml.
+
+Redis channels
+--------------
+Consumed:
+  - relais:security                   (consumer group: sentinelle_group)
+  - relais:messages:outgoing_pending  (consumer group: sentinelle_outgoing_group)
+
+Produced:
+  - relais:tasks                      — authorized normal messages → Atelier
+  - relais:commands                   — authorized slash commands → Commandant
+  - relais:messages:outgoing:{channel}— inline rejection replies + outgoing fwd
+  - relais:logs                       — operational log entries
+
+Processing flow — incoming
+--------------------------
+  (1) Consume from relais:security (sentinelle_group).
+  (2) Deserialize Envelope; extract user_record from metadata.
+  (3) ACL identity check via ACLManager.
+  (4a) Authorized + is_command: validate against KNOWN_COMMANDS, check
+       command-level ACL; route to relais:commands or send inline rejection.
+  (4b) Authorized + normal message: forward to relais:tasks.
+  (4c) Unauthorized: drop silently and write to relais:logs.
+  (5) XACK.
+
+Processing flow — outgoing
+--------------------------
+  (1) Consume from relais:messages:outgoing_pending (sentinelle_outgoing_group).
+  (2) Deserialize Envelope.
+  (3) Apply outgoing guardrails (passthrough today).
+  (4) Publish to relais:messages:outgoing:{envelope.channel}.
+  (5) XACK.
+
+XACK contract:
+  - Both loops ACK unconditionally after processing (errors are logged, not
+    retried via PEL, to avoid blocking the outgoing path on transient issues).
+"""
+
 import asyncio
 import logging
 import os

@@ -15,7 +15,7 @@ from langchain_core.tools import BaseTool
 from langchain.chat_models import BaseChatModel, init_chat_model
 
 from deepagents import create_deep_agent
-from atelier.profile_loader import ProfileConfig
+from common.profile_loader import ProfileConfig
 from common.envelope import Envelope
 
 STREAM_BUFFER_CHARS = 80

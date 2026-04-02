@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from atelier.profile_loader import ProfileConfig, ResilienceConfig
+from common.profile_loader import ProfileConfig, ResilienceConfig
 
 
 # ---------------------------------------------------------------------------
@@ -111,17 +111,17 @@ def test_souvenir_falls_back_to_haiku_on_profile_load_failure() -> None:
 def test_load_profiles_delegates_to_resolve_config_path(tmp_path: "pytest.TempPathFactory") -> None:
     """load_profiles() must delegate file lookup to resolve_config_path().
 
-    This verifies that atelier.profile_loader does NOT contain its own private
+    This verifies that common.profile_loader does NOT contain its own private
     _CASCADE_DIRS / _find_config_file() cascade that bypasses the RELAIS_HOME
     environment variable.  The contract is: when resolve_config_path raises
     FileNotFoundError, load_profiles() (without an explicit config_path) must
     propagate that same error — proving that it called resolve_config_path
     rather than its own lookup logic.
     """
-    from atelier.profile_loader import load_profiles
+    from common.profile_loader import load_profiles
 
     with patch(
-        "atelier.profile_loader.resolve_config_path",
+        "common.profile_loader.resolve_config_path",
         side_effect=FileNotFoundError("mocked cascade — no profiles.yaml found"),
     ) as mock_resolve:
         with pytest.raises(FileNotFoundError, match="mocked cascade"):
@@ -179,7 +179,7 @@ def test_souvenir_init_load_profiles_respects_relais_home(
     importlib.reload(ccl)
 
     # Also reload profile_loader so it uses the freshly reloaded resolve_config_path.
-    import atelier.profile_loader as pl
+    import common.profile_loader as pl
     importlib.reload(pl)
 
     with (

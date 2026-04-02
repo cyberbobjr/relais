@@ -133,21 +133,6 @@ class UserRegistry:
         """The configured guest_profile from portail.yaml (or 'fast' default)."""
         return self._guest_profile
 
-    def reload(self) -> None:
-        """Reload portail.yaml from disk, rebuilding all lookup tables atomically.
-
-        Useful for hot-reload triggered by an admin command.  The tables are
-        replaced atomically so concurrent readers see either the old or the new
-        view — never a partial state (within CPython's GIL).
-        """
-        self._sender_index = {}
-        self._by_identifier = {}
-        self._roles_raw = {}
-        self._unknown_user_policy = "deny"
-        self._guest_profile = "fast"
-        self._load()
-        logger.info("UserRegistry reloaded from %s", self._config_path)
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

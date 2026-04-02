@@ -1,24 +1,66 @@
 """Atelier brick — DeepAgents-based LLM execution pipeline.
 
+Functional role
+---------------
+Executes the agentic LLM loop for each authorized task.  Fetches short-term
+context from Souvenir, assembles the system prompt (soul + role + user layers),
+runs the DeepAgents loop with MCP and internal tools, streams token-by-token
+output to the channel, and publishes the final reply for Sentinelle to deliver.
+
+Technical overview
+------------------
+Key classes:
+
+* ``AgentExecutor`` (atelier.agent_executor) — orchestrates a single
+  ``deepagents.create_deep_agent()`` call; handles streaming via
+  ``agent.astream(stream_mode="messages")``.
+* ``McpSessionManager`` (atelier.mcp_session_manager) — manages stdio/SSE MCP
+  server lifecycle across requests.
+* ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
+  and filters MCP tool definitions (enforces ``mcp_max_tools``).
+* ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
+  system prompt from soul / role / user / channel / policy prompt files.
+* ``ProfileConfig`` — loaded from profiles.yaml; selects model, temperature,
+  max_tokens, mcp_timeout, mcp_max_tools per request.
+* ``StreamPublisher`` — publishes streaming chunks to
+  ``relais:messages:streaming:{channel}:{corr_id}`` for real-time rendering.
+
+Redis channels
+--------------
+Consumed:
+  - relais:tasks               (consumer group: atelier_group)
+
+Produced:
+  - relais:messages:outgoing_pending   — full reply envelope → Sentinelle
+  - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
+  - relais:tasks:failed        — DLQ for exhausted retry attempts
+  - relais:memory:request      — context fetch request → Souvenir
+  - relais:logs                — operational log entries
+
+Read:
+  - relais:memory:response     — context history returned by Souvenir
+
 Message flow (one task at a time):
 
   relais:tasks
-    │  (1) deserialise Envelope, resolve profile
+    │  (1) deserialise Envelope, resolve ProfileConfig
     │  (2) request context from Souvenir  ──► relais:memory:request
     │                                     ◄── relais:memory:response
-    │  (3) assemble soul system prompt
-    │  (4) start MCP sessions + build LangChain tools
+    │  (3) assemble soul system prompt (SoulAssembler)
+    │  (4) start MCP sessions + build LangChain tools (McpSessionManager +
+    │      ToolPolicy)
     │  (5) AgentExecutor.execute() — DeepAgents agentic loop
     │      ├── streaming chunks ──► relais:messages:streaming:{channel}:{corr_id}
     │      └── full reply
     │  (6) publish response Envelope
-    └──► relais:messages:outgoing_pending:{channel}
+    └──► relais:messages:outgoing_pending
 
 XACK contract:
-  - Return True  → ACK (success or final error routed to DLQ)
-  - Return False → no ACK (transient error; message stays in PEL for re-delivery)
+  - Return True  → ACK (success or final error routed to relais:tasks:failed)
+  - Return False → no ACK (transient ConnectError / TimeoutException; message
+    stays in PEL for automatic re-delivery)
 
-For streaming-capable channels (discord, telegram, tui) each text chunk is
+For streaming-capable channels (telegram, tui) each text chunk is
 also published via StreamPublisher for real-time rendering before the full
 reply is ready.
 """
@@ -46,7 +88,7 @@ logging.basicConfig(
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
-from atelier.profile_loader import load_profiles, resolve_profile
+from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
 from atelier.agent_executor import AgentExecutor, AgentExecutionError

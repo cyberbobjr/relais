@@ -1,4 +1,4 @@
-"""Profile loader for the Atelier brick.
+"""Profile loader — shared by Atelier and Souvenir bricks.
 
 Reads LLM profiles from a YAML configuration file following the standard
 config cascade: ~/.relais/config/ > /opt/relais/config/ > ./config/.

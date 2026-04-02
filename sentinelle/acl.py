@@ -12,9 +12,7 @@ This enforces single-responsibility:
 
 from __future__ import annotations
 
-import json
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
@@ -66,15 +64,6 @@ class ACLManager:
         self._access_control: dict[str, Any] = {"default_mode": "allowlist"}
         self._permissive: bool = False
         self._load()
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def unknown_user_policy(self) -> str:
-        """Return 'deny' — kept for interface compatibility with Sentinelle main."""
-        return "deny"
 
     # ------------------------------------------------------------------
     # Public API
@@ -156,49 +145,6 @@ class ACLManager:
             "ACL deny — role %s does not allow command /%s", user_record.role, action
         )
         return False
-
-    async def notify_pending(
-        self,
-        redis_conn: Any,
-        sender_id: str,
-        channel: str,
-    ) -> None:
-        """Publish an unknown-user notification to relais:admin:pending_users.
-
-        Kept for interface compatibility.  Should be called by Sentinelle after
-        :meth:`is_allowed` returns False.
-
-        Args:
-            redis_conn: Active async Redis connection exposing ``xadd``.
-            sender_id: The sender identifier.
-            channel: The channel on which the sender sent a message.
-        """
-        payload: dict[str, str] = {
-            "user_id": sender_id,
-            "channel": channel,
-            "timestamp": str(time.time()),
-            "policy": "pending",
-        }
-        await redis_conn.xadd(
-            "relais:admin:pending_users",
-            {"payload": json.dumps(payload)},
-        )
-        logger.info(
-            "ACL [pending]: published unknown user %s on %s to admin review stream",
-            sender_id,
-            channel,
-        )
-
-    def reload(self) -> None:
-        """Reload sentinelle.yaml from disk, rebuilding ACL tables.
-
-        Useful for hot-reload triggered by an admin command.
-        """
-        self._groups = {}
-        self._access_control = {"default_mode": "allowlist"}
-        self._permissive = False
-        self._load()
-        logger.info("ACL configuration reloaded from %s", self._config_path)
 
     # ------------------------------------------------------------------
     # Internal helpers

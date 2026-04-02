@@ -1,3 +1,53 @@
+"""Portail brick — user identity resolution and envelope enrichment.
+
+Functional role
+---------------
+First processing stage after channel ingestion.  Validates each incoming
+Envelope, resolves the sender's identity from users.yaml via ``UserRegistry``,
+and enriches the envelope's metadata before forwarding it to Sentinelle for
+ACL enforcement.  Unknown senders are handled according to the configured
+``unknown_user_policy`` (reject or allow as guest).
+
+Technical overview
+------------------
+``Portail`` is a single asyncio consumer loop.  Key helpers:
+
+* ``UserRegistry`` — loads and caches user records from users.yaml;
+  resolves ``sender_id`` → ``UserRecord``.
+* ``_enrich_envelope`` — writes the canonical ``user_record`` dict and
+  derived fields (``display_name``, ``user_role``, ``llm_profile``,
+  ``custom_prompt_path``) into ``envelope.metadata``.
+* ``_apply_guest_stamps`` — stamps minimal guest metadata when the sender
+  is unknown and the guest policy is "allow".
+* ``_update_active_sessions`` — maintains a Redis Hash used by Crieur to
+  push proactive notifications to active users.
+
+Redis channels
+--------------
+Consumed:
+  - relais:messages:incoming  (consumer group: portail_group)
+
+Produced:
+  - relais:security           — enriched envelopes forwarded to Sentinelle
+  - relais:logs               — operational log entries
+
+Redis keys written:
+  - relais:active_sessions:{sender_id}  (Hash, TTL 1 h)
+
+Processing flow
+---------------
+  (1) Consume from relais:messages:incoming (portail_group).
+  (2) Deserialize Envelope from JSON payload.
+  (3) Resolve sender via UserRegistry.
+  (4) Apply unknown_user_policy: drop silently or stamp guest metadata.
+  (5) Enrich envelope.metadata with user_record, display_name, user_role,
+      llm_profile (resolved from channel_profile), custom_prompt_path.
+  (6) Update relais:active_sessions:{sender_id} hash.
+  (7) Forward enriched envelope to relais:security.
+  (8) XACK the message (unconditional — validation errors are logged and
+      dropped, never left in PEL).
+"""
+
 import asyncio
 import logging
 import os

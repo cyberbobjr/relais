@@ -1,10 +1,65 @@
-"""Brique Souvenir — gestion de la mémoire court et long terme.
+"""Souvenir brick — short-term and long-term memory service.
 
-Architecture dual-stream :
+Functional role
+---------------
+Maintains conversational memory for all users.  Serves context history to
+Atelier on demand (short-term cache) and passively observes outgoing replies
+to archive exchanges and extract durable user facts (long-term store).
 
-* ``relais:memory:request``          — requêtes ``get`` depuis Atelier.
-* ``relais:messages:outgoing:{ch}``  — observation des réponses pour archivage
-                                        et extraction de faits.
+Technical overview
+------------------
+``Souvenir`` runs two concurrent asyncio consumer loops:
+
+* Request loop — handles ``get`` / ``store_memory`` actions from Atelier and
+  returns a JSON context payload on ``relais:memory:response``.
+* Outgoing observer loop — watches per-channel outgoing streams to append each
+  exchange to the rolling context cache, archive it to SQLite, and fire-and-
+  forget LLM-based fact extraction.
+
+Key classes:
+
+* ``ContextStore`` — Redis List ``relais:context:{user_id}``; capped at 20
+  messages, TTL 24 h.
+* ``LongTermStore`` — SQLite ``~/.relais/storage/messages.db``; stores full
+  message history and a ``user_facts`` table.
+* ``MemoryExtractor`` — calls the LLM via
+  ``langchain.chat_models.init_chat_model`` (provider:model-id format) to
+  extract structured facts; confidence threshold 0.7.
+* ``HandlerContext`` + action registry — extensible dispatch pattern for
+  request actions.
+
+Redis channels
+--------------
+Consumed:
+  - relais:memory:request               (consumer group: souvenir_group)
+  - relais:messages:outgoing:{channel}  for each channel in _DEFAULT_CHANNELS
+                                        (consumer group: souvenir_outgoing_group)
+
+Produced:
+  - relais:memory:response  — context history reply to Atelier
+  - relais:logs             — operational log entries
+
+Redis keys written:
+  - relais:context:{user_id}  (List, max 20 entries, TTL 24 h)
+
+Processing flow — request loop
+------------------------------
+  (1) Consume from relais:memory:request (souvenir_group).
+  (2) Parse action field from JSON payload.
+  (3) Dispatch to registered handler (get → return context; store_memory →
+      legacy compat path).
+  (4) Publish JSON response to relais:memory:response.
+  (5) XACK.
+
+Processing flow — outgoing observer loop
+-----------------------------------------
+  (1) Consume from relais:messages:outgoing:{channel}
+      (souvenir_outgoing_group).
+  (2) Deserialize Envelope.
+  (3) Append user + assistant turn to relais:context:{user_id} (Redis List).
+  (4) Archive exchange to SQLite long-term store.
+  (5) Fire-and-forget: MemoryExtractor extracts facts; upsert to user_facts.
+  (6) XACK.
 """
 
 import asyncio
@@ -21,7 +76,7 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-from atelier.profile_loader import load_profiles, resolve_profile
+from common.profile_loader import load_profiles, resolve_profile
 from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown

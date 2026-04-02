@@ -48,18 +48,6 @@ def _write_sentinelle_yaml(tmp_path: Path, content: str = _SENTINELLE_YAML) -> P
     return p
 
 
-# Keep legacy alias used in reload tests below
-def _write_users_yaml(tmp_path: Path, content: str = _SENTINELLE_YAML) -> Path:
-    """Write a sentinelle.yaml file (legacy alias for backward compat with reload tests).
-
-    Args:
-        tmp_path: Pytest temporary directory fixture.
-        content: YAML content to write.
-
-    Returns:
-        Path to the created file.
-    """
-    return _write_sentinelle_yaml(tmp_path, content)
 
 
 def _make_user_record(
@@ -182,56 +170,6 @@ class TestACLManagerWithConfig:
         assert acl.is_allowed("discord:unknown999", "discord", user_record=None) is True
 
 
-class TestACLManagerReload:
-    """Tests for ACLManager.reload() hot-reload behaviour."""
-
-    def test_reload_picks_up_new_groups_from_disk(self, tmp_path: Path) -> None:
-        """reload() re-reads sentinelle.yaml and reflects changes made after initial load."""
-        config_path = _write_sentinelle_yaml(tmp_path)
-        acl = ACLManager(config_path=config_path)
-
-        # At this point, group "grp_test" does not exist — allowlist mode rejects unknown groups
-        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_test") is False
-
-        # Overwrite the YAML on disk with the new group allowed
-        updated_yaml = dedent("""\
-            access_control:
-              default_mode: allowlist
-            groups:
-              - channel: discord
-                group_id: "grp_test"
-                allowed: true
-                blocked: false
-        """)
-        config_path.write_text(updated_yaml, encoding="utf-8")
-
-        acl.reload()
-
-        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_test") is True
-
-    def test_reload_removes_old_groups_that_no_longer_exist(self, tmp_path: Path) -> None:
-        """reload() clears previously loaded groups that are absent from the updated file."""
-        initial_yaml = dedent("""\
-            access_control:
-              default_mode: allowlist
-            groups:
-              - channel: discord
-                group_id: "grp_existing"
-                allowed: true
-                blocked: false
-        """)
-        config_path = _write_sentinelle_yaml(tmp_path, initial_yaml)
-        acl = ACLManager(config_path=config_path)
-
-        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_existing") is True
-
-        # Remove the group from the file
-        config_path.write_text(_SENTINELLE_YAML, encoding="utf-8")
-        acl.reload()
-
-        assert acl.is_allowed("discord:anyone", "discord", context="group", scope_id="grp_existing") is False
-
-
 # ===========================================================================
 # ACLManager access-mode and command authorization tests
 # ===========================================================================
@@ -282,43 +220,6 @@ class TestACLManagerBlocklistMode:
         result = acl.is_allowed("discord:999", "discord")
         assert result is True
 
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestACLManagerNotifyPending:
-    """Tests for ACLManager.notify_pending() — publishes to admin stream."""
-
-    async def test_notify_pending_publishes_to_admin_stream(self) -> None:
-        """notify_pending publishes to relais:admin:pending_users stream.
-
-        Args: (none)
-        """
-        acl = ACLManager(config_path=Path("/nonexistent/sentinelle.yaml"))
-
-        redis_mock = AsyncMock()
-        redis_mock.xadd = AsyncMock(return_value="0-0")
-
-        await acl.notify_pending(redis_mock, "discord:999", "discord")
-
-        redis_mock.xadd.assert_awaited_once()
-        call_args = redis_mock.xadd.call_args
-        stream_name = call_args[0][0]
-        assert stream_name == "relais:admin:pending_users"
-
-    async def test_notify_pending_payload_contains_user_id(self) -> None:
-        """Payload published to pending_users includes the unknown user_id.
-
-        Args: (none)
-        """
-        acl = ACLManager(config_path=Path("/nonexistent/sentinelle.yaml"))
-
-        redis_mock = AsyncMock()
-        redis_mock.xadd = AsyncMock(return_value="0-0")
-
-        await acl.notify_pending(redis_mock, "discord:999", "discord")
-
-        payload_dict = redis_mock.xadd.call_args[0][1]
-        assert "discord:999" in str(payload_dict)
 
 
 # ===========================================================================

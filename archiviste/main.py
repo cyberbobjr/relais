@@ -1,3 +1,62 @@
+"""Archiviste brick — system-wide observer and audit logger.
+
+Functional role
+---------------
+Passive observer that records all system events and pipeline messages without
+ever blocking or rejecting them.  Writes structured JSONL audit files and
+re-emits Redis log entries to the Python logging subsystem for real-time
+console visibility.
+
+Technical overview
+------------------
+``Archiviste`` runs two concurrent asyncio consumer loops:
+
+* ``_process_stream`` — subscribes to the three event streams
+  (relais:logs, relais:events:system, relais:events:messages).  Each message
+  is serialized to a JSONL file via ``_write_event``; entries arriving on
+  ``relais:logs`` are additionally re-emitted through ``logging.getLogger``.
+* ``_process_pipeline_streams`` — subscribes to the full pipeline stream list
+  (``_PIPELINE_STREAMS``).  Each message is deserialized as an ``Envelope``
+  (best-effort) and logged via the ``archiviste.pipeline`` logger for
+  end-to-end traceability.
+
+Output files:
+  - ``~/.relais/logs/events.jsonl``  — all event stream entries
+  - supervisord stdout / ``~/.relais/logs/archiviste.log``  — pipeline traces
+
+Redis channels
+--------------
+Consumed (event streams):
+  - relais:logs               (consumer group: archiviste_group)
+  - relais:events:system      (consumer group: archiviste_group)
+  - relais:events:messages    (consumer group: archiviste_group)
+
+Consumed (pipeline observation):
+  - relais:messages:incoming          (consumer group: archiviste_pipeline_group)
+  - relais:security                   (consumer group: archiviste_pipeline_group)
+  - relais:tasks                      (consumer group: archiviste_pipeline_group)
+  - relais:tasks:failed               (consumer group: archiviste_pipeline_group)
+  - relais:messages:outgoing:discord  (consumer group: archiviste_pipeline_group)
+  (add new outgoing streams to _PIPELINE_STREAMS as channels are introduced)
+
+Processing flow — event loop
+----------------------------
+  (1) Consume from relais:logs + relais:events:* (archiviste_group).
+  (2) Write raw event dict to events.jsonl via _write_event.
+  (3) If stream is relais:logs: re-emit via Python logging.
+  (4) XACK.
+
+Processing flow — pipeline loop
+--------------------------------
+  (1) Consume from each stream in _PIPELINE_STREAMS (archiviste_pipeline_group).
+  (2) Attempt Envelope deserialization (log raw data on failure).
+  (3) Log envelope metadata (correlation_id, sender, channel, traces).
+  (4) XACK.
+
+XACK contract:
+  - Both loops ACK unconditionally — Archiviste must never stall the pipeline.
+"""
+
 import asyncio
 import json
 import logging
