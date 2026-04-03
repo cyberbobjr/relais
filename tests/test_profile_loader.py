@@ -599,57 +599,6 @@ def test_profile_config_missing_required_fields_raises_key_error(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# 28. profiles.yaml.default includes the memory_extractor profile
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_load_profiles_includes_memory_extractor() -> None:
-    """The shipped profiles.yaml.default must contain a 'memory_extractor' profile.
-
-    This test reads the real default config file to ensure the profile was
-    actually added — not just a fixture. Fails RED until the YAML is updated.
-    """
-    profiles = load_profiles(config_path=_DEFAULT_PROFILES_PATH)
-
-    assert "memory_extractor" in profiles, (
-        "profiles.yaml.default is missing the 'memory_extractor' profile"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 29. memory_extractor profile uses anthropic:claude-haiku-4-5 (DeepAgents format)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_memory_extractor_profile_model_is_haiku() -> None:
-    """The memory_extractor profile must declare model='anthropic:claude-haiku-4-5'.
-
-    Args: none (reads the shipped default config file).
-    """
-    profiles = load_profiles(config_path=_DEFAULT_PROFILES_PATH)
-
-    assert profiles["memory_extractor"].model == "anthropic:claude-haiku-4-5"
-
-
-# ---------------------------------------------------------------------------
-# 30. memory_extractor profile has low temperature for deterministic JSON
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_memory_extractor_profile_temperature_is_low() -> None:
-    """The memory_extractor profile must declare temperature=0.1 for deterministic output.
-
-    Args: none (reads the shipped default config file).
-    """
-    profiles = load_profiles(config_path=_DEFAULT_PROFILES_PATH)
-
-    assert profiles["memory_extractor"].temperature == 0.1
-
-
-# ---------------------------------------------------------------------------
 # 31. All profiles in profiles.yaml.default use provider:model format (DeepAgents)
 # ---------------------------------------------------------------------------
 

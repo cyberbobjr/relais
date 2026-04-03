@@ -6,6 +6,7 @@ from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.envelope import Envelope
+from atelier.agent_executor import AgentResult
 from common.shutdown import GracefulShutdown
 from portail.main import Portail
 from sentinelle.main import Sentinelle
@@ -124,7 +125,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         MockMcpMgr.return_value = mock_mgr
 
         mock_executor = AsyncMock()
-        mock_executor.execute.return_value = "Je suis RELAIS, comment puis-je t'aider ?"
+        mock_executor.execute.return_value = AgentResult(reply_text="Je suis RELAIS, comment puis-je t'aider ?", messages_raw=[])
         MockAgent.return_value = mock_executor
 
         atelier = Atelier()

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.envelope import Envelope
-from atelier.agent_executor import AgentExecutionError
+from atelier.agent_executor import AgentExecutionError, AgentResult
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ async def test_xack_sent_after_successful_sdk_call() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="Response from SDK")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="Response from SDK", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -277,7 +277,7 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -311,7 +311,7 @@ async def test_handle_message_requests_memory_from_souvenir() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -360,7 +360,7 @@ async def test_handle_message_injects_user_message_in_response_metadata() -> Non
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="Sunny and warm.")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="Sunny and warm.", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -403,7 +403,7 @@ async def test_handle_message_acks_on_success() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -535,7 +535,7 @@ async def test_streaming_signal_published_for_telegram_channel() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -585,7 +585,7 @@ async def test_streaming_signal_not_published_for_non_streaming_channel() -> Non
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -629,7 +629,7 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="final reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="final reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -724,7 +724,7 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -787,7 +787,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="Streamed reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="Streamed reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -839,7 +839,7 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="Non-streamed reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="Non-streamed reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -892,7 +892,7 @@ async def test_process_stream_passes_user_role_to_assemble_system_prompt() -> No
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -934,7 +934,7 @@ async def test_process_stream_user_role_none_when_absent_in_metadata() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -1125,7 +1125,7 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value="reply")
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
 
         def capture_call(*args, **kwargs):
             executor_calls.append(kwargs)

@@ -130,15 +130,14 @@ class Souvenir:
             context_store: Store court terme Redis.
             long_term_store: Store long terme SQLite.
         """
-        user_message = envelope.metadata.get("user_message", "")
+        messages_raw: list[dict] = envelope.metadata.get("messages_raw") or []
 
         await context_store.append_turn(
             session_id=envelope.session_id,
-            user_content=user_message,
-            assistant_content=envelope.content,
+            messages_raw=messages_raw,
         )
 
-        await long_term_store.archive(envelope)
+        await long_term_store.archive(envelope, messages_raw)
 
     # ------------------------------------------------------------------
     # Internal consumer loops

@@ -102,7 +102,7 @@ from common.shutdown import GracefulShutdown
 from atelier.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
-from atelier.agent_executor import AgentExecutor, AgentExecutionError
+from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
@@ -283,17 +283,19 @@ class Atelier:
                         envelope.to_json(),
                     )
 
-                reply_text = await agent_executor.execute(
+                agent_result = await agent_executor.execute(
                     envelope=envelope,
                     context=context,
                     stream_callback=stream_pub.push_chunk if streaming else None,
                     progress_callback=stream_pub.push_progress,
                 )
             # MCP sessions closed; finalize stream and publish response.
+            reply_text = agent_result.reply_text
 
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.metadata["user_message"] = envelope.content
+            response_env.metadata["messages_raw"] = agent_result.messages_raw
             if streaming:
                 await stream_pub.finalize()
                 response_env.metadata["streamed"] = True

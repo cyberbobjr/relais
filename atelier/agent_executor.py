@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
 from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
@@ -17,9 +18,27 @@ from langchain.chat_models import BaseChatModel, init_chat_model
 from deepagents import create_deep_agent
 from common.config_loader import get_relais_home
 from atelier.profile_loader import ProfileConfig
+from atelier.message_serializer import serialize_messages
 from common.envelope import Envelope
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """Immutable result of a single agentic turn.
+
+    Attributes:
+        reply_text: The final text reply produced by the agent (may be an
+            empty string when only tool calls were made).
+        messages_raw: Serialized flat list of all LangChain messages captured
+            from the agent graph state after the turn completes.  Each element
+            is a JSON-serializable dict as produced by ``serialize_messages()``.
+    """
+
+    reply_text: str
+    messages_raw: list[dict]
+
 
 STREAM_BUFFER_CHARS = 80
 REPLY_PLACEHOLDER = "[Aucune réponse générée par le modèle.]"
@@ -197,8 +216,11 @@ class AgentExecutor:
         context: list[dict[str, str]],
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
-    ) -> str:
+    ) -> AgentResult:
         """Run the agent on *envelope* with optional streaming and progress events.
+
+        After streaming completes, captures the full message list from the agent
+        graph state via ``aget_state()`` and serializes it to ``messages_raw``.
 
         Args:
             envelope: Incoming message envelope; `.content` is the user turn.
@@ -210,9 +232,8 @@ class AgentExecutor:
                 starts).  If ``None``, progress events are only logged locally.
 
         Returns:
-            The full LLM reply as a single string.  Falls back to the last
-            ToolMessage content when the model emits no AI text (nemotron-mini
-            pattern), and to a placeholder constant when nothing is emitted.
+            An ``AgentResult`` containing the full reply text and the serialized
+            message list for the completed turn.
 
         Raises:
             Exception: Transient provider errors (RateLimitError, InternalServerError,
@@ -227,14 +248,28 @@ class AgentExecutor:
             envelope.sender_id,
             len(messages),
         )
+        config = {"configurable": {"thread_id": envelope.correlation_id}}
         try:
-            reply = await self._stream({"messages": messages}, stream_callback, progress_callback)
+            reply = await self._stream(
+                {"messages": messages}, stream_callback, progress_callback, config=config
+            )
+            # Capture full message list from the agent graph state
+            messages_raw: list[dict] = []
+            try:
+                state = await self._agent.aget_state(config)
+                state_messages = state.values.get("messages", [])
+                messages_raw = serialize_messages(state_messages)
+            except Exception as state_exc:
+                logger.warning(
+                    "Could not capture agent state messages: %s", state_exc
+                )
             logger.info(
-                "agent.execute done — correlation_id=%s reply_len=%d",
+                "agent.execute done — correlation_id=%s reply_len=%d messages=%d",
                 envelope.correlation_id,
                 len(reply),
+                len(messages_raw),
             )
-            return reply
+            return AgentResult(reply_text=reply, messages_raw=messages_raw)
         except AgentExecutionError:
             raise
         except Exception as exc:
@@ -247,6 +282,7 @@ class AgentExecutor:
         input_data: dict[str, list[dict[str, str]]],
         stream_callback: Callable[[str], Awaitable[None]] | None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
+        config: dict | None = None,
     ) -> str:
         """Stream tokens and events from the agent, logging all operations.
 
@@ -285,12 +321,15 @@ class AgentExecutor:
         last_tool_result: str = ""
         pending_tool_name: str = ""
 
-        async for chunk in self._agent.astream(
-            input_data,
-            stream_mode=["updates", "messages"],
-            subgraphs=True,
-            version="v2",
-        ):
+        stream_kwargs: dict = {
+            "stream_mode": ["updates", "messages"],
+            "subgraphs": True,
+            "version": "v2",
+        }
+        if config is not None:
+            stream_kwargs["config"] = config
+
+        async for chunk in self._agent.astream(input_data, **stream_kwargs):
             if not (isinstance(chunk, dict) and "type" in chunk and "ns" in chunk and "data" in chunk):
                 logger.warning("Unexpected astream chunk shape: %s", type(chunk))
                 continue

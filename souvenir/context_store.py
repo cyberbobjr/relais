@@ -198,49 +198,55 @@ class ContextStore:
         return messages
 
     async def get_recent(self, session_id: str, limit: int = 20) -> list[dict]:
-        """Retourne les ``limit`` derniers tours depuis la liste Redis.
+        """Retourne les ``limit`` derniers tours désérialisés et aplatis.
 
-        Utilise LRANGE avec des indices négatifs pour obtenir la fin de la
-        liste sans charger l'intégralité des entrées.
+        Chaque entrée Redis est un blob JSON contenant la liste complète de
+        messages d'un tour.  Cette méthode récupère les ``limit`` derniers
+        blobs, les désérialise et les aplatit en une liste unique de messages.
+
+        Les blobs malformés sont silencieusement ignorés.
 
         Args:
             session_id: Identifiant de la session.
-            limit: Nombre maximum de messages à retourner (défaut: 20).
+            limit: Nombre maximum de tours à récupérer (défaut: 20).
 
         Returns:
-            Liste de dicts ``{"role": str, "content": str}`` du plus ancien au
-            plus récent. Retourne ``[]`` si la session n'existe pas.
+            Liste plate de dicts message du plus ancien au plus récent.
+            Retourne ``[]`` si la session n'existe pas ou si tous les blobs
+            sont malformés.
         """
         key = self._key(session_id)
         raw: list[bytes] = await self._redis.lrange(key, -limit, -1)
         result: list[dict] = []
         for item in raw:
             try:
-                result.append(json.loads(item))
+                turn_messages = json.loads(item)
+                if isinstance(turn_messages, list):
+                    result.extend(turn_messages)
             except (json.JSONDecodeError, TypeError):
                 pass
         return result
 
     async def append_turn(
-        self, session_id: str, user_content: str, assistant_content: str
+        self, session_id: str, messages_raw: list[dict]
     ) -> None:
-        """Ajoute une paire utilisateur/assistant à l'historique de la session.
+        """Ajoute un tour agent complet comme un seul blob JSON dans la liste Redis.
 
-        Pousse les deux messages en un seul RPUSH, trim la liste à ``_max_messages``
-        éléments et renouvelle le TTL.
+        Stocke un seul élément JSON (la liste complète de messages du tour) via
+        RPUSH, trim la liste à ``_max_messages`` éléments et renouvelle le TTL.
 
         Args:
             session_id: Identifiant de la session cible.
-            user_content: Contenu du message utilisateur.
-            assistant_content: Contenu de la réponse de l'assistant.
+            messages_raw: Liste de dicts sérialisables JSON représentant tous les
+                messages LangChain du tour, telle que produite par
+                ``atelier.message_serializer.serialize_messages()``.
         """
         key = self._key(session_id)
-        user_turn = json.dumps({"role": "user", "content": user_content})
-        assistant_turn = json.dumps({"role": "assistant", "content": assistant_content})
-        await self._redis.rpush(key, user_turn, assistant_turn)
+        blob = json.dumps(messages_raw)
+        await self._redis.rpush(key, blob)
         await self._redis.ltrim(key, -self._max_messages, -1)
         await self._redis.expire(key, self._ttl_seconds)
-        logger.debug("Appended turn to session %s", session_id)
+        logger.debug("Appended turn blob to session %s (%d messages)", session_id, len(messages_raw))
 
     async def clear(self, session_id: str) -> None:
         """Efface l'historique d'une session.

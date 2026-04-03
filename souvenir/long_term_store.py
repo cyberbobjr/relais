@@ -1,6 +1,6 @@
 """Mémoire longue durée via SQLModel + SQLite async."""
 
-import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -14,7 +14,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from common.config_loader import resolve_storage_dir
-from souvenir.models import ArchivedMessage, Memory, UserFact
+from souvenir.models import ArchivedMessage, Memory
 
 if TYPE_CHECKING:
     from common.envelope import Envelope
@@ -185,125 +185,71 @@ class LongTermStore:
             rows = result.all()
         return [r.model_dump() for r in rows]
 
-    async def upsert_facts(self, sender_id: str, facts: list[dict]) -> None:
-        """Insère ou met à jour des faits utilisateur par ``(sender_id, fact_hash)``.
+    async def archive(
+        self,
+        envelope: "Envelope",
+        messages_raw: list[dict],
+    ) -> None:
+        """Archive un tour agent complet (upsert sur correlation_id).
 
-        Le hash est calculé sur ``sender_id:fact_text`` — deux appels avec le
-        même fait mettent à jour ``confidence``, ``category`` et ``updated_at``
-        sans créer de doublon.
+        Stocke une seule ligne dans ``archived_messages`` par ``correlation_id``.
+        Si une ligne existe déjà pour ce ``correlation_id``, elle est mise à jour.
 
         Args:
-            sender_id: Identifiant de l'utilisateur propriétaire des faits.
-            facts: Liste de dicts avec les clés ``fact``, ``category``,
-                ``confidence`` et optionnellement ``source_corr``.
+            envelope: L'enveloppe du message sortant (réponse de l'assistant).
+            messages_raw: Liste sérialisable JSON de tous les messages LangChain
+                du tour, telle que produite par
+                ``atelier.message_serializer.serialize_messages()``.
         """
         now = time.time()
-        async with self._session_factory() as session:
-            for fact_data in facts:
-                fact_text = fact_data["fact"]
-                fact_hash = hashlib.md5(
-                    f"{sender_id}:{fact_text}".encode()
-                ).hexdigest()
-                stmt = select(UserFact).where(
-                    UserFact.sender_id == sender_id,
-                    UserFact.fact_hash == fact_hash,
-                )
-                result = await session.exec(stmt)
-                existing = result.first()
-                if existing:
-                    existing.confidence = fact_data.get("confidence", existing.confidence)
-                    existing.category = fact_data.get("category", existing.category)
-                    existing.updated_at = now
-                    session.add(existing)
-                else:
-                    new_fact = UserFact(
-                        sender_id=sender_id,
-                        fact=fact_text,
-                        category=fact_data.get("category"),
-                        confidence=fact_data.get("confidence", 1.0),
-                        source_corr=fact_data.get("source_corr"),
-                        fact_hash=fact_hash,
-                    )
-                    session.add(new_fact)
-            await session.commit()
-        logger.debug("Upserted %d facts for sender=%s", len(facts), sender_id)
+        user_content = envelope.metadata.get("user_message", "")
+        assistant_content = envelope.content
+        messages_raw_json = json.dumps(messages_raw)
 
-    async def get_user_facts(self, sender_id: str, limit: int = 20) -> list[str]:
-        """Retourne la liste des faits connus d'un utilisateur (chaînes de texte).
-
-        Triés par ``updated_at`` descendant pour obtenir les plus récents en
-        premier.
-
-        Args:
-            sender_id: Identifiant de l'utilisateur.
-            limit: Nombre maximum de faits retournés (défaut: 20).
-
-        Returns:
-            Liste de chaînes représentant les faits.
-        """
-        async with self._session_factory() as session:
-            stmt = (
-                select(UserFact)
-                .where(UserFact.sender_id == sender_id)
-                .order_by(UserFact.updated_at.desc())  # type: ignore[arg-type]
-                .limit(limit)
+        stmt = (
+            sqlite_insert(ArchivedMessage)
+            .values(
+                session_id=envelope.session_id,
+                sender_id=envelope.sender_id,
+                channel=envelope.channel,
+                user_content=user_content,
+                assistant_content=assistant_content,
+                messages_raw=messages_raw_json,
+                correlation_id=envelope.correlation_id,
+                created_at=now,
             )
-            result = await session.exec(stmt)
-            return [row.fact for row in result.all()]
-
-    async def archive(self, envelope: "Envelope") -> None:
-        """Archive un message sortant (réponse assistant + message utilisateur).
-
-        Stocke deux lignes dans ``archived_messages`` : le message utilisateur
-        (extrait de ``envelope.metadata["user_message"]``) et la réponse de
-        l'assistant (``envelope.content``).
-
-        Args:
-            envelope: L'enveloppe du message sortant.
-        """
-        now = time.time()
-        user_message = envelope.metadata.get("user_message", "")
-        async with self._session_factory() as session:
-            if user_message:
-                session.add(
-                    ArchivedMessage(
-                        session_id=envelope.session_id,
-                        sender_id=envelope.sender_id,
-                        channel=envelope.channel,
-                        role="user",
-                        content=user_message,
-                        correlation_id=envelope.correlation_id,
-                        created_at=now - 0.001,  # slightly before assistant
-                    )
-                )
-            session.add(
-                ArchivedMessage(
-                    session_id=envelope.session_id,
-                    sender_id=envelope.sender_id,
-                    channel=envelope.channel,
-                    role="assistant",
-                    content=envelope.content,
-                    correlation_id=envelope.correlation_id,
-                    created_at=now,
-                )
+            .on_conflict_do_update(
+                index_elements=["correlation_id"],
+                set_={
+                    "user_content": user_content,
+                    "assistant_content": assistant_content,
+                    "messages_raw": messages_raw_json,
+                    "created_at": now,
+                },
             )
+        )
+        async with self._session_factory() as session:
+            await session.execute(stmt)
             await session.commit()
-        logger.debug("Archived message for session=%s", envelope.session_id)
+        logger.debug("Archived turn for session=%s correlation=%s", envelope.session_id, envelope.correlation_id)
 
     async def get_recent_messages(
         self, session_id: str, limit: int = 20
     ) -> list[dict]:
-        """Retourne les N derniers messages d'une session depuis SQLite.
+        """Retourne une liste plate des messages récents d'une session depuis SQLite.
 
-        Fallback utilisé quand le cache Redis est vide. Retourne les messages
-        dans l'ordre chronologique (plus ancien en premier).
+        Fallback utilisé quand le cache Redis est vide.  Désérialise les blobs
+        ``messages_raw`` de chaque tour et les aplatit en une liste unique de
+        messages dans l'ordre chronologique (plus ancien en premier).
 
         Args:
             session_id: Identifiant de la session.
-            limit: Nombre maximum de messages (défaut: 20).
+            limit: Nombre maximum de tours (défaut: 20).  Chaque tour peut
+                contenir plusieurs messages.
 
         Returns:
-            Liste de dicts ``{"role": str, "content": str}``.
+            Liste plate de dicts message tels que produits par
+            ``atelier.message_serializer.serialize_messages()``.
         """
         async with self._session_factory() as session:
             stmt = (
@@ -315,7 +261,19 @@ class LongTermStore:
             result = await session.exec(stmt)
             rows = result.all()
         rows = list(reversed(rows))
-        return [{"role": row.role, "content": row.content} for row in rows]
+        flat: list[dict] = []
+        for row in rows:
+            try:
+                turn_messages = json.loads(row.messages_raw)
+                if isinstance(turn_messages, list):
+                    flat.extend(turn_messages)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "Skipping malformed messages_raw for correlation=%s: %s",
+                    row.correlation_id,
+                    exc,
+                )
+        return flat
 
     async def clear_session(self, session_id: str) -> int:
         """Supprime tous les messages archivés d'une session SQLite.
@@ -391,7 +349,7 @@ class LongTermStore:
         if search is not None:
             pattern = f"%{search}%"
             base_stmt = base_stmt.where(
-                ArchivedMessage.content.ilike(pattern)  # type: ignore[union-attr]
+                ArchivedMessage.messages_raw.ilike(pattern)  # type: ignore[union-attr]
             )
 
         count_stmt = select(func.count()).select_from(

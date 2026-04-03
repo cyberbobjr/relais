@@ -45,9 +45,10 @@ def _make_ctx(req: dict, mock_redis: AsyncMock, context_store=None, long_term_st
 @pytest.mark.unit
 async def test_get_handler_returns_redis_cache() -> None:
     """GetHandler publie le cache Redis sur stream_res via XADD."""
+    # Each blob is a JSON list of messages (one turn per blob)
     cached_turns = [
-        json.dumps({"role": "user", "content": "hello"}).encode(),
-        json.dumps({"role": "assistant", "content": "hi"}).encode(),
+        json.dumps([{"role": "user", "content": "hello"}]).encode(),
+        json.dumps([{"role": "assistant", "content": "hi"}]).encode(),
     ]
     mock_redis = AsyncMock()
     mock_redis.xadd = AsyncMock()

@@ -138,7 +138,7 @@ async def test_execute_returns_ai_text_from_astream() -> None:
         )
         result = await executor.execute(_make_envelope("Hi"), context=[])
 
-    assert result == "reply from model"
+    assert result.reply_text == "reply from model"
 
 
 @pytest.mark.unit
@@ -158,7 +158,7 @@ async def test_execute_accumulates_multiple_ai_tokens() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("Hi"), context=[])
 
-    assert result == "Hello, world!"
+    assert result.reply_text == "Hello, world!"
 
 
 @pytest.mark.unit
@@ -249,7 +249,7 @@ async def test_execute_streaming_calls_stream_callback() -> None:
         )
 
     assert "".join(received) == "Hello world"
-    assert result == "Hello world"
+    assert result.reply_text == "Hello world"
 
 
 @pytest.mark.unit
@@ -280,7 +280,7 @@ async def test_execute_streaming_buffers_below_80_chars() -> None:
 
     # Called exactly once at the end (flush remaining)
     assert callback_count == 1
-    assert result == short_text
+    assert result.reply_text == short_text
 
 
 @pytest.mark.unit
@@ -315,7 +315,7 @@ async def test_execute_streaming_flushes_at_80_chars() -> None:
     assert len(received) == 2
     assert received[0] == "B" * 40 + "C" * 40
     assert received[1] == "D" * 10
-    assert result == chunk_a + chunk_b + remainder
+    assert result.reply_text == chunk_a + chunk_b + remainder
 
 
 @pytest.mark.unit
@@ -349,7 +349,7 @@ async def test_execute_streaming_skips_empty_content_chunks() -> None:
             _make_envelope("Hi"), context=[], stream_callback=callback
         )
 
-    assert result == "hello"
+    assert result.reply_text == "hello"
     assert "".join(received) == "hello"
 
 

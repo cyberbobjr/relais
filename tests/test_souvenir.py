@@ -326,13 +326,17 @@ def test_long_term_store_default_path_respects_relais_home(
 async def test_get_recent_returns_last_n_from_redis(
     context_store: ContextStore, mock_redis: AsyncMock
 ) -> None:
-    """get_recent() doit retourner les N derniers éléments depuis Redis."""
-    all_entries = [
-        json.dumps({"role": "user", "content": f"msg{i}"}).encode()
-        for i in range(5)
+    """get_recent() doit retourner les N derniers éléments depuis Redis.
+
+    Each Redis entry is a JSON blob containing a list of messages (one full turn).
+    get_recent() must deserialize each blob and flatten all messages into one list.
+    """
+    # 3 turn blobs, each containing 1 message
+    blobs = [
+        json.dumps([{"role": "user", "content": f"msg{i}"}]).encode()
+        for i in range(3)
     ]
-    # LRANGE with -3, -1 returns last 3
-    mock_redis.lrange.return_value = all_entries[-3:]
+    mock_redis.lrange.return_value = blobs
 
     result = await context_store.get_recent("sess-001", limit=3)
 
@@ -358,15 +362,19 @@ async def test_get_recent_returns_empty_list_when_no_cache(
 async def test_append_turn_rpush_and_ltrim(
     context_store: ContextStore, mock_redis: AsyncMock
 ) -> None:
-    """append_turn() doit RPUSH 2 items, LTRIM à -20, et EXPIRE 86400."""
-    await context_store.append_turn("sess-002", user_content="hello", assistant_content="hi")
+    """append_turn() doit RPUSH 1 blob, LTRIM à -20, et EXPIRE 86400."""
+    messages_raw = [
+        {"role": "human", "content": "hello"},
+        {"role": "ai", "content": "hi"},
+    ]
+    await context_store.append_turn("sess-002", messages_raw=messages_raw)
 
     assert mock_redis.rpush.await_count == 1
     call_args = mock_redis.rpush.call_args
     key = call_args[0][0]
     assert key == "relais:context:sess-002"
-    # 2 items pushed: user turn + assistant turn
-    assert len(call_args[0]) == 3  # key + 2 items
+    # 1 blob pushed (the entire turn as a single JSON list)
+    assert len(call_args[0]) == 2  # key + 1 blob
 
     mock_redis.ltrim.assert_awaited_once_with("relais:context:sess-002", -20, -1)
     mock_redis.expire.assert_awaited_once_with("relais:context:sess-002", 86400)
@@ -377,16 +385,18 @@ async def test_append_turn_rpush_and_ltrim(
 async def test_append_turn_format(
     context_store: ContextStore, mock_redis: AsyncMock
 ) -> None:
-    """append_turn() doit stocker chaque tour en JSON {role, content}."""
-    await context_store.append_turn("sess-003", user_content="bonjour", assistant_content="salut")
+    """append_turn() doit stocker le tour comme un blob JSON (liste de messages)."""
+    messages_raw = [
+        {"role": "human", "content": "bonjour"},
+        {"role": "ai", "content": "salut"},
+    ]
+    await context_store.append_turn("sess-003", messages_raw=messages_raw)
 
     call_args = mock_redis.rpush.call_args[0]
-    # call_args = (key, user_turn_json, assistant_turn_json)
-    user_turn = json.loads(call_args[1])
-    assistant_turn = json.loads(call_args[2])
+    # call_args = (key, blob_json)
+    stored = json.loads(call_args[1])
 
-    assert user_turn == {"role": "user", "content": "bonjour"}
-    assert assistant_turn == {"role": "assistant", "content": "salut"}
+    assert stored == messages_raw
 
 
 # ---------------------------------------------------------------------------
@@ -397,57 +407,16 @@ async def test_append_turn_format(
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_upsert_facts_inserts_new_facts(long_term_store: LongTermStore) -> None:
-    """upsert_facts() doit insérer de nouveaux faits utilisateur."""
-    facts = [{"fact": "likes Python", "category": "preference", "confidence": 0.9}]
-    await long_term_store.upsert_facts("user_a", facts)
-
-    result = await long_term_store.get_user_facts("user_a")
-    assert "likes Python" in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_upsert_facts_updates_existing_fact(long_term_store: LongTermStore) -> None:
-    """upsert_facts() avec le même fait doit mettre à jour sans dupliquer."""
-    facts = [{"fact": "likes Python", "category": "preference", "confidence": 0.9}]
-    await long_term_store.upsert_facts("user_b", facts)
-    # Update confidence
-    facts2 = [{"fact": "likes Python", "category": "preference", "confidence": 0.95}]
-    await long_term_store.upsert_facts("user_b", facts2)
-
-    result = await long_term_store.get_user_facts("user_b")
-    # Should have only one entry, not two
-    assert result.count("likes Python") == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_get_user_facts_returns_list_of_strings(long_term_store: LongTermStore) -> None:
-    """get_user_facts() doit retourner une liste de chaînes (les faits)."""
-    facts = [
-        {"fact": "loves cats", "category": "preference", "confidence": 0.8},
-        {"fact": "works remotely", "category": "lifestyle", "confidence": 0.9},
-    ]
-    await long_term_store.upsert_facts("user_c", facts)
-
-    result = await long_term_store.get_user_facts("user_c")
-
-    assert isinstance(result, list)
-    for item in result:
-        assert isinstance(item, str)
-    assert "loves cats" in result
-    assert "works remotely" in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
 async def test_get_recent_messages_returns_last_n(long_term_store: LongTermStore) -> None:
-    """get_recent_messages() doit retourner les N derniers messages depuis SQLite."""
+    """get_recent_messages() doit retourner une liste plate de messages depuis SQLite."""
     from common.envelope import Envelope
 
-    # Archive several messages
-    for i in range(7):
+    # Archive several turns
+    for i in range(3):
+        messages_raw = [
+            {"role": "human", "content": f"question {i}"},
+            {"role": "ai", "content": f"response {i}"},
+        ]
         env = Envelope(
             content=f"response {i}",
             sender_id="user_d",
@@ -455,14 +424,14 @@ async def test_get_recent_messages_returns_last_n(long_term_store: LongTermStore
             session_id="sess_d",
             metadata={"user_message": f"question {i}"},
         )
-        await long_term_store.archive(env)
+        await long_term_store.archive(env, messages_raw)
 
-    result = await long_term_store.get_recent_messages("sess_d", limit=5)
+    result = await long_term_store.get_recent_messages("sess_d", limit=10)
 
-    assert len(result) == 5
+    # 3 turns × 2 messages = 6 messages in the flat list
+    assert len(result) == 6
     for item in result:
         assert "role" in item
-        assert "content" in item
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +445,7 @@ from common.envelope import Envelope
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_souvenir_handles_outgoing_appends_context() -> None:
-    """_handle_outgoing() doit appeler append_turn avec user+assistant."""
+    """_handle_outgoing() doit appeler append_turn avec messages_raw depuis metadata."""
     from souvenir.main import Souvenir
 
     mock_redis = AsyncMock()
@@ -484,12 +453,16 @@ async def test_souvenir_handles_outgoing_appends_context() -> None:
     mock_redis.ltrim = AsyncMock()
     mock_redis.expire = AsyncMock()
 
+    messages_raw = [
+        {"role": "human", "content": "comment vas-tu?"},
+        {"role": "ai", "content": "je vais bien"},
+    ]
     env = Envelope(
         content="je vais bien",
         sender_id="user_e",
         channel="discord",
         session_id="sess-e",
-        metadata={"user_message": "comment vas-tu?"},
+        metadata={"user_message": "comment vas-tu?", "messages_raw": messages_raw},
     )
 
     souvenir = Souvenir.__new__(Souvenir)
@@ -505,7 +478,6 @@ async def test_souvenir_handles_outgoing_appends_context() -> None:
 
     mock_redis.rpush.assert_awaited_once()
     call_args = mock_redis.rpush.call_args[0]
-    user_turn = json.loads(call_args[1])
-    assistant_turn = json.loads(call_args[2])
-    assert user_turn["content"] == "comment vas-tu?"
-    assert assistant_turn["content"] == "je vais bien"
+    # Single blob pushed
+    stored = json.loads(call_args[1])
+    assert stored == messages_raw

@@ -318,7 +318,7 @@ async def test_stream_progress_callback_none_no_error() -> None:
             # No progress_callback
         )
 
-    assert result == "Final answer."
+    assert result.reply_text == "Final answer."
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +353,7 @@ async def test_stream_fallback_last_tool_result_when_reply_empty() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("What is 2+2?"), context=[])
 
-    assert result == "4"
+    assert result.reply_text == "4"
 
 
 @pytest.mark.unit
@@ -389,7 +389,7 @@ async def test_stream_fallback_tool_result_list_content() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("Do it"), context=[])
 
-    assert result == "Part one. Part two."
+    assert result.reply_text == "Part one. Part two."
 
 
 @pytest.mark.unit
@@ -415,7 +415,7 @@ async def test_stream_placeholder_when_all_empty() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("silence"), context=[])
 
-    assert result == PLACEHOLDER
+    assert result.reply_text == PLACEHOLDER
 
 
 @pytest.mark.unit
@@ -445,7 +445,7 @@ async def test_stream_fallback_overridden_by_ai_text() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("search relais"), context=[])
 
-    assert result == "Here is the answer."
+    assert result.reply_text == "Here is the answer."
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +483,7 @@ async def test_stream_text_tokens_accumulated() -> None:
             _make_envelope("Hi"), context=[], stream_callback=stream_callback
         )
 
-    assert result == "Hello, world!"
+    assert result.reply_text == "Hello, world!"
     assert "".join(received) == "Hello, world!"
 
 
@@ -575,8 +575,8 @@ async def test_stream_text_preserved_when_tool_call_chunks_coexist() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("find relais"), context=[])
 
-    assert "Searching for you…" in result
-    assert "Done." in result
+    assert "Searching for you…" in result.reply_text
+    assert "Done." in result.reply_text
 
 
 @pytest.mark.unit
@@ -610,5 +610,5 @@ async def test_tool_result_list_with_str_items_not_dropped() -> None:
         result = await executor.execute(_make_envelope("calc"), context=[])
 
     # Both the str element and the dict text block must appear in the fallback
-    assert result == "Result: 42"
-    assert result != PLACEHOLDER
+    assert result.reply_text == "Result: 42"
+    assert result.reply_text != PLACEHOLDER

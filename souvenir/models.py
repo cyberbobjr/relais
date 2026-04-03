@@ -27,25 +27,6 @@ class Memory(SQLModel, table=True):
     updated_at: float
 
 
-class UserFact(SQLModel, table=True):
-    """Fait durable extrait d'un échange, lié à un utilisateur.
-
-    Upsert sur ``(sender_id, fact_hash)`` pour éviter les doublons.
-    """
-
-    __tablename__ = "user_facts"
-
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    sender_id: str = Field(index=True)
-    fact: str
-    category: str | None = None
-    confidence: float = Field(default=1.0)
-    source_corr: str | None = None
-    created_at: float = Field(default_factory=time.time)
-    updated_at: float = Field(default_factory=time.time)
-    fact_hash: str = Field(index=True)
-
-
 class MemoryFile(SQLModel, table=True):
     """Fichier de mémoire long terme géré par le backend SouvenirBackend.
 
@@ -66,19 +47,26 @@ class MemoryFile(SQLModel, table=True):
 
 
 class ArchivedMessage(SQLModel, table=True):
-    """Message archivé depuis le stream relais:messages:outgoing.
+    """Un tour agent complet archivé depuis le stream relais:messages:outgoing.
+
+    Un seul enregistrement par tour, identifié de manière unique par
+    ``correlation_id``.  Le champ ``messages_raw`` contient le blob JSON de
+    l'intégralité de la liste de messages LangChain du tour (serialisée via
+    ``atelier.message_serializer.serialize_messages``).
 
     Permet la reconstruction de l'historique d'une session depuis SQLite
     en cas de cache Redis manquant.
     """
 
     __tablename__ = "archived_messages"
+    __table_args__ = (UniqueConstraint("correlation_id", name="uq_correlation_id"),)
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     session_id: str = Field(index=True)
     sender_id: str = Field(index=True)
     channel: str
-    role: str  # "user" or "assistant"
-    content: str
-    correlation_id: str
+    user_content: str = Field(default="")
+    assistant_content: str = Field(default="")
+    messages_raw: str = Field(default="[]")  # JSON-serialized list[dict]
+    correlation_id: str = Field(index=True)
     created_at: float = Field(default_factory=time.time)

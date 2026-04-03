@@ -1,5 +1,6 @@
 """Tests for LongTermStore.query() pagination — TDD Wave 1D."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ async def store(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Helper — insert ArchivedMessage rows directly via archive()
+# Helper — insert ArchivedMessage rows directly
 # ---------------------------------------------------------------------------
 
 from common.envelope import Envelope
@@ -44,6 +45,11 @@ def _envelope(
     )
 
 
+def _make_messages_raw(text: str) -> str:
+    """Return a minimal messages_raw JSON blob containing the given text."""
+    return json.dumps([{"role": "human", "content": text}])
+
+
 # ---------------------------------------------------------------------------
 # T1: query returns messages for user, ordered newest first
 # ---------------------------------------------------------------------------
@@ -54,16 +60,9 @@ def _envelope(
 async def test_query_returns_messages_newest_first(store: LongTermStore) -> None:
     """query() must return ArchivedMessage rows for the given user_id, ordered
     by timestamp descending (most recent first)."""
-    import time
+    from souvenir.models import ArchivedMessage
 
     base_ts = 1_700_000_000.0
-
-    # Archive 3 messages with distinct timestamps by patching created_at after insert
-    # We use archive() which inserts ArchivedMessage rows.
-    # To control timestamps we use a helper that manipulates the DB directly.
-    from sqlmodel import select
-    from souvenir.models import ArchivedMessage
-    from sqlmodel.ext.asyncio.session import AsyncSession
 
     async with store._session_factory() as session:
         for i in range(3):
@@ -72,9 +71,10 @@ async def test_query_returns_messages_newest_first(store: LongTermStore) -> None
                     session_id="sess-t1",
                     sender_id="user_t1",
                     channel="discord",
-                    role="user",
-                    content=f"message {i}",
-                    correlation_id=f"corr-{i}",
+                    user_content=f"user message {i}",
+                    assistant_content=f"assistant reply {i}",
+                    messages_raw=_make_messages_raw(f"message {i}"),
+                    correlation_id=f"corr-t1-{i}",
                     created_at=base_ts + i,
                 )
             )
@@ -86,9 +86,9 @@ async def test_query_returns_messages_newest_first(store: LongTermStore) -> None
     assert result.total == 3
     assert len(result.items) == 3
     # Newest first: created_at descending
-    assert result.items[0].content == "message 2"
-    assert result.items[1].content == "message 1"
-    assert result.items[2].content == "message 0"
+    assert result.items[0].user_content == "user message 2"
+    assert result.items[1].user_content == "user message 1"
+    assert result.items[2].user_content == "user message 0"
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +111,10 @@ async def test_query_limit_and_offset(store: LongTermStore) -> None:
                     session_id="sess-t2",
                     sender_id="user_t2",
                     channel="discord",
-                    role="assistant",
-                    content=f"item {i}",
-                    correlation_id=f"corr-{i}",
+                    user_content=f"item {i}",
+                    assistant_content=f"reply {i}",
+                    messages_raw=_make_messages_raw(f"item {i}"),
+                    correlation_id=f"corr-t2-{i}",
                     created_at=base_ts + i,
                 )
             )
@@ -125,8 +126,8 @@ async def test_query_limit_and_offset(store: LongTermStore) -> None:
 
     assert len(result.items) == 2
     assert result.total == 5
-    assert result.items[0].content == "item 3"
-    assert result.items[1].content == "item 2"
+    assert result.items[0].user_content == "item 3"
+    assert result.items[1].user_content == "item 2"
     assert result.limit == 2
     assert result.offset == 1
 
@@ -151,9 +152,10 @@ async def test_query_since_until_filter(store: LongTermStore) -> None:
                     session_id="sess-t3",
                     sender_id="user_t3",
                     channel="discord",
-                    role="user",
-                    content=f"ts {i}",
-                    correlation_id=f"corr-{i}",
+                    user_content=f"ts {i}",
+                    assistant_content=f"reply {i}",
+                    messages_raw=_make_messages_raw(f"ts {i}"),
+                    correlation_id=f"corr-t3-{i}",
                     created_at=base_ts + i,
                 )
             )
@@ -164,44 +166,45 @@ async def test_query_since_until_filter(store: LongTermStore) -> None:
         "user_t3", since=base_ts + 1, until=base_ts + 3
     )
 
-    contents = {item.content for item in result.items}
+    contents = {item.user_content for item in result.items}
     assert contents == {"ts 1", "ts 2", "ts 3"}
     assert result.total == 3
 
 
 # ---------------------------------------------------------------------------
-# T4: search filters by content substring (case-insensitive)
+# T4: search filters by messages_raw substring (case-insensitive)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_query_search_case_insensitive(store: LongTermStore) -> None:
-    """query(search=...) must do case-insensitive substring match on content."""
+    """query(search=...) must do case-insensitive substring match on messages_raw."""
     from souvenir.models import ArchivedMessage
 
     base_ts = 1_700_000_000.0
 
+    texts = ["Hello world", "HELLO again", "goodbye friend", "say hello"]
     async with store._session_factory() as session:
-        for content in ["Hello world", "HELLO again", "goodbye friend", "say hello"]:
+        for idx, text in enumerate(texts):
             session.add(
                 ArchivedMessage(
                     session_id="sess-t4",
                     sender_id="user_t4",
                     channel="discord",
-                    role="user",
-                    content=content,
-                    correlation_id="corr-t4",
-                    created_at=base_ts,
+                    user_content=text,
+                    assistant_content="ok",
+                    messages_raw=json.dumps([{"role": "human", "content": text}]),
+                    correlation_id=f"corr-t4-{idx}",
+                    created_at=base_ts + idx,
                 )
             )
-            base_ts += 1
         await session.commit()
 
     result = await store.query("user_t4", search="hello")
 
-    contents = {item.content for item in result.items}
-    assert contents == {"Hello world", "HELLO again", "say hello"}
+    user_contents = {item.user_content for item in result.items}
+    assert user_contents == {"Hello world", "HELLO again", "say hello"}
     assert result.total == 3
 
 
@@ -225,9 +228,10 @@ async def test_query_has_more_true(store: LongTermStore) -> None:
                     session_id="sess-t5",
                     sender_id="user_t5",
                     channel="discord",
-                    role="user",
-                    content=f"msg {i}",
-                    correlation_id=f"corr-{i}",
+                    user_content=f"msg {i}",
+                    assistant_content=f"reply {i}",
+                    messages_raw=_make_messages_raw(f"msg {i}"),
+                    correlation_id=f"corr-t5-{i}",
                     created_at=base_ts + i,
                 )
             )
@@ -260,9 +264,10 @@ async def test_query_has_more_false_on_last_page(store: LongTermStore) -> None:
                     session_id="sess-t6",
                     sender_id="user_t6",
                     channel="discord",
-                    role="user",
-                    content=f"item {i}",
-                    correlation_id=f"corr-{i}",
+                    user_content=f"item {i}",
+                    assistant_content=f"reply {i}",
+                    messages_raw=_make_messages_raw(f"item {i}"),
+                    correlation_id=f"corr-t6-{i}",
                     created_at=base_ts + i,
                 )
             )
@@ -314,9 +319,10 @@ async def test_query_total_is_unsliced_count(store: LongTermStore) -> None:
                     session_id="sess-t8",
                     sender_id="user_t8",
                     channel="discord",
-                    role="assistant",
-                    content=f"resp {i}",
-                    correlation_id=f"corr-{i}",
+                    user_content=f"resp {i}",
+                    assistant_content=f"reply {i}",
+                    messages_raw=_make_messages_raw(f"resp {i}"),
+                    correlation_id=f"corr-t8-{i}",
                     created_at=base_ts + i,
                 )
             )
@@ -360,8 +366,9 @@ async def test_query_items_is_tuple(store: LongTermStore) -> None:
                 session_id="sess-t10",
                 sender_id="user_t10",
                 channel="discord",
-                role="user",
-                content="something",
+                user_content="something",
+                assistant_content="reply",
+                messages_raw=_make_messages_raw("something"),
                 correlation_id="corr-t10",
                 created_at=1_700_000_000.0,
             )
