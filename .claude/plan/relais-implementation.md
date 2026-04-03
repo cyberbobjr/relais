@@ -48,6 +48,11 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 ### Contrat d'interface `AgentExecutor`
 
 ```python
+@dataclass(frozen=True)
+class AgentResult:
+    reply_text: str          # final text reply (may be empty if only tool calls)
+    messages_raw: list[dict] # full LangChain graph state (via serialize_messages())
+
 class AgentExecutor:
     def __init__(
         self,
@@ -61,7 +66,7 @@ class AgentExecutor:
         envelope: Envelope,
         context: list[dict[str, str]],
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
-    ) -> str: ...
+    ) -> AgentResult: ...  # was str before commit 4c14b2b
 ```
 
 - `_TRANSIENT_ERROR_NAMES` : `frozenset{"RateLimitError", "InternalServerError", "APIConnectionError", "APITimeoutError", "ServiceUnavailableError"}` — détectés par nom de classe (provider-agnostic)
@@ -171,9 +176,10 @@ Le contrat est implémenté dans `atelier/agent_executor.py` via `AgentExecutor.
 - ✅ `sentinelle/guardrails.py` — filtres de contenu (hooks pre/post LLM)
 
 ### 2.5 ✅ Refactoring `souvenir/` — split selon plan DONE
-- ✅ `souvenir/context_store.py` — Redis List (historique court terme, 20 msgs)
-- ✅ `souvenir/long_term_store.py` — SQLite via SQLModel (mémoire longue durée)
+- ~~`souvenir/context_store.py`~~ **supprimé** (remplacé par stockage direct dans LongTermStore + blob messages_raw)
+- ✅ `souvenir/long_term_store.py` — SQLite via SQLModel (mémoire longue durée, upsert par correlation_id)
 - ✅ `souvenir/migrations/` — Alembic migrations
+- **supprimé** `souvenir/handlers/get_handler.py` (action `get` retirée du bus mémoire)
 
 ### 2.6 ✅ `archiviste/cleanup_retention.py` DONE
 - Rétention configurable : JSONL 90j, SQLite 1 an, audit ∞
@@ -289,6 +295,28 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 
 **Fichiers créés :** `atelier/progress_config.py`, `config/atelier.yaml.default`, `config/atelier/profiles.yaml.default`, `config/atelier/mcp_servers.yaml.default`
 
+### 5a.9 ✅ Capture historique complet par tour — AgentResult + messages_raw DONE (2026-04-03)
+
+**Commit :** `4c14b2b refactor(souvenir+atelier): capture full message history per turn`
+
+**Problème :** Souvenir ne stockait qu'une paire `user/assistant` (deux messages) par tour. L'historique interne de l'agent (tool calls, observations, messages intermédiaires) était perdu après chaque tour, rendant le contexte reconstitué partiel.
+
+**Correction :**
+- `AgentExecutor.execute()` retourne désormais `AgentResult(reply_text, messages_raw)` au lieu de `str`
+- `atelier/message_serializer.py` : `serialize_messages()` aplatit l'état LangGraph en une liste JSON-sérialisable
+- `atelier/main.py` : stampe `envelope.metadata["messages_raw"] = result.messages_raw` sur l'enveloppe sortante
+- `souvenir/main.py` : lit `messages_raw` depuis l'enveloppe et stocke un blob JSON complet par tour (pas deux messages séparés)
+- `souvenir/long_term_store.py` : upsert sur `correlation_id` — champs `user_content` + `assistant_content` + `messages_raw JSON`
+- Clé Redis : `relais:context:{user_id}` → `relais:context:{session_id}` (scope session)
+- `souvenir/context_store.py` **supprimé** — logique absorbée par `LongTermStore` + `_handle_outgoing_message()`
+- `souvenir/handlers/get_handler.py` **supprimé** — action `get` retirée du bus mémoire
+
+**Fichiers modifiés :** `atelier/agent_executor.py`, `atelier/message_serializer.py`, `atelier/main.py`, `souvenir/main.py`, `souvenir/long_term_store.py`, `souvenir/handlers/base.py`, `souvenir/handlers/clear_handler.py`, `souvenir/handlers/__init__.py`, `launcher.py`, `pyproject.toml`
+
+**Fichiers supprimés :** `souvenir/context_store.py`, `souvenir/handlers/get_handler.py`, `souvenir/migrations/versions/002_add_user_facts_and_archived_messages.py`
+
+**Fichiers créés :** `souvenir/migrations/versions/002_add_archived_messages.py`, `atelier/message_serializer.py`
+
 ---
 
 ## Phase 4 — Nouvelles briques (priorité moyenne)
@@ -361,9 +389,10 @@ Souvenir gère maintenant **deux streams** :
 
 **Stream 2 : `relais:messages:outgoing:{channel}`** (nouveau consumer group)
 - `_handle_outgoing(envelope)` :
-  1. RPUSH `[user_message, assistant_reply]` → `relais:context:{session_id}`, LTRIM -20, EXPIRE 24h
-  2. SQLite INSERT (archivage long-terme existant)
-  3. `memory_extractor.extract()` → faits utilisateur → SQLite `user_facts`
+  1. Lit `messages_raw` depuis `envelope.metadata["messages_raw"]` (blob sérialisé par Atelier via `serialize_messages()`)
+  2. RPUSH blob complet → `relais:context:{session_id}`, LTRIM -20, EXPIRE 24h (un blob par tour)
+  3. SQLite upsert sur `correlation_id` — champs `user_content` + `assistant_content` + `messages_raw JSON`
+  4. `memory_extractor.extract()` → faits utilisateur → SQLite `user_facts` (fire-and-forget)
 
 > ⚠️ Redis Streams n'a pas de wildcard consumer groups — Souvenir s'abonne aux canaux connus explicitement (liste depuis `config.yaml`)
 

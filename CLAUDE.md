@@ -43,13 +43,14 @@ The main pipeline flows through these bricks in order:
    - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
-   - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `profiles.yaml`
+   - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
    - Dual-stream consumer: `relais:memory:request` (Atelier requests) + `relais:messages:outgoing:*` (response observer)
-   - Short-term: Redis List `relais:context:{user_id}` (20 msgs, TTL 24h)
-   - Long-term: SQLite `~/.relais/storage/messages.db` with user_facts table
+   - Short-term: Redis List `relais:context:{session_id}` (max 20 turn blobs, each blob = full serialized LangChain message list for one turn, TTL 24h)
+   - Outgoing observer reads `envelope.metadata["messages_raw"]` (serialized by `atelier.message_serializer`) to persist the full turn history
+   - Long-term: SQLite `~/.relais/storage/memory.db`; one row per turn (upsert on `correlation_id`), fields `user_content`, `assistant_content`, `messages_raw` JSON
    - Memory extractor: `MemoryExtractor` uses `langchain.chat_models.init_chat_model` (provider:model-id format) to call the LLM directly — no LiteLLM proxy required; confidence threshold 0.7
 
 ### Observer & Support Services
@@ -69,7 +70,7 @@ The main pipeline flows through these bricks in order:
   - `redis_client.py`: Async Redis factory with per-brick ACL (password per service)
   - `config_loader.py`: YAML config cascade (user > system > project)
   - `user_registry.py`: UserRegistry and UserRecord for user resolution from portail.yaml
-  - `profile_loader.py`: ProfileConfig and ResilienceConfig — loads LLM profiles from profiles.yaml; shared by Atelier and Souvenir
+  - `user_record.py`: UserRecord dataclass
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings

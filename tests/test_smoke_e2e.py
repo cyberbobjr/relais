@@ -13,7 +13,6 @@ from sentinelle.main import Sentinelle
 from atelier.main import Atelier
 from souvenir.main import Souvenir
 from souvenir.long_term_store import LongTermStore
-from souvenir.context_store import ContextStore
 from souvenir.models import ArchivedMessage
 
 pytestmark = pytest.mark.integration
@@ -114,11 +113,6 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         patch("atelier.main.AgentExecutor") as MockAgent,
         patch("atelier.main.McpSessionManager") as MockMcpMgr,
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
-        patch(
-            "atelier.main.Atelier._fetch_context",
-            new_callable=AsyncMock,
-            return_value=[],
-        ),
     ):
         mock_mgr = AsyncMock()
         mock_mgr.start_all = AsyncMock()
@@ -153,10 +147,8 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     souvenir._long_term = LongTermStore(db_path=db_path)
     await souvenir._long_term._create_tables()
 
-    context_store = ContextStore(redis_conn)
-
     await souvenir._process_outgoing_streams(
-        redis_conn, context_store, shutdown=_one_shot()
+        redis_conn, shutdown=_one_shot()
     )
 
     # ── ASSERT: archivage SQLite ───────────────────────────────────────────────

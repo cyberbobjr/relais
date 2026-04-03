@@ -14,6 +14,8 @@ from typing import Any, Callable, Awaitable
 from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
 from langchain_core.tools import BaseTool
 from langchain.chat_models import BaseChatModel, init_chat_model
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import MemorySaver
 
 from deepagents import create_deep_agent
 from common.config_loader import get_relais_home
@@ -43,11 +45,13 @@ class AgentResult:
 STREAM_BUFFER_CHARS = 80
 REPLY_PLACEHOLDER = "[Aucune réponse générée par le modèle.]"
 LONG_TERM_MEMORY_PROMPT = """
-
-Mémoire long-terme:
-- Toute information qui doit être retenue au-delà de la conversation courante doit être stockée dans le répertoire `memories`.
-- Utilise toujours des chemins du type `/memories/...` pour créer, relire, mettre à jour ou organiser ces souvenirs persistants.
-- N'écris pas d'informations de long terme en dehors de `/memories/`.
+Long-term memory:
+- Any information about the user must be stored in the `memories` directory.
+- This includes the user's preferences, needs, goals, projects, and any other user-related details.
+- If the user asks you to remember anything, save it in `memories`.
+- Always use paths like `/memories/...` to create, read, update, or organize persistent memories.
+- Do not write long-term information outside `/memories/`.
+- Before answering any question about the user or long-term memory, first check `/memories/` for relevant user and long-term information.
 """.strip()
 
 # Error class names raised by LLM providers (anthropic, openai, google, …) that
@@ -182,6 +186,12 @@ class AgentExecutor:
                  inside the ``CompositeBackend``.  When ``None`` (default),
                  a ``LocalShellBackend`` rooted at ``RELAIS_HOME`` is used
                  for both the default route and the ``/memories/`` route.
+        checkpointer: LangGraph checkpoint saver for persistent conversation
+                      history across turns.  When ``None`` (default), falls
+                      back to a per-instance ``MemorySaver`` (volatile —
+                      history lost on restart).  Pass an ``AsyncSqliteSaver``
+                      owned by the Atelier singleton for cross-restart
+                      persistence.
     """
 
     def __init__(
@@ -191,6 +201,7 @@ class AgentExecutor:
         tools: list[BaseTool],
         skills: list[str] | None = None,
         backend: BackendProtocol | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self._profile = profile
         memories_backend: BackendProtocol = backend or LocalShellBackend(
@@ -207,13 +218,13 @@ class AgentExecutor:
             tools=tools,
             system_prompt=_with_long_term_memory_prompt(soul_prompt),
             skills=skills or [],
-            backend=composite_backend
+            backend=composite_backend,
+            checkpointer=checkpointer or MemorySaver(),
         )
 
     async def execute(
         self,
         envelope: Envelope,
-        context: list[dict[str, str]],
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> AgentResult:
@@ -221,10 +232,10 @@ class AgentExecutor:
 
         After streaming completes, captures the full message list from the agent
         graph state via ``aget_state()`` and serializes it to ``messages_raw``.
+        Conversation history is managed natively by the LangGraph checkpointer.
 
         Args:
             envelope: Incoming message envelope; `.content` is the user turn.
-            context: Prior conversation turns as ``[{"role": ..., "content": ...}]``.
             stream_callback: Async callable receiving buffered text chunks.
                 If ``None``, no token-by-token streaming is performed.
             progress_callback: Async callable receiving ``(event, detail)`` pairs
@@ -241,28 +252,25 @@ class AgentExecutor:
                 propagated unwrapped so the caller can leave the message in the PEL.
             AgentExecutionError: Wraps any other non-transient exception.
         """
-        messages = _build_messages(envelope, context)
+        messages = [{"role": "user", "content": envelope.content}]
         logger.info(
-            "agent.execute start — correlation_id=%s sender=%s turns=%d",
+            "agent.execute start — correlation_id=%s sender=%s",
             envelope.correlation_id,
             envelope.sender_id,
-            len(messages),
         )
-        config = {"configurable": {"thread_id": envelope.correlation_id}}
+        user_id = envelope.metadata.get("user_id", envelope.sender_id)
+        config = {"configurable": {"thread_id": user_id}}
         try:
             reply = await self._stream(
                 {"messages": messages}, stream_callback, progress_callback, config=config
             )
-            # Capture full message list from the agent graph state
-            messages_raw: list[dict] = []
-            try:
-                state = await self._agent.aget_state(config)
-                state_messages = state.values.get("messages", [])
-                messages_raw = serialize_messages(state_messages)
-            except Exception as state_exc:
-                logger.warning(
-                    "Could not capture agent state messages: %s", state_exc
-                )
+            # Capture full message list from the agent graph state.
+            # aget_state() must not fail — if it does, it means the agent is
+            # misconfigured (e.g. no checkpointer).  Propagate the exception
+            # to the outer handler: transient errors stay in PEL, others go to DLQ.
+            state = await self._agent.aget_state(config)
+            state_messages = state.values.get("messages", [])
+            messages_raw = serialize_messages(state_messages)
             logger.info(
                 "agent.execute done — correlation_id=%s reply_len=%d messages=%d",
                 envelope.correlation_id,
@@ -423,35 +431,6 @@ class AgentExecutor:
                 full_reply = REPLY_PLACEHOLDER
 
         return full_reply
-
-
-def _build_messages(envelope: Envelope, context: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Assemble the messages list for the agent from context + envelope.
-
-    Filters context to only ``user`` / ``assistant`` turns, prepends a
-    synthetic empty user turn when the context starts with an assistant
-    turn (LangChain requirement), then appends the envelope content as
-    the final user turn.
-
-    Args:
-        envelope: Incoming envelope; `.content` is used as the last user turn.
-        context: Prior turns ``[{"role": "user"|"assistant", "content": ...}]``.
-
-    Returns:
-        A list of ``{"role": ..., "content": ...}`` dicts ready for the agent.
-    """
-    messages: list[dict[str, str]] = []
-    for turn in context:
-        role = turn.get("role", "")
-        if role not in ("user", "assistant"):
-            continue
-        messages.append({"role": role, "content": turn.get("content", "")})
-
-    if messages and messages[0]["role"] == "assistant":
-        messages.insert(0, {"role": "user", "content": ""})
-
-    messages.append({"role": "user", "content": envelope.content})
-    return messages
 
 
 def _with_long_term_memory_prompt(soul_prompt: str) -> str:

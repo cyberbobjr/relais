@@ -3,47 +3,23 @@
 import json
 import logging
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from common.config_loader import resolve_storage_dir
-from souvenir.models import ArchivedMessage, Memory
+from souvenir.models import ArchivedMessage
 
 if TYPE_CHECKING:
     from common.envelope import Envelope
 
 
-@dataclass(frozen=True)
-class PaginatedResult:
-    """Result container for a paginated query over archived messages.
-
-    Attributes:
-        items: Tuple of ArchivedMessage objects matching the query filters for
-            the requested page.
-        total: Total count of rows matching the filters, regardless of
-            limit/offset (used to build pagination UI).
-        limit: Maximum number of items requested per page.
-        offset: Number of matching rows skipped before this page.
-        has_more: True when additional pages exist beyond this one, i.e.
-            ``total > offset + len(items)``.
-    """
-
-    items: tuple
-    total: int
-    limit: int
-    offset: int
-    has_more: bool
-
 logger = logging.getLogger(__name__)
 
-# TODO : il faudrait une méthode pour lister les clés existantes de souvenir d'un utilisateur
 class LongTermStore:
     """Mémoire longue durée dans SQLite (~/.relais/memory.db).
 
@@ -78,112 +54,6 @@ class LongTermStore:
         """
         async with self._engine.begin() as conn:
             await conn.run_sync(SQLModel.metadata.create_all)
-
-    async def store(
-        self,
-        user_id: str,
-        key: str,
-        value: str,
-        source: str = "manual",
-    ) -> None:
-        """Stocke ou met à jour un fait mémorisé pour un utilisateur.
-
-        Si un enregistrement avec le même ``(user_id, key)`` existe déjà, la
-        valeur et ``updated_at`` sont mis à jour (upsert via ON CONFLICT).
-
-        Args:
-            user_id: Identifiant de l'utilisateur propriétaire du souvenir.
-            key: Clé nommée du souvenir (ex: ``"prénom"``).
-            value: Valeur textuelle associée à la clé.
-            source: Origine de l'enregistrement (``"manual"``, ``"llm"``, …).
-
-        Returns:
-            None
-        """
-        now = time.time()
-        stmt = (
-            sqlite_insert(Memory)
-            .values(
-                user_id=user_id,
-                key=key,
-                value=value,
-                source=source,
-                created_at=now,
-                updated_at=now,
-            )
-            .on_conflict_do_update(
-                index_elements=["user_id", "key"],
-                set_={"value": value, "source": source, "updated_at": now},
-            )
-        )
-        async with self._session_factory() as session:
-            await session.execute(stmt)
-            await session.commit()
-        logger.debug("Stored memory for user=%s key=%s", user_id, key)
-
-    async def retrieve(
-        self, user_id: str, key: str | None = None
-    ) -> list[dict]:
-        """Récupère les souvenirs d'un utilisateur.
-
-        Args:
-            user_id: Identifiant de l'utilisateur.
-            key: Si fourni, filtre les résultats sur cette clé exacte.
-
-        Returns:
-            Liste de dicts ``{"id", "user_id", "key", "value", "source",
-            "created_at", "updated_at"}`` triés par ``updated_at`` descendant.
-        """
-        stmt = select(Memory).where(Memory.user_id == user_id)
-        if key is not None:
-            stmt = stmt.where(Memory.key == key)
-        stmt = stmt.order_by(Memory.updated_at.desc())  # type: ignore[arg-type]
-        async with self._session_factory() as session:
-            result = await session.exec(stmt)
-            rows = result.all()
-        return [r.model_dump() for r in rows]
-
-    async def delete(self, user_id: str, key: str) -> None:
-        """Supprime un souvenir spécifique.
-
-        Args:
-            user_id: Identifiant de l'utilisateur.
-            key: Clé du souvenir à supprimer.
-
-        Returns:
-            None
-        """
-        stmt = select(Memory).where(Memory.user_id == user_id, Memory.key == key)
-        async with self._session_factory() as session:
-            result = await session.exec(stmt)
-            row = result.first()
-            if row:
-                await session.delete(row)
-                await session.commit()
-        logger.debug("Deleted memory for user=%s key=%s", user_id, key)
-
-    async def search(self, user_id: str, query: str) -> list[dict]:
-        """Recherche LIKE dans les valeurs des souvenirs d'un utilisateur.
-
-        Args:
-            user_id: Identifiant de l'utilisateur.
-            query: Terme de recherche (sous-chaîne). Les wildcards SQL ``%``
-                sont ajoutés automatiquement.
-
-        Returns:
-            Liste de dicts correspondant aux souvenirs dont la valeur contient
-            ``query``, triés par ``updated_at`` descendant.
-        """
-        pattern = f"%{query}%"
-        stmt = (
-            select(Memory)
-            .where(Memory.user_id == user_id, Memory.value.like(pattern))  # type: ignore[union-attr]
-            .order_by(Memory.updated_at.desc())  # type: ignore[arg-type]
-        )
-        async with self._session_factory() as session:
-            result = await session.exec(stmt)
-            rows = result.all()
-        return [r.model_dump() for r in rows]
 
     async def archive(
         self,
@@ -233,60 +103,21 @@ class LongTermStore:
             await session.commit()
         logger.debug("Archived turn for session=%s correlation=%s", envelope.session_id, envelope.correlation_id)
 
-    async def get_recent_messages(
-        self, session_id: str, limit: int = 20
-    ) -> list[dict]:
-        """Retourne une liste plate des messages récents d'une session depuis SQLite.
+    async def clear_session(self, session_id: str, user_id: str | None = None) -> int:
+        """Supprime tous les messages archivés d'une session SQLite et efface
+        le thread LangGraph du checkpointer pour l'utilisateur.
 
-        Fallback utilisé quand le cache Redis est vide.  Désérialise les blobs
-        ``messages_raw`` de chaque tour et les aplatit en une liste unique de
-        messages dans l'ordre chronologique (plus ancien en premier).
-
-        Args:
-            session_id: Identifiant de la session.
-            limit: Nombre maximum de tours (défaut: 20).  Chaque tour peut
-                contenir plusieurs messages.
-
-        Returns:
-            Liste plate de dicts message tels que produits par
-            ``atelier.message_serializer.serialize_messages()``.
-        """
-        async with self._session_factory() as session:
-            stmt = (
-                select(ArchivedMessage)
-                .where(ArchivedMessage.session_id == session_id)
-                .order_by(ArchivedMessage.created_at.desc())  # type: ignore[arg-type]
-                .limit(limit)
-            )
-            result = await session.exec(stmt)
-            rows = result.all()
-        rows = list(reversed(rows))
-        flat: list[dict] = []
-        for row in rows:
-            try:
-                turn_messages = json.loads(row.messages_raw)
-                if isinstance(turn_messages, list):
-                    flat.extend(turn_messages)
-            except (json.JSONDecodeError, TypeError) as exc:
-                logger.warning(
-                    "Skipping malformed messages_raw for correlation=%s: %s",
-                    row.correlation_id,
-                    exc,
-                )
-        return flat
-
-    async def clear_session(self, session_id: str) -> int:
-        """Supprime tous les messages archivés d'une session SQLite.
-
-        Seule la table ``archived_messages`` est affectée. Les ``UserFact``
-        (table ``user_facts``) et les ``Memory`` (table ``memories``) sont
-        conservés.
+        La table ``archived_messages`` est nettoyée pour ``session_id``.
+        Si ``user_id`` est fourni, le thread correspondant est également
+        supprimé du checkpointer ``AsyncSqliteSaver`` (``checkpoints.db``).
 
         Args:
-            session_id: Identifiant de la session à effacer.
+            session_id: Identifiant de la session à effacer (archived_messages).
+            user_id: Identifiant stable de l'utilisateur (``thread_id`` du
+                checkpointer). Si ``None``, le checkpointer n'est pas modifié.
 
         Returns:
-            Nombre de lignes supprimées.
+            Nombre de lignes supprimées de ``archived_messages``.
         """
         from sqlalchemy import delete as sa_delete
 
@@ -303,82 +134,34 @@ class LongTermStore:
             deleted_count,
             session_id,
         )
+
+        if user_id:
+            await self._clear_checkpointer_thread(user_id)
+
         return deleted_count
 
-    async def query(
-        self,
-        user_id: str,
-        limit: int = 20,
-        offset: int = 0,
-        since: float | None = None,
-        until: float | None = None,
-        search: str | None = None,
-    ) -> PaginatedResult:
-        """Return a paginated slice of archived messages for a user.
+    async def _clear_checkpointer_thread(self, user_id: str) -> None:
+        """Supprime le thread LangGraph du checkpointer pour ``user_id``.
 
-        Filters are cumulative: all provided filters must match. Results are
-        ordered by ``created_at`` descending (most recent first).
+        Ouvre ``checkpoints.db`` via ``AsyncSqliteSaver`` et appelle
+        ``adelete_thread(user_id)`` pour effacer tout l'historique du
+        graphe LangGraph associé à cet utilisateur.
 
         Args:
-            user_id: The ``sender_id`` of the user whose messages to query.
-            limit: Maximum number of rows to return in this page (default 20).
-            offset: Number of matching rows to skip before this page (default 0).
-            since: If provided, only include messages with
-                ``created_at >= since`` (epoch seconds, inclusive).
-            until: If provided, only include messages with
-                ``created_at <= until`` (epoch seconds, inclusive).
-            search: If provided, only include messages whose ``content`` field
-                contains this substring (case-insensitive).
-
-        Returns:
-            A frozen ``PaginatedResult`` with ``items`` (tuple of
-            ``ArchivedMessage`` objects), ``total`` (unsliced count), ``limit``,
-            ``offset``, and ``has_more``.
+            user_id: ``thread_id`` utilisé dans le checkpointer (identifiant
+                stable cross-channel, ex. ``"usr_admin"``).
         """
-        base_stmt = select(ArchivedMessage).where(
-            ArchivedMessage.sender_id == user_id
-        )
-        if since is not None:
-            base_stmt = base_stmt.where(
-                ArchivedMessage.created_at >= since  # type: ignore[arg-type]
-            )
-        if until is not None:
-            base_stmt = base_stmt.where(
-                ArchivedMessage.created_at <= until  # type: ignore[arg-type]
-            )
-        if search is not None:
-            pattern = f"%{search}%"
-            base_stmt = base_stmt.where(
-                ArchivedMessage.messages_raw.ilike(pattern)  # type: ignore[union-attr]
-            )
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        except ImportError as exc:
+            raise ImportError(
+                "langgraph-checkpoint-sqlite est requis pour effacer le checkpointer"
+            ) from exc
 
-        count_stmt = select(func.count()).select_from(
-            base_stmt.subquery()
-        )
-
-        page_stmt = (
-            base_stmt
-            .order_by(ArchivedMessage.created_at.desc())  # type: ignore[arg-type]
-            .offset(offset)
-            .limit(limit)
-        )
-
-        async with self._session_factory() as session:
-            count_result = await session.exec(count_stmt)
-            total: int = count_result.one()
-
-            page_result = await session.exec(page_stmt)
-            rows = page_result.all()
-
-        items = tuple(rows)
-        has_more = total > offset + len(items)
-        return PaginatedResult(
-            items=items,
-            total=total,
-            limit=limit,
-            offset=offset,
-            has_more=has_more,
-        )
+        checkpoints_db = str(self._db_path.parent / "checkpoints.db")
+        async with AsyncSqliteSaver.from_conn_string(checkpoints_db) as checkpointer:
+            await checkpointer.adelete_thread(user_id)
+        logger.info("Cleared LangGraph checkpointer thread for user_id=%s", user_id)
 
     async def close(self) -> None:
         """Libère les ressources de l'engine async (connexions aiosqlite).

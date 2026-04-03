@@ -27,20 +27,20 @@ L'implémentation locale inclut surtout un adaptateur Discord complet. La config
 ```mermaid
 flowchart TD
     USERS([Utilisateurs externes])
-    AIG[AIGUILLEUR\nadaptateur de canal]
-    PORTAIL[PORTAIL\nvalide Envelope\nrésout UserRegistry\nstamp user_record + user_id]
+  AIG["AIGUILLEUR<br/>adaptateur de canal"]
+  PORTAIL["PORTAIL<br/>valide Envelope<br/>résout UserRegistry<br/>stamp user_record + user_id"]
     PENDING[(relais:admin:pending_users)]
-    SENT_IN[SENTINELLE entrant\nACL + routage]
-    ATELIER[ATELIER\nDeepAgents LangGraph]
-    COMMANDANT[COMMANDANT\nslash commands hors LLM]
-    SOUVENIR[SOUVENIR\ncontexte Redis + archive SQLite]
-    SENT_OUT[SENTINELLE sortant\npass-through actuel]
-    OUT[relais:messages:outgoing:{channel}]
-    STREAM[relais:messages:streaming:{channel}:{correlation_id}]
+  SENT_IN["SENTINELLE entrant<br/>ACL + routage"]
+  ATELIER["ATELIER<br/>DeepAgents LangGraph"]
+  COMMANDANT["COMMANDANT<br/>slash commands hors LLM"]
+  SOUVENIR["SOUVENIR<br/>contexte Redis + archive SQLite"]
+  SENT_OUT["SENTINELLE sortant<br/>pass-through actuel"]
+    OUT["relais:messages:outgoing:{channel}"]
+    STREAM["relais:messages:streaming:{channel}:{correlation_id}"]
     MEM_REQ[relais:memory:request]
     MEM_RES[relais:memory:response]
     DLQ[(relais:tasks:failed)]
-    ARCHIVISTE[ARCHIVISTE\nobserve logs events\net une partie du pipeline]
+    ARCHIVISTE["ARCHIVISTE<br/>observe logs events<br/>et une partie du pipeline"]
 
     USERS --> AIG
     AIG -->|"relais:messages:incoming"| PORTAIL
@@ -48,9 +48,9 @@ flowchart TD
     PORTAIL -->|"relais:security"| SENT_IN
     PORTAIL -.->|"unknown_user_policy = pending"| PENDING
 
-    SENT_IN -->|"message autorise\nrelais:tasks"| ATELIER
-    SENT_IN -->|"commande connue + ACL OK\nrelais:commands"| COMMANDANT
-    SENT_IN -->|"commande inconnue ou refusee\nreply inline"| OUT
+    SENT_IN -->|"message autorise<br/>relais:tasks"| ATELIER
+    SENT_IN -->|"commande connue + ACL OK<br/>relais:commands"| COMMANDANT
+    SENT_IN -->|"commande inconnue ou refusee<br/>reply inline"| OUT
 
     ATELIER -->|"relais:memory:request"| MEM_REQ
     MEM_REQ --> SOUVENIR
@@ -58,8 +58,8 @@ flowchart TD
     MEM_RES --> ATELIER
 
     ATELIER -->|"relais:messages:streaming:{channel}:{correlation_id}"| STREAM
-    ATELIER -->|"relais:messages:outgoing_pending\nreponse finale"| SENT_OUT
-    ATELIER -->|"relais:messages:outgoing:{channel}\nprogress events"| OUT
+    ATELIER -->|"relais:messages:outgoing_pending<br/>reponse finale"| SENT_OUT
+    ATELIER -->|"relais:messages:outgoing:{channel}<br/>progress events"| OUT
     ATELIER -->|"relais:tasks:failed"| DLQ
 
     COMMANDANT -->|"help -> outgoing:{channel}"| OUT

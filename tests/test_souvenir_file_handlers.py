@@ -4,7 +4,6 @@ import json
 import pytest
 from unittest.mock import AsyncMock
 
-from souvenir.context_store import ContextStore
 from souvenir.handlers import HandlerContext
 from souvenir.handlers.file_list_handler import FileListHandler
 from souvenir.handlers.file_read_handler import FileReadHandler
@@ -28,7 +27,6 @@ def _make_ctx(
         file_store = AsyncMock()
     return HandlerContext(
         redis_conn=mock_redis,
-        context_store=AsyncMock(spec=ContextStore),
         long_term_store=AsyncMock(),
         file_store=file_store,
         req=req,

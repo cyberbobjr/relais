@@ -1,10 +1,10 @@
-"""Souvenir brick — short-term and long-term memory service.
+"""Souvenir brick — long-term memory service.
 
 Functional role
 ---------------
 Maintains conversational memory for all users.  Serves context history to
-Atelier on demand (short-term cache) and passively observes outgoing replies
-to archive exchanges in long-term storage.
+Atelier on demand and passively observes outgoing replies to archive exchanges
+in long-term storage.
 
 Technical overview
 ------------------
@@ -13,13 +13,11 @@ Technical overview
 * Request loop — handles ``get`` / ``file_write`` / ``file_read`` /
   ``file_list`` actions from Atelier and returns a JSON payload on
   ``relais:memory:response``.
-* Outgoing observer loop — watches per-channel outgoing streams to append each
-  exchange to the rolling context cache and archive it to SQLite.
+* Outgoing observer loop — watches per-channel outgoing streams to archive
+  each exchange to SQLite.
 
 Key classes:
 
-* ``ContextStore`` — Redis List ``relais:context:{session_id}``; capped at 20
-  turn blobs (each blob = full serialized message list for one turn), TTL 24 h.
 * ``LongTermStore`` — SQLite ``~/.relais/storage/memory.db``; stores full
   message history as one row per turn (upsert on ``correlation_id``).
 * ``FileStore`` — SQLite ``~/.relais/storage/memory.db`` (table
@@ -39,9 +37,6 @@ Produced:
   - relais:memory:response  — context history reply to Atelier
   - relais:logs             — operational log entries
 
-Redis keys written:
-  - relais:context:{user_id}  (List, max 20 entries, TTL 24 h)
-
 Processing flow — request loop
 ------------------------------
   (1) Consume from relais:memory:request (souvenir_group).
@@ -57,11 +52,9 @@ Processing flow — outgoing observer loop
   (2) Deserialize Envelope.
   (3) Read messages_raw list from envelope.metadata["messages_raw"] (produced
       by Atelier via atelier.message_serializer.serialize_messages()).
-  (4) Append the full turn blob (messages_raw) to relais:context:{session_id}
-      (Redis List) — one JSON blob per turn, flattened on read.
-  (5) Archive turn to SQLite long-term store: one row per correlation_id
+  (4) Archive turn to SQLite long-term store: one row per correlation_id
       (upsert), fields user_content + assistant_content + messages_raw JSON.
-  (6) XACK.
+  (5) XACK.
 """
 
 import asyncio
@@ -81,7 +74,6 @@ logging.basicConfig(
 from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
-from souvenir.context_store import ContextStore
 from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
@@ -97,7 +89,7 @@ class Souvenir:
 
     Consomme deux familles de streams :
 
-    1. ``relais:memory:request`` — action ``get`` : retourne l'historique.
+    1. ``relais:memory:request`` — actions ``clear`` / ``file_write`` / ``file_read`` / ``file_list``.
     2. ``relais:messages:outgoing:{channel}`` — observe les réponses sortantes
        pour mettre à jour le contexte Redis, archiver dans SQLite et extraire
        des faits utilisateur.
@@ -120,29 +112,19 @@ class Souvenir:
     async def _handle_outgoing(
         self,
         envelope: Envelope,
-        context_store: ContextStore,
         long_term_store: LongTermStore,
     ) -> None:
-        """Traite un message sortant : mise à jour du contexte et archivage.
+        """Traite un message sortant : archivage en SQLite long terme.
 
-        Séquence :
-        1. Reads messages_raw from envelope.metadata (full LangChain message
-           list for the turn, serialized by Atelier).
-        2. Appends the turn blob to the Redis context cache (one blob per turn).
-        3. Archives the turn to SQLite long-term store (upsert on correlation_id).
+        Reads messages_raw from envelope.metadata (full LangChain message
+        list for the turn, serialized by Atelier) and archives the turn to
+        SQLite (upsert on correlation_id).
 
         Args:
             envelope: L'enveloppe du message sortant (réponse de l'assistant).
-            context_store: Store court terme Redis.
             long_term_store: Store long terme SQLite.
         """
         messages_raw: list[dict] = envelope.metadata.get("messages_raw") or []
-
-        await context_store.append_turn(
-            session_id=envelope.session_id,
-            messages_raw=messages_raw,
-        )
-
         await long_term_store.archive(envelope, messages_raw)
 
     # ------------------------------------------------------------------
@@ -152,20 +134,14 @@ class Souvenir:
     async def _process_request_stream(
         self,
         redis_conn: Any,
-        context_store: ContextStore,
         shutdown: GracefulShutdown | None = None,
     ) -> None:
-        """Consomme ``relais:memory:request`` et répond aux actions ``get``.
-
-        Supprime l'ancienne action ``append`` (désormais gérée par
-        ``_process_outgoing_streams``). L'action ``store_memory`` est
-        conservée pour compatibilité avec les bricks existants.
+        """Consomme ``relais:memory:request`` et répond aux actions enregistrées.
 
         Exits cleanly when ``shutdown.is_stopping()`` returns True.
 
         Args:
             redis_conn: Connexion Redis async.
-            context_store: Store court terme Redis.
             shutdown: GracefulShutdown instance controlling the loop lifetime.
                 If None a new instance is created (backward-compatible).
         """
@@ -202,7 +178,6 @@ class Souvenir:
                             action = req.get("action")
                             ctx = HandlerContext(
                                 redis_conn=redis_conn,
-                                context_store=context_store,
                                 long_term_store=self._long_term,
                                 file_store=self._file_store,
                                 req=req,
@@ -232,7 +207,6 @@ class Souvenir:
     async def _process_outgoing_streams(
         self,
         redis_conn: Any,
-        context_store: ContextStore,
         shutdown: GracefulShutdown | None = None,
     ) -> None:
         """Observe ``relais:messages:outgoing:{channel}`` pour tous les canaux connus.
@@ -245,7 +219,6 @@ class Souvenir:
 
         Args:
             redis_conn: Connexion Redis async.
-            context_store: Store court terme Redis.
             shutdown: GracefulShutdown instance controlling the loop lifetime.
                 If None a new instance is created (backward-compatible).
         """
@@ -286,7 +259,6 @@ class Souvenir:
                             )
                             await self._handle_outgoing(
                                 envelope=envelope,
-                                context_store=context_store,
                                 long_term_store=self._long_term,
                             )
                         except Exception as inner_exc:
@@ -327,7 +299,6 @@ class Souvenir:
             "relais:logs",
             {"level": "INFO", "brick": "souvenir", "correlation_id": "", "sender_id": "", "message": "Souvenir started"},
         )
-        context_store = ContextStore(redis=redis_conn)
         try:
             logger.warning(
                 "Initialising SQLite schema via _create_tables() — "
@@ -336,8 +307,8 @@ class Souvenir:
             await self._long_term._create_tables()
             await self._file_store._create_tables()
             await asyncio.gather(
-                self._process_request_stream(redis_conn, context_store, shutdown=shutdown),
-                self._process_outgoing_streams(redis_conn, context_store, shutdown=shutdown),
+                self._process_request_stream(redis_conn, shutdown=shutdown),
+                self._process_outgoing_streams(redis_conn, shutdown=shutdown),
             )
         except asyncio.CancelledError:
             logger.info("Souvenir shutting down...")

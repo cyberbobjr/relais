@@ -187,12 +187,11 @@ async def test_souvenir_request_stream_exits_on_shutdown() -> None:
     souvenir.consumer_name = "souvenir_1"
 
     redis_conn = _make_redis_mock()
-    context_store = MagicMock()
 
     with patch("souvenir.main.GracefulShutdown", return_value=_PreSetShutdown()):
         try:
             await asyncio.wait_for(
-                souvenir._process_request_stream(redis_conn, context_store),
+                souvenir._process_request_stream(redis_conn),
                 timeout=1.0,
             )
         except asyncio.TimeoutError:
@@ -225,12 +224,11 @@ async def test_souvenir_outgoing_stream_exits_on_shutdown() -> None:
     souvenir._channels = ["discord", "telegram"]
 
     redis_conn = _make_redis_mock()
-    context_store = MagicMock()
 
     with patch("souvenir.main.GracefulShutdown", return_value=_PreSetShutdown()):
         try:
             await asyncio.wait_for(
-                souvenir._process_outgoing_streams(redis_conn, context_store),
+                souvenir._process_outgoing_streams(redis_conn),
                 timeout=1.0,
             )
         except asyncio.TimeoutError:
@@ -411,6 +409,12 @@ async def test_atelier_calls_install_signal_handlers() -> None:
     atelier.stream_in = "relais:tasks"
     atelier.group_name = "atelier_group"
     atelier.consumer_name = "atelier_1"
+    mock_checkpointer = MagicMock()
+    mock_cm = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_checkpointer)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+    atelier._checkpointer_cm = mock_cm
+    atelier._checkpointer = None
 
     mock_client = MagicMock()
     redis_conn = _make_redis_mock()

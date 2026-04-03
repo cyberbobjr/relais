@@ -57,6 +57,13 @@ def _make_envelope(content: str = "Hello") -> MagicMock:
     return envelope
 
 
+def _make_agent_state() -> MagicMock:
+    """Return a mock graph state with an empty messages list."""
+    state = MagicMock()
+    state.values = {"messages": []}
+    return state
+
+
 def _v2_chunk(chunk_type: str, ns: tuple, data: object) -> dict:
     """Build a v2 astream chunk dict.
 
@@ -129,6 +136,7 @@ async def test_execute_returns_ai_text_from_astream() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
@@ -136,7 +144,7 @@ async def test_execute_returns_ai_text_from_astream() -> None:
             soul_prompt="You are helpful.",
             tools=[],
         )
-        result = await executor.execute(_make_envelope("Hi"), context=[])
+        result = await executor.execute(_make_envelope("Hi"))
 
     assert result.reply_text == "reply from model"
 
@@ -153,75 +161,13 @@ async def test_execute_accumulates_multiple_ai_tokens() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("Hi"), context=[])
+        result = await executor.execute(_make_envelope("Hi"))
 
     assert result.reply_text == "Hello, world!"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_includes_context_in_messages() -> None:
-    """execute() must prepend context turns before the envelope content."""
-    from atelier.agent_executor import AgentExecutor
-
-    captured: list[dict] = []
-
-    async def capture_astream(input_data: dict, **kwargs) -> AsyncIterator:
-        captured.append(input_data)
-        return
-        yield  # make it a generator
-
-    mock_agent = MagicMock()
-    mock_agent.astream = capture_astream
-
-    context = [
-        {"role": "user", "content": "previous message"},
-        {"role": "assistant", "content": "previous reply"},
-    ]
-
-    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        await executor.execute(_make_envelope("new message"), context=context)
-
-    messages = captured[0]["messages"]
-    roles = [m["role"] for m in messages]
-    contents = [m["content"] for m in messages]
-
-    assert roles == ["user", "assistant", "user"]
-    assert contents[-1] == "new message"
-    assert "previous message" in contents
-    assert "previous reply" in contents
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_execute_inserts_empty_user_turn_when_context_starts_with_assistant() -> None:
-    """When context starts with an assistant turn, a synthetic empty user turn is prepended."""
-    from atelier.agent_executor import AgentExecutor
-
-    captured: list[dict] = []
-
-    async def capture_astream(input_data: dict, **kwargs) -> AsyncIterator:
-        captured.append(input_data)
-        return
-        yield  # make it a generator
-
-    mock_agent = MagicMock()
-    mock_agent.astream = capture_astream
-
-    context = [{"role": "assistant", "content": "Hello!"}]
-
-    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        await executor.execute(_make_envelope("Hi"), context=context)
-
-    messages = captured[0]["messages"]
-    assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == ""
-    assert messages[1]["role"] == "assistant"
 
 
 @pytest.mark.unit
@@ -236,6 +182,7 @@ async def test_execute_streaming_calls_stream_callback() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     received: list[str] = []
 
@@ -245,7 +192,7 @@ async def test_execute_streaming_calls_stream_callback() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(
-            _make_envelope("Hi"), context=[], stream_callback=callback
+            _make_envelope("Hi"), stream_callback=callback
         )
 
     assert "".join(received) == "Hello world"
@@ -265,6 +212,7 @@ async def test_execute_streaming_buffers_below_80_chars() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     callback_count = 0
 
@@ -275,7 +223,7 @@ async def test_execute_streaming_buffers_below_80_chars() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(
-            _make_envelope("Hi"), context=[], stream_callback=callback
+            _make_envelope("Hi"), stream_callback=callback
         )
 
     # Called exactly once at the end (flush remaining)
@@ -300,6 +248,7 @@ async def test_execute_streaming_flushes_at_80_chars() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     received: list[str] = []
 
@@ -309,7 +258,7 @@ async def test_execute_streaming_flushes_at_80_chars() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(
-            _make_envelope("Hi"), context=[], stream_callback=callback
+            _make_envelope("Hi"), stream_callback=callback
         )
 
     assert len(received) == 2
@@ -337,6 +286,7 @@ async def test_execute_streaming_skips_empty_content_chunks() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     received: list[str] = []
 
@@ -346,7 +296,7 @@ async def test_execute_streaming_skips_empty_content_chunks() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(
-            _make_envelope("Hi"), context=[], stream_callback=callback
+            _make_envelope("Hi"), stream_callback=callback
         )
 
     assert result.reply_text == "hello"
@@ -374,7 +324,7 @@ async def test_execute_propagates_rate_limit_error_unwrapped() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         with pytest.raises(RateLimitError):
-            await executor.execute(_make_envelope("Hi"), context=[])
+            await executor.execute(_make_envelope("Hi"))
 
 
 @pytest.mark.unit
@@ -393,7 +343,7 @@ async def test_execute_propagates_internal_server_error_unwrapped() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         with pytest.raises(InternalServerError):
-            await executor.execute(_make_envelope("Hi"), context=[])
+            await executor.execute(_make_envelope("Hi"))
 
 
 @pytest.mark.unit
@@ -412,7 +362,7 @@ async def test_execute_propagates_api_connection_error_unwrapped() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         with pytest.raises(APIConnectionError):
-            await executor.execute(_make_envelope("Hi"), context=[])
+            await executor.execute(_make_envelope("Hi"))
 
 
 @pytest.mark.unit
@@ -431,7 +381,7 @@ async def test_execute_wraps_unknown_error_in_agent_execution_error() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         with pytest.raises(AgentExecutionError) as exc_info:
-            await executor.execute(_make_envelope("Hi"), context=[])
+            await executor.execute(_make_envelope("Hi"))
 
     assert "unexpected failure" in str(exc_info.value)
 
@@ -513,3 +463,48 @@ def test_executor_defaults_skills_to_empty_list() -> None:
 
     call_kwargs = mock_create.call_args.kwargs
     assert call_kwargs.get("skills", "NOT_SET") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — checkpointer= parameter (Phase 1 migration)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_executor_uses_memory_saver_by_default() -> None:
+    """AgentExecutor without checkpointer= must use MemorySaver as fallback."""
+    from atelier.agent_executor import AgentExecutor
+    from langgraph.checkpoint.memory import MemorySaver
+
+    mock_agent = MagicMock()
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
+        AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+        )
+
+    call_kwargs = mock_create.call_args.kwargs
+    assert isinstance(call_kwargs.get("checkpointer"), MemorySaver)
+
+
+@pytest.mark.unit
+def test_executor_passes_explicit_checkpointer_to_create_deep_agent() -> None:
+    """AgentExecutor must forward an explicit checkpointer to create_deep_agent."""
+    from atelier.agent_executor import AgentExecutor
+    from langgraph.checkpoint.memory import MemorySaver
+
+    mock_agent = MagicMock()
+    explicit_checkpointer = MemorySaver()
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
+        AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+            checkpointer=explicit_checkpointer,
+        )
+
+    call_kwargs = mock_create.call_args.kwargs
+    assert call_kwargs.get("checkpointer") is explicit_checkpointer

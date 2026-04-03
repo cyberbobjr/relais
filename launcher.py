@@ -23,14 +23,37 @@ def main() -> None:
 
     if os.environ.get("DEBUGPY_ENABLED") == "1":
         import debugpy  # type: ignore[import]
+        import time
+        import socket
 
         port = int(os.environ.get("DEBUGPY_PORT", "5678"))
-        debugpy.listen(("0.0.0.0", port))
-        print(
-            f"[launcher] debugpy listening on port {port}",
-            file=sys.stderr,
-            flush=True,
-        )
+        max_retries = 5
+        retry_delay = 0.5
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                debugpy.listen(("0.0.0.0", port))
+                print(
+                    f"[launcher] debugpy listening on port {port}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
+            except RuntimeError as e:
+                if attempt == max_retries:
+                    print(
+                        f"[launcher] Failed to bind debugpy after {max_retries} attempts: {e}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    sys.exit(1)
+                print(
+                    f"[launcher] Port {port} in use, retrying ({attempt}/{max_retries})...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(retry_delay)
+
         if os.environ.get("DEBUGPY_WAIT") == "1":
             print(
                 f"[launcher] Waiting for debugger to attach on port {port}...",

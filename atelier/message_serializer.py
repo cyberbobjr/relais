@@ -103,6 +103,13 @@ def deserialize_messages(data: list[dict]) -> list["BaseMessage"]:
 
         elif role == "ai":
             tool_calls = entry.get("tool_calls", [])
+            for tc in tool_calls:
+                missing = [k for k in ("name", "args") if k not in tc]
+                if missing:
+                    raise ValueError(
+                        f"Malformed tool_call dict — missing required keys {missing}. "
+                        f"Got: {tc!r}"
+                    )
             result.append(AIMessage(content=content, tool_calls=tool_calls))
 
         elif role == "system":

@@ -8,7 +8,6 @@ from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 
-import souvenir.models  # noqa: F401 — registers Memory in SQLModel.metadata
 from common.config_loader import resolve_storage_dir
 
 config = context.config

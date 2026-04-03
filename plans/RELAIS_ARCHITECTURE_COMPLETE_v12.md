@@ -783,11 +783,12 @@ SouvenirBackend polls relais:memory:response (timeout 3s) → returns WriteResul
 1. relais:messages:outgoing:{channel} published by Sentinelle
 
 2. Souvenir._handle_outgoing():
-   a. Extract user message from envelope.metadata["user_message"]
-   b. Extract assistant reply from envelope.content
-   c. RPUSH relais:context:{session_id} [user_msg, assistant_reply]
-      LTRIM -20, EXPIRE 24h
-   d. long_term_store.archive(envelope)     ← SQLite messages
+   a. Read messages_raw from envelope.metadata["messages_raw"]
+      (full LangChain message list, serialized by Atelier)
+   b. RPUSH relais:context:{session_id} [messages_raw blob]
+      LTRIM -20, EXPIRE 24h (one JSON blob per turn, flattened on read)
+   c. long_term_store.archive(envelope)     ← SQLite upsert on correlation_id
+      (fields: user_content, assistant_content, messages_raw JSON)
 ```
 
 ### Compaction contexte
@@ -1171,7 +1172,6 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │
 ├── souvenir/
 │   ├── main.py
-│   ├── context_store.py
 │   ├── file_store.py
 │   ├── long_term_store.py
 │   ├── models.py

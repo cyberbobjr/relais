@@ -15,7 +15,6 @@ from souvenir.handlers.clear_handler import ClearHandler
 from souvenir.handlers.file_list_handler import FileListHandler
 from souvenir.handlers.file_read_handler import FileReadHandler
 from souvenir.handlers.file_write_handler import FileWriteHandler
-from souvenir.handlers.get_handler import GetHandler
 
 
 def build_registry() -> dict[str, BaseActionHandler]:
@@ -25,7 +24,6 @@ def build_registry() -> dict[str, BaseActionHandler]:
         Dict mapping each supported action string to its handler.
     """
     return {
-        "get": GetHandler(),
         "clear": ClearHandler(),
         "file_write": FileWriteHandler(),
         "file_read": FileReadHandler(),

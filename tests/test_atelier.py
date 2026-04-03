@@ -104,17 +104,33 @@ def _make_atelier_with_patches(extra_patches: dict | None = None):
     profile_mock = _default_profile_mock()
     profiles_map = {"default": profile_mock}
 
-    patches = {
+    mock_saver = MagicMock()
+    mock_saver_cls = MagicMock()
+    mock_saver_cls.from_conn_string.return_value = mock_saver
+
+    # Patches applied with return_value= (for functions called at __init__ time)
+    rv_patches = {
         "atelier.main.load_profiles": profiles_map,
         "atelier.main.load_for_sdk": {},
         "atelier.main.resolve_profile": profile_mock,
     }
+    # Patches applied with new= (for class-level objects where identity matters)
+    new_patches: dict = {
+        "atelier.main.AsyncSqliteSaver": mock_saver_cls,
+    }
     if extra_patches:
-        patches.update(extra_patches)
+        for k, v in extra_patches.items():
+            if k in new_patches:
+                new_patches[k] = v
+            else:
+                rv_patches[k] = v
 
     active: dict = {}
-    for target, retval in patches.items():
+    for target, retval in rv_patches.items():
         p = patch(target, return_value=retval)
+        active[target] = p.start()
+    for target, new_val in new_patches.items():
+        p = patch(target, new=new_val)
         active[target] = p.start()
 
     try:
@@ -297,54 +313,6 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
     mock_resolve.assert_called_once_with(profiles, "fast")
 
 
-@pytest.mark.asyncio
-async def test_handle_message_requests_memory_from_souvenir() -> None:
-    """_handle_message() XADDs a 'get' request to relais:memory:request."""
-    atelier = _make_atelier_with_patches()
-    envelope = _make_envelope()
-    redis_conn = _make_redis_mock()
-
-    redis_conn.xreadgroup = AsyncMock(side_effect=[
-        _make_xreadgroup_result(envelope),
-        asyncio.CancelledError(),
-    ])
-
-    with patch("atelier.main.AgentExecutor") as MockExecutor:
-        mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
-        MockExecutor.return_value = mock_instance
-
-        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
-            mock_mgr = AsyncMock()
-            mock_mgr.start_all = AsyncMock()
-            MockMcpMgr.return_value = mock_mgr
-
-            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
-                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
-                        with patch("atelier.main.load_for_sdk", return_value={}):
-                            try:
-                                await atelier._process_stream(redis_conn)
-                            except asyncio.CancelledError:
-                                pass
-
-    memory_calls = [
-        c for c in redis_conn.xadd.await_args_list
-        if c.args[0] == "relais:memory:request"
-    ]
-    assert len(memory_calls) >= 1
-
-    # Verify at least one call has action='get'
-    get_calls = []
-    for c in memory_calls:
-        fields = c.args[1]
-        payload = json.loads(fields.get("payload", "{}"))
-        if payload.get("action") == "get":
-            get_calls.append(payload)
-    assert len(get_calls) == 1
-    assert get_calls[0]["session_id"] == envelope.session_id
-    assert "correlation_id" in get_calls[0]
-
 
 @pytest.mark.asyncio
 async def test_handle_message_injects_user_message_in_response_metadata() -> None:
@@ -421,98 +389,6 @@ async def test_handle_message_acks_on_success() -> None:
                                 pass
 
     redis_conn.xack.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# Phase 4.3 — _fetch_context race-condition fix
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Phase 4.4 — Additional gap-filling tests (B1–B5)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_fetch_context_returns_empty_on_timeout() -> None:
-    """_fetch_context returns [] gracefully when xread times out (returns []).
-
-    When Redis xread returns an empty list (no messages within the block
-    window), _fetch_context must not raise and must return an empty list.
-    """
-    atelier = _make_atelier_with_patches()
-    envelope = _make_envelope()
-    redis_conn = _make_redis_mock()
-
-    # xadd succeeds; xread always returns [] to simulate a persistent timeout
-    redis_conn.xadd = AsyncMock(return_value=b"1000000-0")
-    redis_conn.xread = AsyncMock(return_value=[])
-
-    # Force the deadline to expire immediately after the first xread call so
-    # the while-loop terminates without looping forever.
-    call_count = 0
-
-    def mock_loop_time() -> float:
-        nonlocal call_count
-        call_count += 1
-        return 0.0 if call_count <= 3 else 999.0
-
-    loop = asyncio.get_event_loop()
-    with patch.object(loop, "time", mock_loop_time):
-        result = await atelier._fetch_context(redis_conn, envelope)
-
-    assert result == []
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_fetch_context_returns_parsed_messages_on_success() -> None:
-    """_fetch_context returns the messages list when a matching response arrives.
-
-    When xread returns a message whose correlation_id matches the request and
-    whose payload contains a 'messages' list, _fetch_context must return that
-    list unchanged.
-    """
-    atelier = _make_atelier_with_patches()
-    envelope = _make_envelope()
-    redis_conn = _make_redis_mock()
-
-    # Capture the correlation_id sent in the XADD payload so we can echo it back
-    captured_correlation_id: list[str] = []
-
-    async def mock_xadd(stream: str, fields: dict) -> bytes:
-        if stream == "relais:memory:request":
-            req = json.loads(fields.get("payload", "{}"))
-            captured_correlation_id.append(req.get("correlation_id", ""))
-        return b"1000000-0"
-
-    expected_history = [
-        {"role": "user", "content": "previous message"},
-        {"role": "assistant", "content": "previous reply"},
-    ]
-
-    xread_call_count = 0
-
-    async def mock_xread(streams: dict, count: int, block: int) -> list:
-        nonlocal xread_call_count
-        xread_call_count += 1
-        if xread_call_count == 1 and captured_correlation_id:
-            response_payload = json.dumps({
-                "correlation_id": captured_correlation_id[0],
-                "messages": expected_history,
-            })
-            return [
-                ("relais:memory:response", [("1000001-0", {"payload": response_payload})])
-            ]
-        return []
-
-    redis_conn.xadd = AsyncMock(side_effect=mock_xadd)
-    redis_conn.xread = AsyncMock(side_effect=mock_xread)
-
-    result = await atelier._fetch_context(redis_conn, envelope)
-
-    assert result == expected_history
 
 
 @pytest.mark.unit
@@ -653,54 +529,6 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
                                     pass
 
     mock_pub.finalize.assert_awaited_once()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_fetch_context_uses_xadd_id_not_dollar() -> None:
-    """_fetch_context uses the XADD return ID as starting point, not '$'.
-
-    When XADD returns '1000000-0', the first XREAD call must use
-    '999999-0' as the last_id so any response produced between the XADD
-    and the XREAD call is not missed.
-    """
-    atelier = _make_atelier_with_patches()
-    envelope = _make_envelope()
-
-    captured_last_ids: list[str] = []
-
-    async def mock_xadd(stream: str, fields: dict) -> bytes:
-        return b"1000000-0"
-
-    async def mock_xread(streams: dict, count: int, block: int) -> list:
-        # Capture the last_id used for relais:memory:response
-        captured_last_ids.append(streams.get("relais:memory:response", ""))
-        # Return empty so we reach the timeout path quickly
-        return []
-
-    redis_conn = _make_redis_mock()
-    redis_conn.xadd = AsyncMock(side_effect=mock_xadd)
-    redis_conn.xread = AsyncMock(side_effect=mock_xread)
-
-    # Mock loop time so the while loop body executes exactly once:
-    # calls 1-3 return 0.0 (deadline setup + first iteration check + remaining),
-    # call 4+ returns 999.0 (exits the loop after the first XREAD).
-    call_count = 0
-
-    def mock_loop_time() -> float:
-        nonlocal call_count
-        call_count += 1
-        return 0.0 if call_count <= 3 else 999.0
-
-    loop = asyncio.get_event_loop()
-    with patch.object(loop, "time", mock_loop_time):
-        await atelier._fetch_context(redis_conn, envelope)
-
-    assert len(captured_last_ids) >= 1, "xread should have been called at least once"
-    assert captured_last_ids[0] == "999999-0", (
-        f"Expected '999999-0' but got '{captured_last_ids[0]}'. "
-        "The fix must use XADD return ID minus 1 ms, not '$'."
-    )
 
 
 @pytest.mark.unit
@@ -1150,3 +978,76 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
     assert len(executor_calls) == 1
     assert "skills" in executor_calls[0]
     assert str(tmp_path / "coding") in executor_calls[0]["skills"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — AsyncSqliteSaver checkpointer (Phase 1 migration)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_atelier_creates_async_sqlite_saver_at_startup() -> None:
+    """Atelier.__init__ must create AsyncSqliteSaver with checkpoints.db path."""
+    from atelier.main import Atelier
+
+    mock_saver = MagicMock()
+    mock_saver_cls = MagicMock()
+    mock_saver_cls.from_conn_string.return_value = mock_saver
+
+    atelier = _make_atelier_with_patches(
+        extra_patches={"atelier.main.AsyncSqliteSaver": mock_saver_cls}
+    )
+
+    mock_saver_cls.from_conn_string.assert_called_once()
+    call_arg = mock_saver_cls.from_conn_string.call_args[0][0]
+    assert call_arg.endswith("checkpoints.db"), (
+        f"Expected path ending with 'checkpoints.db', got: {call_arg}"
+    )
+    # _checkpointer_cm holds the context manager; _checkpointer is None until start()
+    assert atelier._checkpointer_cm is mock_saver
+    assert atelier._checkpointer is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_handle_message_passes_checkpointer_to_agent_executor() -> None:
+    """_handle_message must pass atelier._checkpointer to AgentExecutor."""
+    atelier = _make_atelier_with_patches()
+    # Simulate what start() does: enter the context manager and store the saver.
+    atelier._checkpointer = MagicMock()
+    envelope = _make_envelope()
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    executor_calls: list = []
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
+
+        def capture_call(*args, **kwargs):
+            executor_calls.append(kwargs)
+            return mock_instance
+
+        MockExecutor.side_effect = capture_call
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._process_stream(redis_conn)
+                            except asyncio.CancelledError:
+                                pass
+
+    assert len(executor_calls) == 1
+    assert executor_calls[0].get("checkpointer") is atelier._checkpointer

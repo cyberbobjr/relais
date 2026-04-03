@@ -17,12 +17,14 @@ Usage:
   ./supervisor.sh reload all
   ./supervisor.sh status
   ./supervisor.sh clear
+  ./supervisor.sh force-kill
 
 Notes:
   - start all démarre supervisord si nécessaire puis lance tous les programmes.
   - reload all correspond à supervisorctl reload.
   - stop all arrête les programmes supervisés et coupe le démon supervisord.
   - clear supprime tous les fichiers présents dans .relais/logs.
+  - force-kill tue tous les processus launcher orphelins qui bloquent les ports debugpy.
 EOF
 }
 
@@ -250,6 +252,41 @@ clear_logs() {
     echo "Logs supprimés dans $logs_dir."
 }
 
+force_kill_launchers() {
+    local killed=0
+    local pid
+
+    # Kill all python launcher processes
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        if is_pid_running "$pid"; then
+            echo "Terminaison forcée du processus launcher (PID $pid)..."
+            kill -9 "$pid" >/dev/null 2>&1 || true
+            killed=$((killed + 1))
+        fi
+    done < <(pgrep -f "python.*launcher" 2>/dev/null || true)
+
+    # Kill all processes holding debugpy ports (567x and 568x)
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        if is_pid_running "$pid"; then
+            echo "Terminaison forcée du processus sur port debugpy (PID $pid)..."
+            kill -9 "$pid" >/dev/null 2>&1 || true
+            killed=$((killed + 1))
+        fi
+    done < <(lsof -i -P -n 2>/dev/null | grep -E "567[0-9]|568[0-9]" | awk '{print $2}' | sort -u)
+
+    # Cleanup stale artifacts
+    cleanup_stale_artifacts
+
+    if [[ $killed -gt 0 ]]; then
+        echo "$killed processus orphelins ont été terminés. Ports debugpy libérés."
+        sleep 1
+    else
+        echo "Aucun processus orphelin détecté."
+    fi
+}
+
 ACTION="${1:-}"
 TARGET="${2:-}"
 
@@ -326,6 +363,13 @@ case "$ACTION" in
             exit 1
         fi
         clear_logs
+        ;;
+    force-kill)
+        if [[ -n "$TARGET" ]]; then
+            usage
+            exit 1
+        fi
+        force_kill_launchers
         ;;
     -h|--help|help|"")
         usage

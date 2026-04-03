@@ -39,6 +39,13 @@ def _make_envelope(content: str = "Hello") -> MagicMock:
     return envelope
 
 
+def _make_agent_state() -> MagicMock:
+    """Return a mock graph state with an empty messages list."""
+    state = MagicMock()
+    state.values = {"messages": []}
+    return state
+
+
 def _v2_chunk(
     chunk_type: str,
     ns: tuple,
@@ -116,6 +123,7 @@ async def test_stream_emits_progress_on_tool_call() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     progress_calls: list[tuple[str, str]] = []
 
@@ -126,7 +134,7 @@ async def test_stream_emits_progress_on_tool_call() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         await executor.execute(
             _make_envelope("Hi"),
-            context=[],
+            
             progress_callback=progress_callback,
         )
 
@@ -151,6 +159,7 @@ async def test_stream_emits_progress_on_tool_result() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     progress_calls: list[tuple[str, str]] = []
 
@@ -161,7 +170,7 @@ async def test_stream_emits_progress_on_tool_result() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         await executor.execute(
             _make_envelope("Hi"),
-            context=[],
+            
             progress_callback=progress_callback,
         )
 
@@ -187,6 +196,7 @@ async def test_stream_emits_progress_tool_result_truncated_at_100() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     progress_calls: list[tuple[str, str]] = []
 
@@ -197,7 +207,7 @@ async def test_stream_emits_progress_tool_result_truncated_at_100() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         await executor.execute(
             _make_envelope("Hi"),
-            context=[],
+            
             progress_callback=progress_callback,
         )
 
@@ -230,6 +240,7 @@ async def test_stream_emits_progress_on_subagent_start() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     progress_calls: list[tuple[str, str]] = []
 
@@ -240,7 +251,7 @@ async def test_stream_emits_progress_on_subagent_start() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         await executor.execute(
             _make_envelope("Hi"),
-            context=[],
+            
             progress_callback=progress_callback,
         )
 
@@ -268,6 +279,7 @@ async def test_stream_no_progress_on_main_agent_model_request() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     progress_calls: list[tuple[str, str]] = []
 
@@ -278,7 +290,7 @@ async def test_stream_no_progress_on_main_agent_model_request() -> None:
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         await executor.execute(
             _make_envelope("Hi"),
-            context=[],
+            
             progress_callback=progress_callback,
         )
 
@@ -309,12 +321,13 @@ async def test_stream_progress_callback_none_no_error() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(
             _make_envelope("Hi"),
-            context=[],
+            
             # No progress_callback
         )
 
@@ -348,10 +361,11 @@ async def test_stream_fallback_last_tool_result_when_reply_empty() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("What is 2+2?"), context=[])
+        result = await executor.execute(_make_envelope("What is 2+2?"))
 
     assert result.reply_text == "4"
 
@@ -384,10 +398,11 @@ async def test_stream_fallback_tool_result_list_content() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("Do it"), context=[])
+        result = await executor.execute(_make_envelope("Do it"))
 
     assert result.reply_text == "Part one. Part two."
 
@@ -410,10 +425,11 @@ async def test_stream_placeholder_when_all_empty() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("silence"), context=[])
+        result = await executor.execute(_make_envelope("silence"))
 
     assert result.reply_text == PLACEHOLDER
 
@@ -440,10 +456,11 @@ async def test_stream_fallback_overridden_by_ai_text() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("search relais"), context=[])
+        result = await executor.execute(_make_envelope("search relais"))
 
     assert result.reply_text == "Here is the answer."
 
@@ -471,6 +488,7 @@ async def test_stream_text_tokens_accumulated() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     received: list[str] = []
 
@@ -480,7 +498,7 @@ async def test_stream_text_tokens_accumulated() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(
-            _make_envelope("Hi"), context=[], stream_callback=stream_callback
+            _make_envelope("Hi"), stream_callback=stream_callback
         )
 
     assert result.reply_text == "Hello, world!"
@@ -499,46 +517,13 @@ async def test_stream_error_wrapping_preserved() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         with pytest.raises(AgentExecutionError):
-            await executor.execute(_make_envelope("Hi"), context=[])
+            await executor.execute(_make_envelope("Hi"))
 
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_stream_context_prepended_in_messages() -> None:
-    """Context is prepended to the messages list passed to astream.
-
-    Validates that _build_messages is called with context + envelope content.
-    """
-    from atelier.agent_executor import AgentExecutor
-
-    captured: list[dict] = []
-
-    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
-        captured.append(input_data)
-        # Yield nothing — full_reply will be placeholder
-        return
-        yield  # make it a generator
-
-    mock_agent = MagicMock()
-    mock_agent.astream = fake_astream
-
-    context = [
-        {"role": "user", "content": "prior"},
-        {"role": "assistant", "content": "response"},
-    ]
-
-    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        await executor.execute(_make_envelope("new"), context=context)
-
-    messages = captured[0]["messages"]
-    roles = [m["role"] for m in messages]
-    assert roles == ["user", "assistant", "user"]
-    assert messages[-1]["content"] == "new"
 
 
 # ---------------------------------------------------------------------------
@@ -570,10 +555,11 @@ async def test_stream_text_preserved_when_tool_call_chunks_coexist() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("find relais"), context=[])
+        result = await executor.execute(_make_envelope("find relais"))
 
     assert "Searching for you…" in result.reply_text
     assert "Done." in result.reply_text
@@ -604,10 +590,11 @@ async def test_tool_result_list_with_str_items_not_dropped() -> None:
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        result = await executor.execute(_make_envelope("calc"), context=[])
+        result = await executor.execute(_make_envelope("calc"))
 
     # Both the str element and the dict text block must appear in the fallback
     assert result.reply_text == "Result: 42"

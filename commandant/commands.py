@@ -68,6 +68,7 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
     clear_request = {
         "action": "clear",
         "session_id": envelope.session_id,
+        "user_id": envelope.metadata.get("user_id", envelope.sender_id),
         "correlation_id": envelope.correlation_id,
         "envelope_json": envelope.to_json(),
     }

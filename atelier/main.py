@@ -41,26 +41,20 @@ Produced:
   - relais:messages:outgoing_pending   — full reply envelope → Sentinelle
   - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
   - relais:tasks:failed        — DLQ for exhausted retry attempts
-  - relais:memory:request      — context fetch request → Souvenir
   - relais:logs                — operational log entries
-
-Read:
-  - relais:memory:response     — context history returned by Souvenir
 
 Message flow (one task at a time):
 
   relais:tasks
     │  (1) deserialise Envelope, resolve ProfileConfig
-    │  (2) request context from Souvenir  ──► relais:memory:request
-    │                                     ◄── relais:memory:response
-    │  (3) assemble soul system prompt (SoulAssembler)
-    │  (4) start MCP sessions + build LangChain tools (McpSessionManager +
+    │  (2) assemble soul system prompt (SoulAssembler)
+    │  (3) start MCP sessions + build LangChain tools (McpSessionManager +
     │      ToolPolicy)
-    │  (5) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
+    │  (4) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
     │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── AgentResult(reply_text, messages_raw)  ← full turn captured via aget_state()
-    │  (6) build response Envelope; stamp metadata["messages_raw"] = messages_raw
+    │  (5) build response Envelope; stamp metadata["messages_raw"] = messages_raw
     │      (Souvenir reads this to persist the full LangChain message history)
     └──► relais:messages:outgoing_pending
 
@@ -79,12 +73,10 @@ as ``message_type=progress`` envelopes.  Publishing is governed by
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import sys
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -109,16 +101,12 @@ from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
 from atelier.progress_config import load_progress_config
-from common.config_loader import resolve_prompts_dir, resolve_skills_dir
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from common.config_loader import resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from aiguilleur.channel_config import load_channels_config
 from atelier.tool_policy import ToolPolicy
 
 logger = logging.getLogger("atelier")
-
-# Timeout (seconds) waiting for Souvenir memory response.
-# Kept deliberately short (3 s) — a slow or unavailable Souvenir should
-# degrade gracefully (empty context) rather than delay every message.
-_MEMORY_TIMEOUT_SECONDS: float = 3.0
 
 # Directory containing soul/channels/roles/policies prompts.
 # Resolved via the config cascade so users can override in ~/.relais/prompts/.
@@ -128,9 +116,9 @@ _PROMPTS_DIR: Path = resolve_prompts_dir()
 class Atelier:
     """The Atelier brick — orchestrates DeepAgents-based LLM generation.
 
-    Consumes tasks from ``relais:tasks``, fetches context from Souvenir,
-    calls the LLM via DeepAgents/LangChain (AgentExecutor), and publishes
-    response envelopes.
+    Consumes tasks from ``relais:tasks``, calls the LLM via DeepAgents/LangChain
+    (AgentExecutor), and publishes response envelopes.  Conversation history is
+    managed by the persistent LangGraph checkpointer (AsyncSqliteSaver).
     """
 
     def __init__(self) -> None:
@@ -164,6 +152,16 @@ class Atelier:
         # is automatically picked up.
         self._skills_base_dir: Path = resolve_skills_dir()
 
+        # Persistent LangGraph checkpointer — owned by the Atelier singleton so
+        # it survives across per-message AgentExecutor instances.  Uses a
+        # dedicated SQLite file (checkpoints.db) separate from Souvenir's
+        # memory.db to avoid table-name conflicts between LangGraph and SQLModel.
+        # NOTE: from_conn_string() returns an async context manager; the live
+        # saver instance is stored in self._checkpointer once start() enters it.
+        checkpoints_db = str(resolve_storage_dir() / "checkpoints.db")
+        self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoints_db)
+        self._checkpointer: AsyncSqliteSaver | None = None
+
     @property
     def _tool_policy(self) -> ToolPolicy:
         """Return a ToolPolicy rooted at the current _skills_base_dir.
@@ -185,8 +183,8 @@ class Atelier:
     ) -> bool:
         """Process a single task message from the Redis stream.
 
-        Fetches memory context from Souvenir, calls the SDK executor, and
-        publishes the response.  Routes SDKExecutionError payloads to the DLQ.
+        Calls the SDK executor and publishes the response.  Routes
+        SDKExecutionError payloads to the DLQ.
 
         Args:
             redis_conn: Active Redis connection.
@@ -216,10 +214,7 @@ class Atelier:
             # Resolve unique user_id for SouvenirBackend (shortcut in metadata)
             user_id: str = envelope.metadata.get("user_id") or envelope.sender_id
 
-            # 2. Request context from Souvenir
-            context = await self._fetch_context(redis_conn, envelope)
-
-            # 3. Assemble soul system prompt
+            # 2. Assemble soul system prompt
             soul_prompt = assemble_system_prompt(
                 prompts_dir=_PROMPTS_DIR,
                 channel=envelope.channel,
@@ -227,7 +222,7 @@ class Atelier:
                 user_role=ur.get("role"),
             )
 
-            # 4. Select MCP servers for this profile.
+            # 3. Select MCP servers for this profile.
             # Re-use the pre-loaded default set unless a non-default profile is
             # requested — profile-specific contextual servers require a fresh load.
             if profile_name == "default":
@@ -267,6 +262,7 @@ class Atelier:
                     tools=mcp_tools,
                     skills=skills,
                     backend=SouvenirBackend(user_id=user_id),
+                    checkpointer=self._checkpointer,
                 )
 
                 # 7. Execute — streaming only for capable channels; progress for all.
@@ -286,7 +282,6 @@ class Atelier:
 
                 agent_result = await agent_executor.execute(
                     envelope=envelope,
-                    context=context,
                     stream_callback=stream_pub.push_chunk if streaming else None,
                     progress_callback=stream_pub.push_progress,
                 )
@@ -359,75 +354,6 @@ class Atelier:
             })
             return False
 
-    async def _fetch_context(
-        self, redis_conn: Any, envelope: Envelope
-    ) -> list[dict]:
-        """Request the conversation context from Souvenir via Redis.
-
-        Sends a 'get' request to ``relais:memory:request`` and waits up to
-        _MEMORY_TIMEOUT_SECONDS for the matching response on
-        ``relais:memory:response``.  Falls back to an empty list on timeout.
-
-        Args:
-            redis_conn: Active Redis connection.
-            envelope: The current task envelope.
-
-        Returns:
-            List of role/content message dicts from memory, or [] on timeout.
-        """
-        correlation_id = str(uuid.uuid4())
-        get_req = {
-            "action": "get",
-            "session_id": envelope.session_id,
-            "correlation_id": correlation_id,
-        }
-        xadd_id: bytes | str = await redis_conn.xadd(
-            "relais:memory:request", {"payload": json.dumps(get_req)}
-        )
-
-        # Derive the XREAD start ID from the XADD return value so that any
-        # Souvenir response arriving between XADD and the first XREAD is
-        # never missed.  Using "$" would skip messages published in that gap.
-        if isinstance(xadd_id, bytes):
-            xadd_id = xadd_id.decode()
-        last_id = _xadd_id_to_xread_start(xadd_id)
-
-        # Poll loop: read entries from the response stream, filter by our
-        # correlation_id, and stop as soon as the matching reply arrives or
-        # the deadline is reached.  block_ms shrinks on each iteration so the
-        # total wait never exceeds _MEMORY_TIMEOUT_SECONDS.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _MEMORY_TIMEOUT_SECONDS
-
-        while loop.time() < deadline:
-            remaining = deadline - loop.time()
-            block_ms = max(1, int(remaining * 1000))
-            try:
-                results = await redis_conn.xread(
-                    {"relais:memory:response": last_id},
-                    count=10,
-                    block=block_ms,
-                )
-            except Exception as exc:
-                logger.warning("Error reading memory response: %s", exc)
-                break
-
-            next_last_id, messages = _extract_matching_memory_messages(
-                results,
-                correlation_id,
-            )
-            if next_last_id is not None:
-                last_id = next_last_id
-            if messages is not None:
-                return messages
-
-        logger.warning(
-            "[%s] Memory context timeout for session %s",
-            envelope.correlation_id,
-            envelope.session_id,
-        )
-        return []
-
     async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
         """Main loop: reads from the Redis stream and dispatches messages.
 
@@ -492,69 +418,16 @@ class Atelier:
             "relais:logs",
             {"level": "INFO", "brick": "atelier", "message": "Atelier started"},
         )
-        try:
-            await self._process_stream(redis_conn, shutdown=shutdown)
-        except asyncio.CancelledError:
-            logger.info("Atelier shutting down...")
-        finally:
-            await self.client.close()
-            logger.info("Atelier stopped gracefully")
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-
-def _xadd_id_to_xread_start(xadd_id: str) -> str:
-    """Convert an XADD return ID to a safe XREAD start ID.
-
-    Returns a stream ID that is 1 millisecond before ``xadd_id``.  This
-    ensures that a message published to the response stream *between* our
-    XADD call and the first XREAD is never skipped — using the XADD timestamp
-    verbatim (or "$") would miss it.
-
-    Args:
-        xadd_id: The ID string returned by redis XADD, e.g. "1711234567890-0".
-
-    Returns:
-        Start ID for XREAD, e.g. "1711234567889-0", or "0" on parse failure.
-    """
-    try:
-        ts_ms, _ = xadd_id.split("-")
-        return f"{int(ts_ms) - 1}-0"
-    except (ValueError, AttributeError):
-        return "0"
-
-
-def _extract_matching_memory_messages(
-    results: Any,
-    correlation_id: str,
-) -> tuple[str | None, list[dict] | None]:
-    """Extract the newest stream ID and matching memory payload from XREAD data.
-
-    Args:
-        results: Raw Redis XREAD response.
-        correlation_id: Request correlation ID to match.
-
-    Returns:
-        Tuple of (last_seen_id, messages). ``messages`` is None when no
-        matching response is found in the batch.
-    """
-    last_seen_id: str | None = None
-
-    for _, stream_messages in results or []:
-        for msg_id, data in stream_messages:
-            last_seen_id = msg_id
+        async with self._checkpointer_cm as checkpointer:
+            self._checkpointer = checkpointer
             try:
-                response = json.loads(data.get("payload", "{}"))
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-            if response.get("correlation_id") == correlation_id:
-                return last_seen_id, response.get("messages", [])
-
-    return last_seen_id, None
+                await self._process_stream(redis_conn, shutdown=shutdown)
+            except asyncio.CancelledError:
+                logger.info("Atelier shutting down...")
+            finally:
+                self._checkpointer = None
+                await self.client.close()
+                logger.info("Atelier stopped gracefully")
 
 
 # ---------------------------------------------------------------------------
