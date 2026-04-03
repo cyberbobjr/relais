@@ -18,10 +18,10 @@ Technical overview
 
 Key classes:
 
-* ``ContextStore`` — Redis List ``relais:context:{user_id}``; capped at 20
-  messages, TTL 24 h.
+* ``ContextStore`` — Redis List ``relais:context:{session_id}``; capped at 20
+  turn blobs (each blob = full serialized message list for one turn), TTL 24 h.
 * ``LongTermStore`` — SQLite ``~/.relais/storage/memory.db``; stores full
-  message history.
+  message history as one row per turn (upsert on ``correlation_id``).
 * ``FileStore`` — SQLite ``~/.relais/storage/memory.db`` (table
   ``memory_files``); stores persistent agent memory files routed by
   ``SouvenirBackend`` in Atelier.
@@ -55,9 +55,13 @@ Processing flow — outgoing observer loop
   (1) Consume from relais:messages:outgoing:{channel}
       (souvenir_outgoing_group).
   (2) Deserialize Envelope.
-  (3) Append user + assistant turn to relais:context:{user_id} (Redis List).
-  (4) Archive exchange to SQLite long-term store.
-  (5) XACK.
+  (3) Read messages_raw list from envelope.metadata["messages_raw"] (produced
+      by Atelier via atelier.message_serializer.serialize_messages()).
+  (4) Append the full turn blob (messages_raw) to relais:context:{session_id}
+      (Redis List) — one JSON blob per turn, flattened on read.
+  (5) Archive turn to SQLite long-term store: one row per correlation_id
+      (upsert), fields user_content + assistant_content + messages_raw JSON.
+  (6) XACK.
 """
 
 import asyncio
@@ -122,8 +126,10 @@ class Souvenir:
         """Traite un message sortant : mise à jour du contexte et archivage.
 
         Séquence :
-        1. Appends the user+assistant turn pair to the Redis context cache.
-        2. Archives both messages to SQLite for long-term persistence.
+        1. Reads messages_raw from envelope.metadata (full LangChain message
+           list for the turn, serialized by Atelier).
+        2. Appends the turn blob to the Redis context cache (one blob per turn).
+        3. Archives the turn to SQLite long-term store (upsert on correlation_id).
 
         Args:
             envelope: L'enveloppe du message sortant (réponse de l'assistant).

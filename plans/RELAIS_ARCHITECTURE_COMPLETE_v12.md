@@ -75,10 +75,12 @@ La documentation ci-dessous décrit donc le répertoire logique `RELAIS_HOME`, s
 │
 ├── config/
 │   ├── config.yaml               ← surcharge <INSTALL_CONFIG_DIR>/config/config.yaml
-│   ├── profiles.yaml             ← profils personnalisés
+│   ├── atelier/
+│   │   ├── profiles.yaml         ← profils personnalisés
+│   │   └── mcp_servers.yaml      ← MCP servers additionnels
 │   ├── portail.yaml              ← registry utilisateurs + rôles (Portail)
 │   ├── sentinelle.yaml           ← ACL Sentinelle (access_control + groups)
-│   ├── mcp_servers.yaml          ← MCP servers additionnels
+│   ├── atelier.yaml              ← config comportementale Atelier (progress events)
 │   └── HEARTBEAT.md              ← tâches planifiées personnalisées
 │
 ├── prompts/
@@ -242,7 +244,7 @@ MCP CONTEXTUELS — spawned par L'Atelier (à la demande)
   Ex: mcp__jcodemunch, mcp__gitlab
 ```
 
-### config/mcp_servers.yaml
+### config/atelier/mcp_servers.yaml
 
 Format canonique — deux transports supportés : `stdio` (sous-processus spawné par l'Atelier) et `sse` (connexion à un serveur HTTP existant).
 
@@ -265,7 +267,7 @@ mcp_servers:
   contextual:
 ```
 
-> **Note as-built :** le cycle de vie décrit ici correspond au loader et au session manager actuels. Les exemples `mcp-calendar`, `mcp-brave-search`, `mcp__jcodemunch`, `mcp__gitlab` sont illustratifs ; la source de vérité des serveurs réellement actifs reste `config/mcp_servers.yaml`.
+> **Note as-built :** le cycle de vie décrit ici correspond au loader et au session manager actuels. Les exemples `mcp-calendar`, `mcp-brave-search`, `mcp__jcodemunch`, `mcp__gitlab` sont illustratifs ; la source de vérité des serveurs réellement actifs reste `config/atelier/mcp_servers.yaml`.
     - name: code-tools
       enabled: true
       type: stdio
@@ -278,7 +280,7 @@ mcp_servers:
 
 > **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
 >
-> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s) et `mcp_max_tools` (défaut 20) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `profiles.yaml`.
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s) et `mcp_max_tools` (défaut 20) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `atelier/profiles.yaml`.
 
 ---
 
@@ -608,7 +610,7 @@ Incoming envelope
 Parse + load profile
   — lit envelope.metadata["user_record"]["llm_profile"]
   — si absent : fallback "default"
-  — résout le ProfileConfig depuis profiles.yaml (model, max_turns, max_tokens, resilience)
+  — résout le ProfileConfig depuis atelier/profiles.yaml (model, max_turns, max_tokens, resilience)
   ↓
 Request context from Souvenir (relais:memory:request stream)
   ↓
@@ -690,7 +692,7 @@ Les chemins resolus sont passés directement à `create_deep_agent(skills=[...])
 ### Résilience LLM — pattern XACK
 
 ```yaml
-# config/profiles.yaml — section résilience dans chaque profil
+# config/atelier/profiles.yaml — section résilience dans chaque profil
 default:
   model: anthropic:claude-opus-4-6
   max_turns: 20
@@ -947,9 +949,9 @@ Dans l'état actuel du code, le prompt système est uniquement la concaténation
 
 ---
 
-## 16. Profils — config/profiles.yaml
+## 16. Profils — config/atelier/profiles.yaml
 
-La structure réelle parsée par `common/profile_loader.py` est volontairement compacte. Les politiques d'accès aux skills et outils MCP sont portées par `portail.yaml` via `UserRecord`, pas par `profiles.yaml`.
+La structure réelle parsée par `atelier/profile_loader.py` est volontairement compacte. Les politiques d'accès aux skills et outils MCP sont portées par `portail.yaml` via `UserRecord`, pas par `atelier/profiles.yaml`.
 
 ### Règle de résolution du profil
 
@@ -1103,12 +1105,15 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │
 ├── config/                            ← Templates système (*.default)
 │   ├── config.yaml.default
-│   ├── profiles.yaml.default
+│   ├── atelier.yaml.default           ← config comportementale Atelier (progress events)
 │   ├── portail.yaml.default
-│   ├── mcp_servers.yaml.default
+│   ├── sentinelle.yaml.default
 │   ├── channels.yaml.default
 │   ├── redis.conf
-│   └── HEARTBEAT.md.default
+│   ├── HEARTBEAT.md.default
+│   └── atelier/
+│       ├── profiles.yaml.default
+│       └── mcp_servers.yaml.default
 │
 ├── prompts/                           ← Prompts système par défaut
 │   ├── soul/
@@ -1133,7 +1138,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── config_loader.py               ← get_relais_home() + resolve_config_path()
 │   ├── init.py                        ← initialize_user_dir()
 │   ├── user_record.py                 ← UserRecord
-│   ├── profile_loader.py              ← ProfileConfig + ResilienceConfig (shared by Atelier + Souvenir)
+│   ├── profile_loader.py              ← (supprimé — déplacé vers atelier/profile_loader.py)
 │   └── markdown_converter.py
 │
 ├── aiguilleur/
@@ -1160,7 +1165,9 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── mcp_loader.py
 │   ├── soul_assembler.py
 │   ├── stream_publisher.py
-│   └── souvenir_backend.py
+│   ├── souvenir_backend.py
+│   ├── profile_loader.py              ← ProfileConfig + ResilienceConfig (Atelier seul)
+│   └── progress_config.py             ← ProgressConfig (master switch + per-event flags)
 │
 ├── souvenir/
 │   ├── main.py
@@ -1186,12 +1193,14 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │                                         Créé automatiquement au 1er lancement
 ├── config/
 │   ├── config.yaml
-│   ├── profiles.yaml
+│   ├── atelier.yaml
 │   ├── portail.yaml
 │   ├── sentinelle.yaml
-│   ├── mcp_servers.yaml
 │   ├── channels.yaml
-│   └── HEARTBEAT.md
+│   ├── HEARTBEAT.md
+│   └── atelier/
+│       ├── profiles.yaml
+│       └── mcp_servers.yaml
 │
 ├── prompts/
 │   ├── soul/

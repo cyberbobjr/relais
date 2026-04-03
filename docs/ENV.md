@@ -1,73 +1,86 @@
 # RELAIS — Variables d'environnement
 
-<!-- AUTO-GENERATED from .env.example — ne pas éditer manuellement -->
-**Généré le:** 2026-03-28
-
-Copier `.env.example` vers `.env` et renseigner les valeurs :
-
-```bash
-cp .env.example .env
-```
+Cette page liste les variables réellement utiles au runtime actuel du dépôt.
 
 ---
 
-## LLM Provider
+## Variables principales
 
-| Variable | Requis | Description | Exemple |
-|----------|--------|-------------|---------|
-| `OPENROUTER_API_KEY` | Oui | Clé API OpenRouter (ou autre provider LiteLLM) | `sk-or-xxx` |
+| Variable | Requis | Utilisation réelle |
+|----------|--------|--------------------|
+| `RELAIS_HOME` | Non | Répertoire de travail RELAIS. Défaut : `./.relais` à la racine du repo. |
+| `LOG_LEVEL` | Non | Niveau de logs Python (`INFO` par défaut dans les briques). |
+| `REDIS_SOCKET_PATH` | Non | Chemin du socket Unix Redis. Défaut : `<RELAIS_HOME>/redis.sock`. |
+| `REDIS_PASSWORD` | Non | Mot de passe Redis générique de fallback si un mot de passe dédié à la brique n'est pas fourni. |
+| `RELAIS_DB_PATH` | Non | Override du chemin SQLite utilisé par Alembic pour `memory.db`. |
 
-## Canaux de messagerie
-
-| Variable | Requis | Description | Exemple |
-|----------|--------|-------------|---------|
-| `DISCORD_BOT_TOKEN` | Non* | Token bot Discord | `xxx` |
-| `TELEGRAM_BOT_TOKEN` | Non* | Token bot Telegram | `xxx` |
-| `SLACK_BOT_TOKEN` | Non* | Token bot Slack | `xoxb-xxx` |
-| `SLACK_SIGNING_SECRET` | Non* | Secret de signature Slack | `xxx` |
-
-*Au moins un canal doit être configuré pour recevoir des messages.
-
-## Redis
-
-| Variable | Requis | Description | Exemple |
-|----------|--------|-------------|---------|
-| `REDIS_SOCKET_PATH` | Non | Chemin du socket Unix Redis (défaut: `./.relais/redis.sock`) | `./.relais/redis.sock` |
-| `REDIS_PASSWORD` | Non | Mot de passe Redis principal | `xxx` |
+---
 
 ## Redis ACL par brique
 
-Chaque brique a un mot de passe Redis séparé pour l'isolation de sécurité :
+Chaque `RedisClient("<brick>")` cherche d'abord `REDIS_PASS_<BRICK>`, puis retombe sur `REDIS_PASSWORD`.
 
-| Variable | Brique |
-|----------|--------|
-| `REDIS_PASS_AIGUILLEUR` | Relays (Discord, Telegram, Slack) |
-| `REDIS_PASS_PORTAIL` | Portail |
-| `REDIS_PASS_SENTINELLE` | Sentinelle |
-| `REDIS_PASS_ATELIER` | Atelier (LLM caller) |
-| `REDIS_PASS_SOUVENIR` | Souvenir (mémoire) |
-| `REDIS_PASS_ARCHIVISTE` | Archiviste |
-| `REDIS_PASS_SCHEDULER` | Scheduler (futur) |
-| `REDIS_PASS_HERALD` | Herald (futur) |
-| `REDIS_PASS_LEARNER` | Learner (futur) |
-| `REDIS_PASS_WARDEN` | Warden (futur) |
-| `REDIS_PASS_INTAKE` | Intake (futur) |
-| `REDIS_PASS_INSPECTOR` | Inspector (futur) |
-| `REDIS_PASS_WEAVER` | Weaver (futur) |
+| Variable | Utilisée par |
+|----------|--------------|
+| `REDIS_PASS_AIGUILLEUR` | `aiguilleur` |
+| `REDIS_PASS_PORTAIL` | `portail` |
+| `REDIS_PASS_SENTINELLE` | `sentinelle` |
+| `REDIS_PASS_ATELIER` | `atelier` |
+| `REDIS_PASS_SOUVENIR` | `souvenir` |
+| `REDIS_PASS_COMMANDANT` | `commandant` |
+| `REDIS_PASS_ARCHIVISTE` | `archiviste` |
 
-## LLM Provider (Anthropic direct)
-
-| Variable | Requis | Description | Exemple |
-|----------|--------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Oui | Clé API directe vers Anthropic (utilisée par DeepAgents/LangChain) | `sk-ant-xxx` |
-
-## Chemins optionnels
-
-| Variable | Requis | Description | Exemple |
-|----------|--------|-------------|---------|
-| `RELAIS_HOME` | Non | Répertoire de données RELAIS (défaut: `~/.relais`) | `/opt/relais` |
-| `RELAIS_DB_PATH` | Non | Chemin SQLite pour Souvenir (défaut: `~/.relais/storage/memory.db`) | `/data/memory.db` |
+Les autres mots de passe présents dans `.env.example` correspondent à des briques futures ou absentes de ce dépôt.
 
 ---
 
-**Voir aussi:** [ARCHITECTURE.md](ARCHITECTURE.md) — détails par brique
+## Providers LLM
+
+| Variable | Requis | Utilisation réelle |
+|----------|--------|--------------------|
+| `ANTHROPIC_API_KEY` | Souvent oui | Utilisée par les profils Anthropic dans `config/atelier/profiles.yaml`. |
+| `OPENROUTER_API_KEY` | Optionnel | Utilisée si un profil OpenRouter est configuré. |
+
+`atelier.profile_loader` lit le nom de variable depuis `api_key_env` dans `profiles.yaml`. Toute autre variable peut donc être utilisée si elle est référencée explicitement dans un profil.
+
+---
+
+## Canaux
+
+| Variable | Requis | Utilisation réelle |
+|----------|--------|--------------------|
+| `DISCORD_BOT_TOKEN` | Oui pour Discord | Lue par l'adaptateur Discord. |
+| `TELEGRAM_BOT_TOKEN` | Optionnel | Prévue si un adaptateur Telegram est activé. |
+| `SLACK_BOT_TOKEN` | Optionnel | Présente dans le template d'env, mais pas utilisée par un adaptateur complet dans ce dépôt. |
+| `SLACK_SIGNING_SECRET` | Optionnel | Même remarque que ci-dessus. |
+
+---
+
+## Debug
+
+Ces variables sont lues par [launcher.py](/Users/benjaminmarchand/IdeaProjects/relais/launcher.py) :
+
+| Variable | Requis | Utilisation réelle |
+|----------|--------|--------------------|
+| `DEBUGPY_ENABLED` | Non | Active `debugpy` si vaut `1`. |
+| `DEBUGPY_PORT` | Non | Port d'écoute debugpy. |
+| `DEBUGPY_WAIT` | Non | Attend l'attachement d'un débogueur si vaut `1`. |
+
+---
+
+## Variables utiles aux exemples MCP
+
+Certaines valeurs ne sont pas nécessaires au cœur du runtime, mais deviennent utiles si vous activez les serveurs MCP d'exemple du template [config/atelier/mcp_servers.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/atelier/mcp_servers.yaml.default).
+
+| Variable | Utilisation |
+|----------|-------------|
+| `GITHUB_TOKEN` | Exemple de serveur MCP GitHub |
+| `BRAVE_API_KEY` | Exemple de serveur MCP Brave Search |
+
+---
+
+## Remarques importantes
+
+- Le runtime actuel de RELAIS ne lit pas la configuration Redis depuis `config/config.yaml` pour se connecter à Redis. Les briques utilisent surtout `REDIS_SOCKET_PATH`, `REDIS_PASS_<BRICK>` et `REDIS_PASSWORD`.
+- `RELAIS_HOME` pilote aussi la résolution des répertoires `prompts`, `skills`, `logs`, `media` et `storage`.
+- Pour initialiser `storage/memory.db`, utilisez `alembic upgrade head`.

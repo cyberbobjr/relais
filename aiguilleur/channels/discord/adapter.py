@@ -2,11 +2,20 @@
 
 Bridges the Discord API and the RELAIS Redis bus:
 - Produces:   relais:messages:incoming         (new user messages)
-- Consumes:   relais:messages:outgoing:discord (bot replies)
+- Consumes:   relais:messages:outgoing:discord (bot replies + progress events)
 
-Note: streaming progressif désactivé sur ce canal — Atelier publie la réponse
-complète sur relais:messages:outgoing:discord et le bot l'envoie en un seul
-message.
+Two envelope types are consumed from relais:messages:outgoing:discord:
+- Normal reply (metadata["message_type"] absent or "reply"): sent as a single
+  Discord message once the full LLM response is ready.
+- Progress event (metadata["message_type"] == "progress"): sent as an inline
+  notification while Atelier is still running (tool calls, tool results, …).
+  Format: ``{event} : [{detail}]``.  The typing indicator is NOT cancelled on
+  progress events — it continues until the final reply arrives.
+
+Streaming progressif (token-by-token) est désactivé sur ce canal.  Atelier
+publie la réponse complète sur relais:messages:outgoing:discord après la fin
+de l'exécution agentique.  La publication des événements progress est
+contrôlée par ``ProgressConfig`` (config/atelier.yaml, section ``progress:``).
 """
 
 from __future__ import annotations

@@ -59,8 +59,9 @@ Message flow (one task at a time):
     │  (5) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
     │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
-    │      └── full reply
-    │  (6) publish response Envelope
+    │      └── AgentResult(reply_text, messages_raw)  ← full turn captured via aget_state()
+    │  (6) build response Envelope; stamp metadata["messages_raw"] = messages_raw
+    │      (Souvenir reads this to persist the full LangChain message history)
     └──► relais:messages:outgoing_pending
 
 XACK contract:
