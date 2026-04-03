@@ -791,17 +791,25 @@ AgentExecutor.execute(envelope, context, stream_callback?):
 
 ### Streaming Progressif
 
-Atelier publie les tokens d'une réponse au fur et à mesure via `StreamPublisher` (token-by-token grâce à `agent.astream(stream_mode="messages")`) :
+Atelier publie les tokens d'une réponse et les événements de progression via `StreamPublisher` (token-by-token grâce à `agent.astream(stream_mode=["updates", "messages"], subgraphs=True, version="v2")`) :
 
 ```
 relais:messages:streaming:{channel}:{correlation_id}
-├─ seq: 1, text: "Bonjour", is_final: 0
-├─ seq: 2, text: "Bonjour, c'est", is_final: 0
-├─ seq: 3, text: "Bonjour, c'est sympa", is_final: 1
-└─ (Aiguilleur édite le message en temps réel)
+├─ type: token,    seq: 1, chunk: "Bonjour",      is_final: 0
+├─ type: progress, seq: 2, event: "tool_call",    detail: "web_search", is_final: 0
+├─ type: token,    seq: 3, chunk: ", je cherche", is_final: 0
+├─ type: progress, seq: 4, event: "tool_result",  detail: "web_search: ...", is_final: 0
+├─ type: token,    seq: 5, chunk: " des infos.",  is_final: 0
+└─ type: token,    seq: 6, chunk: "",             is_final: 1  ← sentinel final
 ```
 
+**Types d'entrées :**
+- `type=token` — fragment de texte LLM, consommé pour l'édition progressive du message
+- `type=progress` — événement pipeline (`tool_call`, `tool_result`, `subagent_start`), affiché comme feedback UX ; ignoré pour la réponse finale
+
 **Throttling:** 80 caractères minimum entre éditions (rate limit 5 req/5s).
+
+**Progress events sur outgoing:** `StreamPublisher` publie aussi les événements `progress` sur `relais:messages:outgoing:{channel}` (via un Envelope enfant avec `metadata["message_type"]="progress"`) pour que les adaptateurs non-streaming (ex: Discord) puissent afficher des indicateurs de progression entre les tours.
 
 ### Serveurs MCP — McpSessionManager
 
@@ -834,28 +842,33 @@ all_tools = internal_tools + mcp_tools
   ↓
 create_deep_agent(model, tools=all_tools, system_prompt)
   ↓
-agent.astream({"messages": ...}, stream_mode="messages")
-  → chunks token-by-token → stream_callback → relais:messages:streaming
+agent.astream({"messages": ...}, stream_mode=["updates", "messages"], subgraphs=True, version="v2")
+  → token chunks (type=token) → stream_callback → relais:messages:streaming
+  → progress events (type=progress) → push_progress() → streaming + outgoing
   → tool calls gérés automatiquement par DeepAgents
   ↓
 Résultat agrégé → relais:messages:outgoing_pending  (→ Sentinelle outgoing → outgoing:{channel})
 ```
 
-### Souvenir — Dual-Stream avec Extracteur Mémoire
+### Souvenir — Dual-Stream avec Mémoire Persistante
 
 Souvenir consomme deux streams:
 
-1. **`relais:memory:request`** (Atelier demande contexte avant exécution agentique)
+1. **`relais:memory:request`** (Atelier demande contexte ou opération fichier)
    - Action `get` → retourne historique court-terme (Redis) ou fallback SQLite
-   - Action `append_turn` → ajoute un tour conversation
+   - Action `file_write` → crée/écrase un fichier mémoire dans SQLite (via `FileStore`)
+   - Action `file_read` → lit le contenu d'un fichier mémoire
+   - Action `file_list` → liste les fichiers mémoire d'un utilisateur sous un préfixe
 
 2. **`relais:messages:outgoing:*`** (observer les réponses finales)
-   - `MemoryExtractor` appelle le LLM directement via `langchain.chat_models.init_chat_model` (format `provider:model-id`)
-   - Extrait user_facts (faits sur l'utilisateur) avec threshold confiance 0.7
-   - Stocke dans SQLite `user_facts` table
+   - Appends user + assistant turn to Redis context cache (TTL 24h)
+   - Archives the exchange to SQLite (long-term store)
 
-**Redis List (`relais:context:{session_id}`):** Cache rapide 20 msgs, TTL 24h
-**SQLite (`memory.db`):** Source de vérité, fallback si Redis redémarre
+**Redis List (`relais:context:{user_id}`):** Cache rapide 20 msgs, TTL 24h
+**SQLite (`memory.db` — table `messages`):** Historique long terme archivé
+**SQLite (`memory.db` — table `memory_files`):** Fichiers mémoire persistants de l'agent (chemins virtuels `/memories/...`), isolés par `user_id`
+
+**Routing depuis Atelier:** `SouvenirBackend` (`atelier/souvenir_backend.py`) implémente `BackendProtocol` de DeepAgents et route toutes les opérations sur `/memories/` vers Souvenir via `relais:memory:request`. Les chemins hors `/memories/` passent par `StateBackend` (état en mémoire pour la durée de la tâche).
 
 ---
 

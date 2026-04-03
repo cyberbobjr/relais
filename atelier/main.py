@@ -13,7 +13,10 @@ Key classes:
 
 * ``AgentExecutor`` (atelier.agent_executor) — orchestrates a single
   ``deepagents.create_deep_agent()`` call; handles streaming via
-  ``agent.astream(stream_mode="messages")``.
+  ``agent.astream(stream_mode=["updates", "messages"], subgraphs=True,
+  version="v2")``; accepts an optional ``backend: BackendProtocol`` (for
+  DeepAgents persistent memory) and ``progress_callback`` forwarded from
+  the caller.
 * ``McpSessionManager`` (atelier.mcp_session_manager) — manages stdio/SSE MCP
   server lifecycle across requests.
 * ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
@@ -22,8 +25,12 @@ Key classes:
   system prompt from soul / role / user / channel / policy prompt files.
 * ``ProfileConfig`` — loaded from profiles.yaml; selects model, temperature,
   max_tokens, mcp_timeout, mcp_max_tools per request.
-* ``StreamPublisher`` — publishes streaming chunks to
-  ``relais:messages:streaming:{channel}:{corr_id}`` for real-time rendering.
+* ``StreamPublisher`` — publishes streaming entries to
+  ``relais:messages:streaming:{channel}:{corr_id}`` (type ``token`` for text
+  chunks) and progress events (type ``progress``) to both the streaming stream
+  and ``relais:messages:outgoing:{channel}`` for real-time rendering.
+* ``SouvenirBackend`` (atelier.souvenir_backend) — ``BackendProtocol`` impl
+  that routes ``/memories/`` paths to the Souvenir brick via Redis.
 
 Redis channels
 --------------
@@ -49,8 +56,9 @@ Message flow (one task at a time):
     │  (3) assemble soul system prompt (SoulAssembler)
     │  (4) start MCP sessions + build LangChain tools (McpSessionManager +
     │      ToolPolicy)
-    │  (5) AgentExecutor.execute() — DeepAgents agentic loop
-    │      ├── streaming chunks ──► relais:messages:streaming:{channel}:{corr_id}
+    │  (5) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
+    │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
+    │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── full reply
     │  (6) publish response Envelope
     └──► relais:messages:outgoing_pending

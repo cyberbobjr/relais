@@ -78,7 +78,7 @@ The main pipeline flows through these bricks in order:
   - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
   - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)
   - `portail.yaml.default`: User registry with display_name, role, channels, llm_profile
-  - `sentinelle.yaml.default`: ACL for sentinelle bricks
+  - `sentinelle.yaml.default`: ACL for sentinelle brick
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 
 - **prompts/** - Multi-layer system prompt (assembled by `atelier/soul_assembler.py`)

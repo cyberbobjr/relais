@@ -473,7 +473,7 @@ channels:
 
 ### Streaming progressif — édition temps réel
 
-Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier publie les chunks token-par-token dans `relais:messages:streaming:{channel}:{correlation_id}`. L'Aiguilleur envoie un message placeholder, lit les chunks en boucle, et édite le message progressivement. Un flag `is_final` signale la fin du stream.
+Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier publie les chunks token-par-token et les événements de progression dans `relais:messages:streaming:{channel}:{correlation_id}`. L'Aiguilleur envoie un message placeholder, lit les chunks en boucle, et édite le message progressivement. Un flag `is_final` signale la fin du stream. Les entrées portent un champ `type` : `token` pour les fragments texte, `progress` pour les événements pipeline (tool_call, tool_result, subagent_start). Les événements `progress` sont aussi publiés sur `relais:messages:outgoing:{channel}` (Envelope avec `metadata["message_type"]="progress"`) pour que les adaptateurs non-streaming (Discord) affichent des indicateurs UX pendant les appels d'outils.
 
 ---
 
@@ -669,27 +669,6 @@ Les chemins resolus sont passés directement à `create_deep_agent(skills=[...])
 
 > `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` sont retirés de `ProfileConfig` — voir `portail.yaml:roles:` pour le contrôle d'accès par rôle.
 
-### Profil `memory_extractor` — extraction légère de faits utilisateur
-
-```yaml
-# config/profiles.yaml.default
-memory_extractor:
-  model: glm-4.7-flash
-  temperature: 0.1
-  max_tokens: 512
-  max_turns: 1
-  stream: false
-  memory:
-    short_term_messages: 0
-  fallback_model: null
-  resilience:
-    retry_attempts: 2
-    retry_delays: [1, 3]
-    fallback_model: null
-```
-
-Utilisé par Le Souvenir pour l'extraction automatique de faits utilisateur. Le modèle est chargé dynamiquement depuis ce profil au démarrage de Le Souvenir — changeable sans redéploiement.
-
 ### Résilience LLM — pattern XACK
 
 ```yaml
@@ -713,18 +692,22 @@ default:
 
 ---
 
-## 12. Le Souvenir — mémoire, dual-stream, extraction de faits
+## 12. Le Souvenir — mémoire, dual-stream, fichiers persistants
 
-### Deux niveaux de mémoire
+### Trois niveaux de mémoire
 
 ```
 Mémoire contexte  → Redis (volatile, TTL 24h)
                     Cache rapide pour l'historique conversationnel
-                    Clé : relais:context:{session_id} (List Redis)
+                    Clé : relais:context:{user_id} (List Redis)
 
-Mémoire longue    → SQLite (dev) → PostgreSQL (prod) via Alembic migrations
-                    Messages archivés + faits utilisateur structurés
-                    Tables: messages, user_facts
+Mémoire longue    → SQLite ~/.relais/storage/memory.db
+                    Messages archivés
+                    Table: messages
+
+Fichiers mémoire  → SQLite ~/.relais/storage/memory.db
+                    Fichiers persistants de l'agent (chemins virtuels /memories/...)
+                    Table: memory_files (isolés par user_id)
 ```
 
 ### Architecture dual-stream
@@ -733,54 +716,59 @@ Le Souvenir consomme deux streams en parallèle :
 
 **Stream 1 : `relais:memory:request`** (Atelier → Souvenir)
 - Action `get` : retourner l'historique pour une session donnée
-- Flux : Atelier envoie `{action: "get", session_id, correlation_id}` → Souvenir répond via `relais:memory:response`
+- Action `file_write` : créer/écraser un fichier mémoire (`overwrite` flag)
+- Action `file_read` : lire le contenu d'un fichier mémoire
+- Action `file_list` : lister les fichiers mémoire sous un préfixe de chemin
+- Flux : Atelier envoie le payload JSON → Souvenir répond via `relais:memory:response`
 
 **Stream 2 : `relais:messages:outgoing:{channel}`** (observe toutes les réponses)
-- Pour chaque message sortant : mettre en cache Redis, archiver en SQLite, extraire les faits utilisateur
+- Pour chaque message sortant : mettre en cache Redis et archiver en SQLite
 
 ### Flux mémoire : get (Atelier → Souvenir → Atelier)
 
 ```
-1. Atelier → XADD relais:memory:request {action: "get", session_id, correlation_id}
+1. Atelier → XADD relais:memory:request {action: "get", user_id, correlation_id}
 
 2. Souvenir._handle_get_request():
-   a. Try Redis List relais:context:{session_id} (cache, fast path)
+   a. Try Redis List relais:context:{user_id} (cache, fast path)
    b. If miss → SQLite SELECT (fallback on Redis restart)
    c. XADD relais:memory:response {correlation_id, messages: [...]}
 
 3. Atelier ← XREAD relais:memory:response (timeout 3s, filter by correlation_id)
 ```
 
-### Flux mémoire : outgoing (observation + extraction)
+### Flux mémoire : file_write/file_read/file_list (SouvenirBackend → Souvenir)
 
 ```
-1. relais:messages:outgoing:{channel} published by Sentinelle (Atelier → outgoing_pending → Sentinelle → outgoing)
+SouvenirBackend (atelier/souvenir_backend.py, runs in thread pool via asyncio.to_thread)
+  ↓
+redis_sync.Redis.xadd(relais:memory:request, {action, user_id, path, content, correlation_id})
+  ↓
+Souvenir.FileWriteHandler / FileReadHandler / FileListHandler
+  ↓
+FileStore._write_file / _read_file / _list_files (SQLite table memory_files)
+  ↓
+redis.xadd(relais:memory:response, {correlation_id, ok, content/files/error})
+  ↓
+SouvenirBackend polls relais:memory:response (timeout 3s) → returns WriteResult/str/list[FileInfo]
+```
+
+**CompositeBackend routing dans Atelier :**
+- Chemin `/memories/...` → `SouvenirBackend` (SQLite via Souvenir)
+- Autres chemins → `StateBackend` (état en mémoire, durée de la tâche)
+
+### Flux mémoire : outgoing (observation + archivage)
+
+```
+1. relais:messages:outgoing:{channel} published by Sentinelle
 
 2. Souvenir._handle_outgoing():
    a. Extract user message from envelope.metadata["user_message"]
    b. Extract assistant reply from envelope.content
-   c. RPUSH relais:context:{session_id} [user_msg, assistant_reply]
+   c. RPUSH relais:context:{user_id} [user_msg, assistant_reply]
       LTRIM -20, EXPIRE 24h
    d. long_term_store.archive(envelope)     ← SQLite messages
-   e. memory_extractor.extract(envelope)    ← identification faits utilisateur
 ```
-
-### Memory extraction — identification automatique de faits utilisateur
-
-Le `MemoryExtractor` appelle un LLM léger (profil `memory_extractor`) pour identifier les faits durables sur l'utilisateur (préférences, contraintes, objectifs) à partir de chaque échange. Les faits avec une confiance > 0.7 sont stockés en SQLite dans la table `user_facts`. L'extraction est idempotente — un hash `(sender_id, fact)` évite les doublons.
-
-**Table `user_facts` :**
-
-| Colonne | Type | Description |
-|---------|------|-------------|
-| `id` | TEXT PK | Hash SHA256 de `sender_id:fact` |
-| `sender_id` | TEXT | Identifiant expéditeur |
-| `fact` | TEXT | Fait extrait |
-| `category` | TEXT | `preference`, `constraint`, `goal`, `context` |
-| `confidence` | REAL | Score 0.0–1.0 |
-| `source_corr` | TEXT | `correlation_id` du message source |
-| `created_at` | REAL | Epoch seconds |
-| `updated_at` | REAL | Epoch seconds |
 
 ### Compaction contexte
 

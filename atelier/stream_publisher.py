@@ -7,9 +7,15 @@ user without waiting for the full generation to complete.
 Stream key format: ``relais:messages:streaming:{channel}:{correlation_id}``
 
 Each entry contains:
-    - ``chunk``: The text fragment (empty string for the final sentinel).
+    - ``type``: Entry kind — ``"token"`` for text fragments, ``"progress"`` for
+      pipeline events (tool calls, subagent starts).
+    - ``chunk``: The text fragment (empty string for non-token entries and the
+      final sentinel).
     - ``seq``: Monotonically increasing integer sequence number (as a string).
     - ``is_final``: ``"1"`` for the terminal sentinel entry, ``"0"`` otherwise.
+    - ``event``: (progress entries only) Event name, e.g. ``"tool_call"``,
+      ``"tool_result"``, ``"subagent_start"``.
+    - ``detail``: (progress entries only) Human-readable context string.
 
 The stream is capped at STREAM_MAXLEN entries (APPROX) and given a TTL of
 STREAM_TTL_SECONDS seconds after finalize() is called.
