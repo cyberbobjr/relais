@@ -103,7 +103,7 @@ flowchart TD
     AIG_IN -->|"relais:messages:incoming"| PORTAIL
 
     subgraph PORTAIL["PORTAIL — Enrichissement contextuel"]
-        P["Résout utilisateur (UserRegistry)\nStamp metadata[\"user_record\"] (dict unique)\nPortail = seul écrivain de l'identité utilisateur"]
+        P["Résout utilisateur (UserRegistry)\nStamp metadata[user_record] (dict unique)\nPortail = seul écrivain de l'identité utilisateur"]
     end
 
     PORTAIL -->|"relais:security"| SENTINELLE

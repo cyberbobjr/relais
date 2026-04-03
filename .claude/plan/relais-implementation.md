@@ -186,10 +186,11 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 ### 3.1 ✅ Fichiers default créés dans `config/` DONE
 - ✅ `config/config.yaml.default` — configuration système par défaut
-- ✅ `config/profiles.yaml.default` — profils LLM (model, tools, memory, resilience)
-- ✅ `config/users.yaml.default` — registry utilisateurs (admin, user, usr_system)
-- ✅ `config/reply_policy.yaml.default` — politique réponse auto
-- ✅ `config/mcp_servers.yaml.default` — MCP servers globaux/contextuels
+- ✅ `config/atelier/profiles.yaml.default` — profils LLM (model, tools, memory, resilience)
+- ✅ `config/portail.yaml.default` — registry utilisateurs (admin, user, usr_system)
+- ✅ `config/sentinelle.yaml.default` — ACL Sentinelle
+- ✅ `config/atelier/mcp_servers.yaml.default` — MCP servers globaux/contextuels
+- ✅ `config/atelier.yaml.default` — config comportementale Atelier (progress events)
 - ✅ `config/HEARTBEAT.md.default` — tâches CRON par défaut
 
 ### 3.2 ✅ Fichiers SOUL créés dans `soul/` DONE
@@ -214,7 +215,7 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 **Correction :** format canonique normalisé — clé racine `mcp_servers:` obligatoire, `global:` et `contextual:` imbriqués dessous. Les fixtures de tests mises à jour en conséquence.
 
-**Fichiers modifiés :** `config/mcp_servers.yaml.default`, `.relais/config/mcp_servers.yaml`, `tests/test_mcp_loader.py`
+**Fichiers modifiés :** `config/atelier/mcp_servers.yaml.default`, `tests/test_mcp_loader.py`
 
 ### 5a.2 ✅ Support transport SSE dans `McpServerConfig` et `McpSessionManager` DONE
 
@@ -232,9 +233,9 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 **Problème :** `profile_loader.py` contenait encore `max_agent_depth` (vestige de l'architecture sous-agents abandonnée).
 
-**Correction :** suppression de `max_agent_depth` dans `ProfileConfig` et `config/profiles.yaml.default`. Mise à jour du document fondateur et de CLAUDE.md.
+**Correction :** suppression de `max_agent_depth` dans `ProfileConfig` et `config/atelier/profiles.yaml.default`. Mise à jour du document fondateur et de CLAUDE.md.
 
-**Fichiers modifiés :** `atelier/profile_loader.py`, `config/profiles.yaml.default`, `plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md`, `CLAUDE.md`
+**Fichiers modifiés :** `atelier/profile_loader.py`, `config/atelier/profiles.yaml.default`, `plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md`, `CLAUDE.md`
 
 ### 5a.4 ✅ Extraction McpSessionManager — refactoring lisibilité DONE (2026-03-30)
 
@@ -268,6 +269,25 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 ### 5a.7 ✅ Discord typing indicator DONE (2026-04-01)
 
 `_RelaisDiscordClient` affiche l'indicateur "est en train d'écrire" dès réception d'un message, jusqu'à l'envoi de la réponse ou 120 s (timeout de sécurité). Implémenté via `_typing_loop` (tâche asyncio) + `_cancel_typing`.
+
+### 5a.8 ✅ Scoping config Atelier + ProgressConfig DONE (2026-04-03)
+
+**Problème :** `common/profile_loader.py` était partagé entre Atelier et Souvenir mais Souvenir n'en avait plus besoin. Les fichiers `profiles.yaml` et `mcp_servers.yaml` étaient à la racine de `config/`, sans isolation par brique.
+
+**Correction :**
+- `common/profile_loader.py` → `atelier/profile_loader.py` ; chemin config : `atelier/profiles.yaml`
+- `config/profiles.yaml.default` → `config/atelier/profiles.yaml.default`
+- `config/mcp_servers.yaml.default` → `config/atelier/mcp_servers.yaml.default` ; `_FILENAME` dans `mcp_loader.py` mis à jour
+- `common/init.py` : `DEFAULT_FILES` mis à jour (crée `config/atelier/`)
+- Nouveau `atelier/progress_config.py` : `ProgressConfig` dataclass (frozen) + `load_progress_config()` depuis `atelier.yaml`
+- Nouveau `config/atelier.yaml.default` : master switch `progress.enabled`, per-event flags, `publish_to_outgoing`, `detail_max_length`
+- `StreamPublisher` : accepte `progress_config: ProgressConfig | None` ; filtre par event, tronque detail, honore `publish_to_outgoing`
+- `atelier/main.py` : charge `_progress_config` au démarrage, le passe à `StreamPublisher`
+- Discord adapter : affiche tous les événements progress (plus seulement `tool_call`) au format `{event} : [{detail}]`
+
+**Fichiers modifiés :** `atelier/profile_loader.py` (déplacé depuis `common/`), `atelier/main.py`, `atelier/agent_executor.py`, `atelier/mcp_session_manager.py`, `atelier/mcp_loader.py`, `atelier/souvenir_backend.py`, `atelier/stream_publisher.py`, `common/init.py`, `aiguilleur/channels/discord/adapter.py`
+
+**Fichiers créés :** `atelier/progress_config.py`, `config/atelier.yaml.default`, `config/atelier/profiles.yaml.default`, `config/atelier/mcp_servers.yaml.default`
 
 ---
 
@@ -384,13 +404,13 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 - `load_channels_config()` gère les deux cas
 
 ### 7.2 Stamping dans les adaptateurs Aiguilleur
-- Au moment de la création de chaque enveloppe entrante, l'adaptateur stampe `envelope.metadata["llm_profile"]`
+- Au moment de la création de chaque enveloppe entrante, l'adaptateur stampe `envelope.metadata["channel_profile"]`
 - Si `channel_config.profile` est défini → utiliser cette valeur
 - Sinon → `get_default_llm_profile()` depuis `common/config_loader.py`
 
 **Tests** (`tests/test_discord_adapter.py`) :
-- Canal avec `profile: fast` → `metadata["llm_profile"] == "fast"`
-- Canal sans `profile` → `metadata["llm_profile"] == valeur config.yaml`
+- Canal avec `profile: fast` → `metadata["channel_profile"] == "fast"`
+- Canal sans `profile` → `metadata["channel_profile"] == valeur config.yaml`
 
 ### 7.3 `common/config_loader.py` — `get_default_llm_profile()`
 - Fonction helper qui lit `config.yaml > llm.default_profile`

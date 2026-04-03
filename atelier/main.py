@@ -68,9 +68,12 @@ XACK contract:
   - Return False → no ACK (transient ConnectError / TimeoutException; message
     stays in PEL for automatic re-delivery)
 
-For streaming-capable channels (telegram, tui) each text chunk is
-also published via StreamPublisher for real-time rendering before the full
-reply is ready.
+For streaming-capable channels each text chunk is also published via
+StreamPublisher for real-time rendering before the full reply is ready.
+Discord receives a final reply only, with live progress events (tool_call,
+tool_result, subagent_start) sent to ``relais:messages:outgoing:{channel}``
+as ``message_type=progress`` envelopes.  Publishing is governed by
+``ProgressConfig`` (atelier.yaml ``progress:`` section).
 """
 
 import asyncio

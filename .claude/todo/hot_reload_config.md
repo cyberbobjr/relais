@@ -46,7 +46,7 @@ Canal Pub/Sub : `relais:config:reload`
 |--------|---------|---------------|---------|
 | **Portail** | `portail/main.py` | `users`, `config` | `UserRegistry.reload()`, `RoleRegistry.reload()`, relit `unknown_user_policy`/`guest_profile` |
 | **Sentinelle** | `sentinelle/main.py` | `users` | `ACLManager.reload()` (existe déjà) |
-| **Atelier** | `atelier/main.py` | `profiles`, `mcp_servers`, `channels` | Remplace `_profiles`, `_mcp_servers_default`, `_streaming_capable_channels` |
+| **Atelier** | `atelier/main.py` | `profiles`, `mcp_servers`, `channels`, `atelier` | Remplace `_profiles` (atelier/profiles.yaml), `_mcp_servers_default` (atelier/mcp_servers.yaml), `_streaming_capable_channels`, `_progress_config` (atelier.yaml) |
 | **Souvenir** | `souvenir/main.py` | `channels` | Met à jour `_channels`, boucle `_process_outgoing_streams` lit `self._channels` dynamiquement |
 
 Toutes les méthodes `_on_*_reload()` gardent l'ancienne config en cas d'erreur YAML.
@@ -137,8 +137,8 @@ PYTHONPATH=. uv run python scripts/reload_config.py --scope all
 
 - [ ] Modifier `channels.yaml` + trigger reload → nouveau canal démarre / canal retiré s'arrête, sans restart Aiguilleur
 - [ ] Modifier `portail.yaml` + trigger reload → Portail et Sentinelle utilisent les nouvelles identités/ACL au prochain message
-- [ ] Modifier `profiles.yaml` + trigger reload → Atelier utilise le nouveau profil au prochain message
-- [ ] Modifier `mcp_servers.yaml` + trigger reload → Atelier utilise les nouveaux serveurs MCP au prochain message
+- [ ] Modifier `atelier/profiles.yaml` + trigger reload → Atelier utilise le nouveau profil au prochain message
+- [ ] Modifier `atelier/mcp_servers.yaml` + trigger reload → Atelier utilise les nouveaux serveurs MCP au prochain message
 - [ ] Modifier `security.unknown_user_policy` dans `config.yaml` + trigger reload → Portail applique la nouvelle politique
 - [ ] YAML invalide pendant un reload → log ERROR, ancienne config conservée, aucun crash
 - [ ] `scripts/reload_config.py --scope all` déclenche le rechargement dans toutes les briques
