@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any, Callable, Awaitable
 
-from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend, StateBackend
+from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
 from langchain_core.tools import BaseTool
 from langchain.chat_models import BaseChatModel, init_chat_model
 
@@ -179,8 +179,8 @@ class AgentExecutor:
             root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True
         )
         # LocalShellBackend(root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True)
-        composite_backend = lambda rt: CompositeBackend(
-            default=StateBackend(rt),
+        composite_backend = CompositeBackend(
+            default=LocalShellBackend(root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True),
             routes={
                 "/memories/": memories_backend,
             },
