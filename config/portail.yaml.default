@@ -6,13 +6,13 @@
 #
 # ── Politique utilisateur inconnu ────────────────────────────────────────────
 # deny    : rejeter le message (défaut, plus sécurisé)
-# guest   : accepter avec le rôle guest et le profil guest_profile
+# guest   : accepter avec le rôle défini par guest_role
 # pending : rejeter et publier dans relais:admin:pending_users pour révision
 unknown_user_policy: deny
 
-# Profil LLM attribué aux utilisateurs guest (utilisé seulement si
-# unknown_user_policy=guest).
-guest_profile: fast
+# Rôle attribué aux utilisateurs inconnus (utilisé seulement si
+# unknown_user_policy=guest). Le rôle doit être défini dans la section roles.
+guest_role: guest
 
 # ── Utilisateurs ──────────────────────────────────────────────────────────────
 users:

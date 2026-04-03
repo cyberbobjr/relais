@@ -3,7 +3,7 @@
 Functional role
 ---------------
 First processing stage after channel ingestion.  Validates each incoming
-Envelope, resolves the sender's identity from users.yaml via ``UserRegistry``,
+Envelope, resolves the sender's identity from portail.yaml via ``UserRegistry``,
 and enriches the envelope's metadata before forwarding it to Sentinelle for
 ACL enforcement.  Unknown senders are handled according to the configured
 ``unknown_user_policy`` (reject or allow as guest).
@@ -12,7 +12,7 @@ Technical overview
 ------------------
 ``Portail`` is a single asyncio consumer loop.  Key helpers:
 
-* ``UserRegistry`` — loads and caches user records from users.yaml;
+* ``UserRegistry`` — loads and caches user records from portail.yaml;
   resolves ``sender_id`` → ``UserRecord``.
 * ``_enrich_envelope`` — writes the canonical ``user_record`` dict and
   derived fields (``display_name``, ``user_role``, ``llm_profile``,
@@ -92,12 +92,12 @@ class Portail:
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
         self._user_registry: UserRegistry = UserRegistry()
-        self._guest_profile: str = self._user_registry.guest_profile
+        self._guest_role: str = self._user_registry.guest_role
         self._unknown_user_policy: str = self._user_registry.unknown_user_policy
         logger.info(
-            "Portail: unknown_user_policy=%s, guest_profile=%s",
+            "Portail: unknown_user_policy=%s, guest_role=%s",
             self._unknown_user_policy,
-            self._guest_profile,
+            self._guest_role,
         )
 
     def _enrich_envelope(self, envelope: "Envelope") -> None:
@@ -136,6 +136,7 @@ class Portail:
         user_record_dict["llm_profile"] = effective_llm_profile
 
         envelope.metadata["user_record"] = user_record_dict
+        envelope.metadata["user_id"] = user_record_dict["user_id"]
 
     def _apply_guest_stamps(self, envelope: "Envelope") -> None:
         """Stamp a synthetic guest ``user_record`` dict onto an unknown-user envelope.
@@ -148,12 +149,10 @@ class Portail:
         Args:
             envelope: The incoming envelope to enrich in place.
         """
-        guest_llm_profile = self._guest_profile
         channel_profile: str | None = envelope.metadata.get("channel_profile")
-        effective_llm_profile: str = channel_profile if channel_profile else guest_llm_profile
-
-        guest_record = self._user_registry.build_guest_record(llm_profile=effective_llm_profile)
+        guest_record = self._user_registry.build_guest_record(channel_profile=channel_profile)
         envelope.metadata["user_record"] = guest_record.to_dict()
+        envelope.metadata["user_id"] = "guest"
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: "Envelope") -> None:
         """Track active sessions per user for the Crieur (push notifications).

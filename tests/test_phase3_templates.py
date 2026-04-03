@@ -150,7 +150,7 @@ def test_initialize_user_dir_creates_directory_structure(tmp_path: Path) -> None
             "config",
             "prompts/soul/variants", "prompts/channels", "prompts/policies",
             "prompts/roles", "prompts/users",
-            "skills/manual", "skills/auto",
+            "skills",
             "media", "logs", "backup",
         ]
         for d in expected_dirs:

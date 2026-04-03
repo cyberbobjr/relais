@@ -83,7 +83,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
 
     # ── STEP 1: Portail ───────────────────────────────────────────────────────
     portail = Portail()
-    portail._unknown_user_policy = "guest"  # sender discord:111222333 not in users.yaml
+    portail._unknown_user_policy = "guest"  # sender discord:111222333 not in portail.yaml
     await portail._process_stream(redis_conn, shutdown=_one_shot())
 
     security_msgs = await redis_conn.xrange("relais:security", "-", "+")
@@ -154,12 +154,9 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
 
     context_store = ContextStore(redis_conn)
 
-    with patch.object(
-        souvenir._extractor, "extract", new_callable=AsyncMock, return_value=[]
-    ):
-        await souvenir._process_outgoing_streams(
-            redis_conn, context_store, shutdown=_one_shot()
-        )
+    await souvenir._process_outgoing_streams(
+        redis_conn, context_store, shutdown=_one_shot()
+    )
 
     # ── ASSERT: archivage SQLite ───────────────────────────────────────────────
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker

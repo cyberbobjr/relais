@@ -34,6 +34,44 @@ logger = logging.getLogger("aiguilleur.discord")
 _TYPING_MAX_SECONDS: float = 120.0
 
 
+def _split_discord_message(content: str, limit: int = 2000) -> list[str]:
+    """Split a message into parts that each fit within the Discord character limit.
+
+    Splits preferentially on paragraph breaks (``\\n\\n``), then line breaks
+    (``\\n``), then word boundaries (space), then hard-cuts as a last resort.
+
+    Args:
+        content: The full message content to split.
+        limit: Maximum characters per part. Defaults to 2000 (Discord limit).
+
+    Returns:
+        List of message parts, each at most ``limit`` characters long.
+    """
+    if len(content) <= limit:
+        return [content]
+
+    parts: list[str] = []
+    while len(content) > limit:
+        end = limit
+        rest = limit
+        for sep in ("\n\n", "\n", " "):
+            idx = content.rfind(sep, 0, limit)
+            if idx > 0:
+                if sep == " ":
+                    end = idx       # exclude trailing space from first part
+                    rest = idx + 1  # skip the space for the next part
+                else:
+                    end = idx + len(sep)
+                    rest = idx + len(sep)
+                break
+        parts.append(content[:end])
+        content = content[rest:]
+
+    if content:
+        parts.append(content)
+    return parts
+
+
 class DiscordAiguilleur(NativeAiguilleur):
     """Discord channel adapter.
 
@@ -296,12 +334,39 @@ class _RelaisDiscordClient(discord.Client):
             )
             return None
 
+    async def _deliver_progress_event(
+        self,
+        envelope: Envelope,
+        channel: discord.abc.Messageable,
+    ) -> None:
+        """Display a progress event notification in Discord.
+
+        Only ``tool_call`` events are shown as ``[outil en cours : {detail}]``.
+        ``tool_result`` and ``subagent_start`` events are silently ignored
+        (too verbose or too implementation-specific for end users).
+
+        Args:
+            envelope: Progress envelope; ``metadata["progress_event"]`` and
+                ``metadata["progress_detail"]`` carry the event data.
+            channel: Discord channel or DM to send the notification to.
+        """
+        event = envelope.metadata.get("progress_event", "")
+        if event != "tool_call":
+            return
+        detail = envelope.metadata.get("progress_detail", "")
+        try:
+            await channel.send(f"[outil en cours : {detail}]")
+        except Exception as exc:
+            logger.debug("Progress event delivery failed (ignored): %s", exc)
+
     async def _deliver_outgoing_message(self, data: dict) -> None:
         """Parse and deliver a single outgoing envelope to Discord.
 
-        Deserialises the ``payload`` field, resolves the target channel, then
-        sends the message content. Deserialization errors (malformed JSON,
-        missing fields) are logged separately from Discord API errors.
+        Deserialises the ``payload`` field. If the envelope is a progress event
+        (``metadata["message_type"] == "progress"``), delegates to
+        ``_deliver_progress_event`` and returns without cancelling the typing
+        indicator. For final replies, cancels typing, guards against empty
+        content, and splits long messages to respect the 2000-character limit.
 
         Args:
             data: Raw Redis stream entry fields. Must contain a ``"payload"``
@@ -311,6 +376,13 @@ class _RelaisDiscordClient(discord.Client):
             envelope = Envelope.from_json(data.get("payload", "{}"))
         except (ValueError, KeyError) as exc:
             logger.error("Malformed envelope payload, skipping: %s", exc)
+            return
+
+        message_type = envelope.metadata.get("message_type")
+        if message_type == "progress":
+            channel = await self._resolve_discord_channel(envelope)
+            if channel:
+                await self._deliver_progress_event(envelope, channel)
             return
 
         channel = await self._resolve_discord_channel(envelope)
@@ -326,7 +398,16 @@ class _RelaisDiscordClient(discord.Client):
         )
 
         self._cancel_typing(envelope.correlation_id)
-        await channel.send(envelope.content)
+
+        if not envelope.content or not envelope.content.strip():
+            logger.warning(
+                "Skipping Discord send for %s — envelope content is empty or whitespace.",
+                envelope.correlation_id,
+            )
+            return
+
+        for part in _split_discord_message(envelope.content):
+            await channel.send(part)
 
     async def _consume_outgoing_stream(self) -> None:
         """Background task: consume final answers from Atelier and send to Discord.

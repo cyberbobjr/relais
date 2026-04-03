@@ -4,27 +4,27 @@ Functional role
 ---------------
 Maintains conversational memory for all users.  Serves context history to
 Atelier on demand (short-term cache) and passively observes outgoing replies
-to archive exchanges and extract durable user facts (long-term store).
+to archive exchanges in long-term storage.
 
 Technical overview
 ------------------
 ``Souvenir`` runs two concurrent asyncio consumer loops:
 
-* Request loop — handles ``get`` / ``store_memory`` actions from Atelier and
-  returns a JSON context payload on ``relais:memory:response``.
+* Request loop — handles ``get`` / ``file_write`` / ``file_read`` /
+  ``file_list`` actions from Atelier and returns a JSON payload on
+  ``relais:memory:response``.
 * Outgoing observer loop — watches per-channel outgoing streams to append each
-  exchange to the rolling context cache, archive it to SQLite, and fire-and-
-  forget LLM-based fact extraction.
+  exchange to the rolling context cache and archive it to SQLite.
 
 Key classes:
 
 * ``ContextStore`` — Redis List ``relais:context:{user_id}``; capped at 20
   messages, TTL 24 h.
-* ``LongTermStore`` — SQLite ``~/.relais/storage/messages.db``; stores full
-  message history and a ``user_facts`` table.
-* ``MemoryExtractor`` — calls the LLM via
-  ``langchain.chat_models.init_chat_model`` (provider:model-id format) to
-  extract structured facts; confidence threshold 0.7.
+* ``LongTermStore`` — SQLite ``~/.relais/storage/memory.db``; stores full
+  message history.
+* ``FileStore`` — SQLite ``~/.relais/storage/memory.db`` (table
+  ``memory_files``); stores persistent agent memory files routed by
+  ``SouvenirBackend`` in Atelier.
 * ``HandlerContext`` + action registry — extensible dispatch pattern for
   request actions.
 
@@ -46,8 +46,7 @@ Processing flow — request loop
 ------------------------------
   (1) Consume from relais:memory:request (souvenir_group).
   (2) Parse action field from JSON payload.
-  (3) Dispatch to registered handler (get → return context; store_memory →
-      legacy compat path).
+  (3) Dispatch to registered handler.
   (4) Publish JSON response to relais:memory:response.
   (5) XACK.
 
@@ -58,8 +57,7 @@ Processing flow — outgoing observer loop
   (2) Deserialize Envelope.
   (3) Append user + assistant turn to relais:context:{user_id} (Redis List).
   (4) Archive exchange to SQLite long-term store.
-  (5) Fire-and-forget: MemoryExtractor extracts facts; upsert to user_facts.
-  (6) XACK.
+  (5) XACK.
 """
 
 import asyncio
@@ -76,22 +74,18 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-from common.profile_loader import load_profiles, resolve_profile
 from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
 from souvenir.context_store import ContextStore
+from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
-from souvenir.memory_extractor import MemoryExtractor
 
 logger = logging.getLogger("souvenir")
 
 # Canaux dont les streams sortants sont observés.
 _DEFAULT_CHANNELS = ["discord", "telegram"]
-
-# Modèle de secours si le profil memory_extractor ne peut pas être chargé.
-_FALLBACK_EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
 
 
 class Souvenir:
@@ -106,26 +100,14 @@ class Souvenir:
     """
 
     def __init__(self) -> None:
-        """Initialise les streams Redis, les stores mémoire et l'extracteur."""
+        """Initialise les streams Redis, les stores mémoire et le registre d'actions."""
         self.client = RedisClient("souvenir")
         self.stream_req = "relais:memory:request"
         self.stream_res = "relais:memory:response"
         self.group_name = "souvenir_group"
         self.consumer_name = "souvenir_1"
         self._long_term = LongTermStore()
-        try:
-            _profiles = load_profiles()
-            _extraction_profile = resolve_profile(_profiles, "memory_extractor")
-            extraction_model: str = _extraction_profile.model
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Could not load 'memory_extractor' profile from profiles.yaml "
-                "(falling back to %s): %s",
-                _FALLBACK_EXTRACTION_MODEL,
-                exc,
-            )
-            extraction_model = _FALLBACK_EXTRACTION_MODEL
-        self._extractor = MemoryExtractor(model=extraction_model)
+        self._file_store = FileStore()
         self._channels: list[str] = _DEFAULT_CHANNELS
         self._action_registry = build_registry()
 
@@ -136,21 +118,17 @@ class Souvenir:
         envelope: Envelope,
         context_store: ContextStore,
         long_term_store: LongTermStore,
-        memory_extractor: MemoryExtractor,
     ) -> None:
-        """Traite un message sortant : contexte, archivage et extraction de faits.
+        """Traite un message sortant : mise à jour du contexte et archivage.
 
         Séquence :
         1. Appends the user+assistant turn pair to the Redis context cache.
         2. Archives both messages to SQLite for long-term persistence.
-        3. Extracts durable user facts via LLM (fire-and-forget, non-blocking).
-        4. Upserts extracted facts into SQLite.
 
         Args:
             envelope: L'enveloppe du message sortant (réponse de l'assistant).
             context_store: Store court terme Redis.
             long_term_store: Store long terme SQLite.
-            memory_extractor: Extracteur de faits utilisateur.
         """
         user_message = envelope.metadata.get("user_message", "")
 
@@ -161,16 +139,6 @@ class Souvenir:
         )
 
         await long_term_store.archive(envelope)
-
-        try:
-            facts = await memory_extractor.extract(envelope)
-            if facts:
-                await long_term_store.upsert_facts(envelope.sender_id, facts)
-                logger.debug(
-                    "Upserted %d facts for sender=%s", len(facts), envelope.sender_id
-                )
-        except Exception as exc:
-            logger.warning("Memory extraction/upsert error (non-blocking): %s", exc)
 
     # ------------------------------------------------------------------
     # Internal consumer loops
@@ -231,6 +199,7 @@ class Souvenir:
                                 redis_conn=redis_conn,
                                 context_store=context_store,
                                 long_term_store=self._long_term,
+                                file_store=self._file_store,
                                 req=req,
                                 stream_res=self.stream_res,
                             )
@@ -314,7 +283,6 @@ class Souvenir:
                                 envelope=envelope,
                                 context_store=context_store,
                                 long_term_store=self._long_term,
-                                memory_extractor=self._extractor,
                             )
                         except Exception as inner_exc:
                             logger.error(
@@ -361,6 +329,7 @@ class Souvenir:
                 "run 'alembic upgrade head' in production instead."
             )
             await self._long_term._create_tables()
+            await self._file_store._create_tables()
             await asyncio.gather(
                 self._process_request_stream(redis_conn, context_store, shutdown=shutdown),
                 self._process_outgoing_streams(redis_conn, context_store, shutdown=shutdown),
@@ -369,6 +338,7 @@ class Souvenir:
             logger.info("Souvenir shutting down...")
         finally:
             await self._long_term.close()
+            await self._file_store.close()
             await self.client.close()
             logger.info("Souvenir stopped gracefully")
 

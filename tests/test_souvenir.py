@@ -496,16 +496,11 @@ async def test_souvenir_handles_outgoing_appends_context() -> None:
     context_store = ContextStore(redis=mock_redis)
     long_term_store = AsyncMock()
     long_term_store.archive = AsyncMock()
-    long_term_store.upsert_facts = AsyncMock()
-
-    memory_extractor = AsyncMock()
-    memory_extractor.extract = AsyncMock(return_value=[])
 
     await souvenir._handle_outgoing(
         envelope=env,
         context_store=context_store,
         long_term_store=long_term_store,
-        memory_extractor=memory_extractor,
     )
 
     mock_redis.rpush.assert_awaited_once()
@@ -514,44 +509,3 @@ async def test_souvenir_handles_outgoing_appends_context() -> None:
     assistant_turn = json.loads(call_args[2])
     assert user_turn["content"] == "comment vas-tu?"
     assert assistant_turn["content"] == "je vais bien"
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_souvenir_handles_outgoing_triggers_memory_extraction() -> None:
-    """_handle_outgoing() doit appeler memory_extractor.extract et upsert_facts si faits."""
-    from souvenir.main import Souvenir
-
-    mock_redis = AsyncMock()
-    mock_redis.rpush = AsyncMock()
-    mock_redis.ltrim = AsyncMock()
-    mock_redis.expire = AsyncMock()
-
-    env = Envelope(
-        content="j'adore les chats",
-        sender_id="user_f",
-        channel="telegram",
-        session_id="sess-f",
-        metadata={"user_message": "dis-moi quelque chose"},
-    )
-
-    extracted_facts = [{"fact": "loves cats", "category": "preference", "confidence": 0.9}]
-
-    souvenir = Souvenir.__new__(Souvenir)
-    context_store = ContextStore(redis=mock_redis)
-    long_term_store = AsyncMock()
-    long_term_store.archive = AsyncMock()
-    long_term_store.upsert_facts = AsyncMock()
-
-    memory_extractor = AsyncMock()
-    memory_extractor.extract = AsyncMock(return_value=extracted_facts)
-
-    await souvenir._handle_outgoing(
-        envelope=env,
-        context_store=context_store,
-        long_term_store=long_term_store,
-        memory_extractor=memory_extractor,
-    )
-
-    memory_extractor.extract.assert_awaited_once_with(env)
-    long_term_store.upsert_facts.assert_awaited_once_with("user_f", extracted_facts)

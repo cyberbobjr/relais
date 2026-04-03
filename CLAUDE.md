@@ -25,12 +25,12 @@ The main pipeline flows through these bricks in order:
 
 2. **Portail** (`portail/`) - Consumer enriching message context
    - Consumes: `relais:messages:incoming`
-   - Validates Envelope format, resolves user from `UserRegistry` (users.yaml), applies reply_policy (vacation/in_meeting)
-   - Stamps contextual metadata: `user_role`, `display_name`, `llm_profile` (resolved from `channel_profile`), `custom_prompt_path` (optional)
+   - Validates Envelope format, resolves user from `UserRegistry` (portail.yaml), applies reply_policy (vacation/in_meeting)
+   - Stamps contextual metadata: `user_id` (YAML key, e.g. `"usr_admin"` — stable cross-channel), `user_record` (full dict), `llm_profile` (resolved from `channel_profile`), plus legacy keys `user_role`, `display_name`, `custom_prompt_path`
    - Produces: `relais:security`
 
 3. **Sentinelle** (`sentinelle/`) - Bidirectional security checkpoint
-   - **Incoming**: Consumes `relais:security`, ACL validation (users.yaml), then bifurcates:
+   - **Incoming**: Consumes `relais:security`, ACL validation (sentinelle.yaml), then bifurcates:
      - Slash command (`/cmd`): checks KNOWN_COMMANDS + command-level ACL (`action=cmd_name`) → routes to `relais:commands` or sends inline rejection reply
      - Normal message: produces `relais:tasks` (or drops silently if ACL fails)
    - **Outgoing**: Consumes `relais:messages:outgoing_pending` (single shared stream), applies outgoing guardrails, produces `relais:messages:outgoing:{channel}`
@@ -68,7 +68,7 @@ The main pipeline flows through these bricks in order:
   - `envelope.py`: Message wrapper (content, sender_id, channel, session_id, correlation_id, metadata, traces)
   - `redis_client.py`: Async Redis factory with per-brick ACL (password per service)
   - `config_loader.py`: YAML config cascade (user > system > project)
-  - `user_registry.py`: UserRegistry and UserRecord for user resolution from users.yaml
+  - `user_registry.py`: UserRegistry and UserRecord for user resolution from portail.yaml
   - `profile_loader.py`: ProfileConfig and ResilienceConfig — loads LLM profiles from profiles.yaml; shared by Atelier and Souvenir
 
 - **config/** - YAML configuration files
@@ -77,7 +77,8 @@ The main pipeline flows through these bricks in order:
   - `litellm.yaml`: Model definitions, router settings, master key
   - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
   - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)
-  - `users.yaml.default`: User registry with display_name, role, channels, llm_profile
+  - `portail.yaml.default`: User registry with display_name, role, channels, llm_profile
+  - `sentinelle.yaml.default`: ACL for sentinelle bricks
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 
 - **prompts/** - Multi-layer system prompt (assembled by `atelier/soul_assembler.py`)

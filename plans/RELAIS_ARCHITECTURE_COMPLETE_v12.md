@@ -270,7 +270,7 @@ mcp_servers:
 
 > **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
 >
-> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `users.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s) et `mcp_max_tools` (défaut 20) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `profiles.yaml`.
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s) et `mcp_max_tools` (défaut 20) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `profiles.yaml`.
 
 ---
 
@@ -481,7 +481,7 @@ Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier
 
 ### Rôle
 
-Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` et `RoleRegistry` (users.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`, `skills_dirs`, `allowed_mcp_tools`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (vacation, in_meeting) et route **tout message accepté** vers La Sentinelle — y compris les commandes slash. Le Portail ne filtre pas les commandes et ne gère pas d'état DND.
+Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` et `RoleRegistry` (portail.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`, `skills_dirs`, `allowed_mcp_tools`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (vacation, in_meeting) et route **tout message accepté** vers La Sentinelle — y compris les commandes slash. Le Portail ne filtre pas les commandes et ne gère pas d'état DND.
 
 **`unknown_user_policy`** (champ `config.yaml:security:unknown_user_policy`) :
 - `deny` (défaut) : drop silencieux
@@ -496,7 +496,7 @@ Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserReg
 
 **Architecture clarifiée :**
 
-1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `portail.yaml`, stampe `envelope.metadata["user_record"]` (dict `UserRecord` fusionné — rôle + utilisateur). Portail est le **seul écrivain** de l'identité utilisateur.
+1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `portail.yaml`, stampe `envelope.metadata["user_record"]` (dict `UserRecord` fusionné — rôle + utilisateur, incluant `user_id`) et `envelope.metadata["user_id"]` (raccourci stable cross-canal, égal à la clé YAML, ex : `"usr_admin"`). Portail est le **seul écrivain** de l'identité utilisateur. `user_id` permet aux briques aval (Souvenir, Atelier) de reprendre une conversation quelque soit le canal d'origine sans connaître le `sender_id` spécifique au canal.
 2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : lit `user_record` depuis `envelope.metadata` (chargé par Portail), vérifie `blocked`, bifurque commandes et messages normaux, applique guardrails (bidirectionnel). Config ACL dans `sentinelle.yaml`.
 
 > **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
@@ -553,7 +553,7 @@ users:
       telegram:
         dm: "123456789"
       rest:
-        api_keys: ["clé-api-1"]     # clés API REST (texte clair dans users.yaml)
+        api_keys: ["clé-api-1"]     # clés API REST (texte clair dans portail.yaml)
 
   usr_system:
     display_name: "RELAIS System"
@@ -667,7 +667,7 @@ Les chemins resolus sont passés directement à `create_deep_agent(skills=[...])
 | `api_key_env` | str \| None | Nom de la variable d'env contenant la clé API |
 | `resilience` | ResilienceConfig | Retries, délais backoff, fallback model |
 
-> `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` sont retirés de `ProfileConfig` — voir `users.yaml:roles:` pour le contrôle d'accès par rôle.
+> `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` sont retirés de `ProfileConfig` — voir `portail.yaml:roles:` pour le contrôle d'accès par rôle.
 
 ### Profil `memory_extractor` — extraction légère de faits utilisateur
 

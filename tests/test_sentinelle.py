@@ -68,6 +68,7 @@ def _make_user_record(
     """
     from common.user_record import UserRecord
     return UserRecord(
+        user_id="usr_test",
         display_name="Test User",
         role=role,
         blocked=blocked,

@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 from souvenir.context_store import ContextStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.handlers.clear_handler import ClearHandler
+from souvenir.handlers.file_list_handler import FileListHandler
+from souvenir.handlers.file_read_handler import FileReadHandler
+from souvenir.handlers.file_write_handler import FileWriteHandler
 from souvenir.handlers.get_handler import GetHandler
-from souvenir.handlers.store_memory_handler import StoreMemoryHandler
 
 
 # ---------------------------------------------------------------------------
@@ -16,16 +18,19 @@ from souvenir.handlers.store_memory_handler import StoreMemoryHandler
 # ---------------------------------------------------------------------------
 
 
-def _make_ctx(req: dict, mock_redis: AsyncMock, context_store=None, long_term_store=None) -> HandlerContext:
+def _make_ctx(req: dict, mock_redis: AsyncMock, context_store=None, long_term_store=None, file_store=None) -> HandlerContext:
     """Build a HandlerContext with sensible defaults for testing."""
     if context_store is None:
         context_store = AsyncMock(spec=ContextStore)
     if long_term_store is None:
         long_term_store = AsyncMock()
+    if file_store is None:
+        file_store = AsyncMock()
     return HandlerContext(
         redis_conn=mock_redis,
         context_store=context_store,
         long_term_store=long_term_store,
+        file_store=file_store,
         req=req,
         stream_res="relais:memory:response",
     )
@@ -215,64 +220,16 @@ async def test_clear_handler_handles_missing_envelope_json() -> None:
 
 
 # ---------------------------------------------------------------------------
-# StoreMemoryHandler
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_store_memory_handler_calls_store() -> None:
-    """StoreMemoryHandler appelle long_term_store.store avec les bons arguments."""
-    mock_redis = AsyncMock()
-    long_term_store = AsyncMock()
-    long_term_store.store = AsyncMock()
-
-    ctx = _make_ctx(
-        req={
-            "session_id": "sess-d",
-            "user_id": "user-42",
-            "key": "préférence_langue",
-            "value": "français",
-            "source": "manual",
-        },
-        mock_redis=mock_redis,
-        long_term_store=long_term_store,
-    )
-
-    await StoreMemoryHandler().handle(ctx)
-
-    long_term_store.store.assert_awaited_once_with("user-42", "préférence_langue", "français", "manual")
-
-
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_store_memory_handler_falls_back_to_session_id_as_user_id() -> None:
-    """StoreMemoryHandler utilise session_id comme user_id quand user_id est absent."""
-    mock_redis = AsyncMock()
-    long_term_store = AsyncMock()
-    long_term_store.store = AsyncMock()
-
-    ctx = _make_ctx(
-        req={"session_id": "sess-e", "key": "k", "value": "v"},
-        mock_redis=mock_redis,
-        long_term_store=long_term_store,
-    )
-
-    await StoreMemoryHandler().handle(ctx)
-
-    call_args = long_term_store.store.call_args[0]
-    assert call_args[0] == "sess-e"
-
-
-# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
 
 def test_build_registry_contains_all_actions() -> None:
-    """build_registry() retourne les 3 actions attendues."""
+    """build_registry() retourne les 5 actions attendues."""
     registry = build_registry()
-    assert set(registry.keys()) == {"get", "clear", "store_memory"}
+    assert set(registry.keys()) == {"get", "clear", "file_write", "file_read", "file_list"}
     assert isinstance(registry["get"], GetHandler)
     assert isinstance(registry["clear"], ClearHandler)
-    assert isinstance(registry["store_memory"], StoreMemoryHandler)
+    assert isinstance(registry["file_write"], FileWriteHandler)
+    assert isinstance(registry["file_read"], FileReadHandler)
+    assert isinstance(registry["file_list"], FileListHandler)

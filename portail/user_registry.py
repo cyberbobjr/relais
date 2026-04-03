@@ -56,7 +56,7 @@ class UserRegistry:
         self._roles_raw: dict[str, dict[str, Any]] = {}
         # portail.yaml top-level policy fields
         self._unknown_user_policy: str = "deny"
-        self._guest_profile: str = "fast"
+        self._guest_role: str = "guest"
         self._load()
 
     # ------------------------------------------------------------------
@@ -97,30 +97,40 @@ class UserRegistry:
         # sender_index fallback: works across contexts but within the channel
         return self._sender_index.get(f"{channel}:{raw_id}")
 
-    def build_guest_record(self, llm_profile: str) -> UserRecord:
-        """Build a synthetic guest UserRecord with role data from the guest role.
+    def build_guest_record(self, channel_profile: str | None = None) -> UserRecord:
+        """Build a synthetic guest UserRecord with role data from the configured guest role.
 
-        Used by Portail when ``unknown_user_policy=guest``.  The record is
-        fully-merged: actions, skills_dirs, and allowed_mcp_tools come from
-        the ``"guest"`` role config when available, or fall back to empty
-        lists (fail-closed).
+        Used by Portail when ``unknown_user_policy=guest``.  The role name is
+        read from ``guest_role`` (portail.yaml) so it can be customised without
+        code changes.  Actions, skills_dirs, and allowed_mcp_tools come from the
+        matching role config, or fall back to empty lists (fail-closed).
+
+        LLM profile resolution: ``channel_profile`` > role-level ``llm_profile``
+        > ``"default"``.
 
         Args:
-            llm_profile: LLM profile name to stamp on the guest record.
+            channel_profile: Channel-level LLM profile stamped by Aiguilleur
+                (highest priority).  Pass ``None`` when absent.
 
         Returns:
-            A valid, non-blocked ``UserRecord`` with role ``"guest"``.
+            A valid, non-blocked ``UserRecord`` with the configured guest role.
         """
-        guest_role: dict[str, Any] = self._roles_raw.get("guest") or {}
+        role_name: str = self._guest_role
+        role_def: dict[str, Any] = self._roles_raw.get(role_name) or {}
+        llm_profile: str = (
+            channel_profile
+            or (str(role_def["llm_profile"]) if role_def.get("llm_profile") else "default")
+        )
         return UserRecord(
+            user_id="guest",
             display_name="Guest",
-            role="guest",
+            role=role_name,
             blocked=False,
-            actions=list(guest_role.get("actions") or []),
-            skills_dirs=list(guest_role.get("skills_dirs") or []),
-            allowed_mcp_tools=list(guest_role.get("allowed_mcp_tools") or []),
+            actions=list(role_def.get("actions") or []),
+            skills_dirs=list(role_def.get("skills_dirs") or []),
+            allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
             llm_profile=llm_profile,
-            prompt_path=guest_role.get("prompt_path") or None,
+            prompt_path=role_def.get("prompt_path") or None,
         )
 
     @property
@@ -129,9 +139,9 @@ class UserRegistry:
         return self._unknown_user_policy
 
     @property
-    def guest_profile(self) -> str:
-        """The configured guest_profile from portail.yaml (or 'fast' default)."""
-        return self._guest_profile
+    def guest_role(self) -> str:
+        """The configured guest_role from portail.yaml (or 'guest' default)."""
+        return self._guest_role
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -199,7 +209,7 @@ class UserRegistry:
             )
             raw_policy = "deny"
         self._unknown_user_policy = raw_policy
-        self._guest_profile = str(data.get("guest_profile") or "fast")
+        self._guest_role = str(data.get("guest_role") or "guest")
 
         roles_raw: dict[str, dict[str, Any]] = data.get("roles") or {}
         self._roles_raw = roles_raw
@@ -207,7 +217,7 @@ class UserRegistry:
         new_sender_index: dict[str, UserRecord] = {}
         new_by_identifier: dict[tuple[str, str, str], UserRecord] = {}
 
-        for _key, user in (data.get("users") or {}).items():
+        for user_id, user in (data.get("users") or {}).items():
             role_name = str(user.get("role") or "")
             role_def: dict[str, Any] = roles_raw.get(role_name) or {}
 
@@ -230,6 +240,7 @@ class UserRegistry:
             )
 
             record = UserRecord(
+                user_id=user_id,
                 display_name=str(user.get("display_name") or ""),
                 role=role_name,
                 blocked=bool(user.get("blocked", False)),

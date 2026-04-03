@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from souvenir.context_store import ContextStore
+from souvenir.file_store import FileStore
 from souvenir.long_term_store import LongTermStore
 
 
@@ -22,6 +23,7 @@ class HandlerContext:
         redis_conn: Async Redis connection.
         context_store: Short-term Redis context store.
         long_term_store: Long-term SQLite store.
+        file_store: SQLite store for persistent memory files.
         req: Parsed JSON payload from the stream message.
         stream_res: Name of the response stream (``relais:memory:response``).
     """
@@ -29,6 +31,7 @@ class HandlerContext:
     redis_conn: Any
     context_store: ContextStore
     long_term_store: LongTermStore
+    file_store: FileStore
     req: dict[str, Any]
     stream_res: str
 

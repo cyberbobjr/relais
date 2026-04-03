@@ -94,6 +94,7 @@ from atelier.soul_assembler import assemble_system_prompt
 from atelier.agent_executor import AgentExecutor, AgentExecutionError
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
+from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
 from common.config_loader import resolve_prompts_dir, resolve_skills_dir
 from aiguilleur.channel_config import load_channels_config
@@ -198,6 +199,9 @@ class Atelier:
             profile_name = ur.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)
 
+            # Resolve unique user_id for SouvenirBackend (shortcut in metadata)
+            user_id: str = envelope.metadata.get("user_id") or envelope.sender_id
+
             # 2. Request context from Souvenir
             context = await self._fetch_context(redis_conn, envelope)
 
@@ -248,32 +252,35 @@ class Atelier:
                     soul_prompt=soul_prompt,
                     tools=mcp_tools,
                     skills=skills,
+                    backend=SouvenirBackend(user_id=user_id),
                 )
 
-                # 7. Execute — with optional streaming for capable channels.
-                if envelope.channel in self._streaming_capable_channels:
-                    stream_pub = StreamPublisher(
-                        redis_conn,
-                        channel=envelope.channel,
-                        correlation_id=envelope.correlation_id,
-                    )
+                # 7. Execute — streaming only for capable channels; progress for all.
+                streaming = envelope.channel in self._streaming_capable_channels
+                stream_pub = StreamPublisher(
+                    redis_conn,
+                    channel=envelope.channel,
+                    correlation_id=envelope.correlation_id,
+                    source_envelope=envelope,
+                )
+                if streaming:
                     await redis_conn.publish(
                         f"relais:streaming:start:{envelope.channel}",
                         envelope.to_json(),
                     )
-                    stream_callback = stream_pub.push_chunk
 
                 reply_text = await agent_executor.execute(
                     envelope=envelope,
                     context=context,
-                    stream_callback=stream_callback,
+                    stream_callback=stream_pub.push_chunk if streaming else None,
+                    progress_callback=stream_pub.push_progress,
                 )
             # MCP sessions closed; finalize stream and publish response.
 
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.metadata["user_message"] = envelope.content
-            if stream_pub is not None:
+            if streaming:
                 await stream_pub.finalize()
                 response_env.metadata["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")

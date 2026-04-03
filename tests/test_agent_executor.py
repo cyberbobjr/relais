@@ -2,19 +2,20 @@
 
 Tests validate:
 - AgentExecutor and AgentExecutionError are importable
-- execute() calls ainvoke when no stream_callback is provided
-- execute() returns the last message's content from the result
+- execute() uses astream with v2 format (stream_mode, subgraphs, version)
+- execute() returns the full assembled reply from AI text tokens
 - execute() builds messages from context + envelope correctly
-- execute() calls astream with stream_mode="messages" when stream_callback given
 - Buffer of 80 chars is respected before flushing to stream_callback
 - Remaining buffer is flushed at stream end
 - Transient errors (RateLimitError, InternalServerError, APIConnectionError) propagate unwrapped
 - Permanent/unknown errors are wrapped in AgentExecutionError
 - AgentExecutionError stores optional response_body
+- skills= parameter is forwarded to create_deep_agent
 """
 
 from __future__ import annotations
 
+from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -51,13 +52,40 @@ def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> MagicMock:
 def _make_envelope(content: str = "Hello") -> MagicMock:
     envelope = MagicMock()
     envelope.content = content
+    envelope.correlation_id = "test-corr-id"
+    envelope.sender_id = "test:user"
     return envelope
 
 
-def _make_ai_chunk(content: str) -> MagicMock:
-    chunk = MagicMock()
-    chunk.content = content
-    return chunk
+def _v2_chunk(chunk_type: str, ns: tuple, data: object) -> dict:
+    """Build a v2 astream chunk dict.
+
+    Args:
+        chunk_type: 'messages' or 'updates'.
+        ns: Namespace tuple.
+        data: For 'messages': (token, metadata_dict). For 'updates': dict.
+
+    Returns:
+        Dict with keys 'type', 'ns', 'data'.
+    """
+    return {"type": chunk_type, "ns": ns, "data": data}
+
+
+def _ai_token(content: str, tool_call_chunks: list | None = None) -> MagicMock:
+    """Build a mock AIMessageChunk for v2 streaming.
+
+    Args:
+        content: Text content.
+        tool_call_chunks: Optional tool call chunk list.
+
+    Returns:
+        MagicMock resembling an AIMessageChunk.
+    """
+    token = MagicMock()
+    token.type = "ai"
+    token.content = content
+    token.tool_call_chunks = tool_call_chunks or []
+    return token
 
 
 def _rate_limit_error() -> RateLimitError:
@@ -84,20 +112,23 @@ def test_agent_executor_imports() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Non-streaming: ainvoke
+# Streaming with v2 format (always uses astream)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_calls_ainvoke_without_stream_callback() -> None:
-    """execute() with no stream_callback must call ainvoke on the agent."""
+async def test_execute_returns_ai_text_from_astream() -> None:
+    """execute() assembles the reply from AI text tokens in v2 astream chunks."""
     from atelier.agent_executor import AgentExecutor
 
+    tok = _ai_token("reply from model")
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (tok, {}))
+
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={
-        "messages": [MagicMock(content="reply")]
-    })
+    mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
@@ -107,30 +138,27 @@ async def test_execute_calls_ainvoke_without_stream_callback() -> None:
         )
         result = await executor.execute(_make_envelope("Hi"), context=[])
 
-    mock_agent.ainvoke.assert_awaited_once()
-    assert result == "reply"
+    assert result == "reply from model"
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_returns_last_message_content() -> None:
-    """execute() must return the content of the last message in the result."""
+async def test_execute_accumulates_multiple_ai_tokens() -> None:
+    """execute() concatenates multiple AI text tokens into a single reply."""
     from atelier.agent_executor import AgentExecutor
 
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token("Hello"), {}))
+        yield _v2_chunk("messages", (), (_ai_token(", world!"), {}))
+
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={
-        "messages": [
-            MagicMock(content="first"),
-            MagicMock(content="second"),
-            MagicMock(content="final reply"),
-        ]
-    })
+    mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
         result = await executor.execute(_make_envelope("Hi"), context=[])
 
-    assert result == "final reply"
+    assert result == "Hello, world!"
 
 
 @pytest.mark.unit
@@ -141,12 +169,13 @@ async def test_execute_includes_context_in_messages() -> None:
 
     captured: list[dict] = []
 
-    async def capture_ainvoke(input_data: dict) -> dict:
+    async def capture_astream(input_data: dict, **kwargs) -> AsyncIterator:
         captured.append(input_data)
-        return {"messages": [MagicMock(content="ok")]}
+        return
+        yield  # make it a generator
 
     mock_agent = MagicMock()
-    mock_agent.ainvoke = capture_ainvoke
+    mock_agent.astream = capture_astream
 
     context = [
         {"role": "user", "content": "previous message"},
@@ -175,12 +204,13 @@ async def test_execute_inserts_empty_user_turn_when_context_starts_with_assistan
 
     captured: list[dict] = []
 
-    async def capture_ainvoke(input_data: dict) -> dict:
+    async def capture_astream(input_data: dict, **kwargs) -> AsyncIterator:
         captured.append(input_data)
-        return {"messages": [MagicMock(content="ok")]}
+        return
+        yield  # make it a generator
 
     mock_agent = MagicMock()
-    mock_agent.ainvoke = capture_ainvoke
+    mock_agent.astream = capture_astream
 
     context = [{"role": "assistant", "content": "Hello!"}]
 
@@ -194,20 +224,15 @@ async def test_execute_inserts_empty_user_turn_when_context_starts_with_assistan
     assert messages[1]["role"] == "assistant"
 
 
-# ---------------------------------------------------------------------------
-# Streaming: astream
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_execute_streaming_calls_stream_callback() -> None:
     """execute() with a stream_callback must call it with accumulated text."""
     from atelier.agent_executor import AgentExecutor
 
-    async def fake_astream(input_data: dict, stream_mode: str = "values"):
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         for text in ["Hello", " world"]:
-            yield _make_ai_chunk(text), {}
+            yield _v2_chunk("messages", (), (_ai_token(text), {}))
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
@@ -235,8 +260,8 @@ async def test_execute_streaming_buffers_below_80_chars() -> None:
 
     short_text = "A" * 75  # below 80-char threshold
 
-    async def fake_astream(input_data: dict, stream_mode: str = "values"):
-        yield _make_ai_chunk(short_text), {}
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token(short_text), {}))
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
@@ -268,10 +293,10 @@ async def test_execute_streaming_flushes_at_80_chars() -> None:
     chunk_b = "C" * 40
     remainder = "D" * 10
 
-    async def fake_astream(input_data: dict, stream_mode: str = "values"):
-        yield _make_ai_chunk(chunk_a), {}
-        yield _make_ai_chunk(chunk_b), {}
-        yield _make_ai_chunk(remainder), {}
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token(chunk_a), {}))
+        yield _v2_chunk("messages", (), (_ai_token(chunk_b), {}))
+        yield _v2_chunk("messages", (), (_ai_token(remainder), {}))
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
@@ -296,15 +321,19 @@ async def test_execute_streaming_flushes_at_80_chars() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_execute_streaming_skips_empty_content_chunks() -> None:
-    """Chunks with empty or non-string content (e.g. tool_use blocks) are ignored."""
+    """Chunks with empty or list content (e.g. tool_use blocks) are ignored."""
     from atelier.agent_executor import AgentExecutor
 
-    async def fake_astream(input_data: dict, stream_mode: str = "values"):
-        yield _make_ai_chunk(""), {}       # empty string — skip
-        yield _make_ai_chunk("hello"), {}
-        empty_chunk = MagicMock()
-        empty_chunk.content = []           # non-string — skip
-        yield empty_chunk, {}
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token(""), {}))       # empty — skip
+        yield _v2_chunk("messages", (), (_ai_token("hello"), {}))
+
+        # list content with no text blocks — skip
+        list_tok = MagicMock()
+        list_tok.type = "ai"
+        list_tok.content = [{"type": "tool_use", "id": "abc"}]
+        list_tok.tool_call_chunks = []
+        yield _v2_chunk("messages", (), (list_tok, {}))
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
@@ -335,8 +364,12 @@ async def test_execute_propagates_rate_limit_error_unwrapped() -> None:
     """RateLimitError (transient) must propagate without wrapping."""
     from atelier.agent_executor import AgentExecutor
 
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        raise RateLimitError("rate limited")
+        yield  # make it a generator
+
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=_rate_limit_error())
+    mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
@@ -350,8 +383,12 @@ async def test_execute_propagates_internal_server_error_unwrapped() -> None:
     """InternalServerError (transient) must propagate without wrapping."""
     from atelier.agent_executor import AgentExecutor
 
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        raise InternalServerError("server error")
+        yield  # make it a generator
+
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=_internal_server_error())
+    mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
@@ -365,8 +402,12 @@ async def test_execute_propagates_api_connection_error_unwrapped() -> None:
     """APIConnectionError (transient) must propagate without wrapping."""
     from atelier.agent_executor import AgentExecutor
 
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        raise APIConnectionError("connection failed")
+        yield  # make it a generator
+
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=_connection_error())
+    mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
@@ -380,8 +421,12 @@ async def test_execute_wraps_unknown_error_in_agent_execution_error() -> None:
     """Unknown/permanent errors must be wrapped in AgentExecutionError."""
     from atelier.agent_executor import AgentExecutor, AgentExecutionError
 
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        raise ValueError("unexpected failure")
+        yield  # make it a generator
+
     mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=ValueError("unexpected failure"))
+    mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])

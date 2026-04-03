@@ -136,8 +136,10 @@ PIPELINE CORE
 │ ├─ Valide format (Envelope)
 │ ├─ Résout utilisateur (UserRegistry — portail.yaml)
 │ ├─ Stamp metadata["user_record"] : dict UserRecord fusionné (rôle + utilisateur)
-│ │   (display_name, role, blocked, actions, skills_dirs, allowed_mcp_tools,
+│ │   (user_id, display_name, role, blocked, actions, skills_dirs, allowed_mcp_tools,
 │ │    llm_profile, prompt_path)
+│ ├─ Stamp metadata["user_id"] : clé YAML de l'utilisateur (ex: "usr_admin") — raccourci
+│ │   cross-canal pour reprise de conversation sans désérialiser user_record
 │ ├─ Applique unknown_user_policy (deny / guest / pending) — config dans portail.yaml
 │ │   └─ [pending] publie dans relais:admin:pending_users, puis drop
 │ └─ Publie si accepté

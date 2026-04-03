@@ -86,10 +86,10 @@ async def test_portail_xadd_includes_correlation_id(tmp_path: Path) -> None:
     portail.consumer_name = "portail_1"
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
-    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
+    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
     portail._unknown_user_policy = "guest"
-    portail._guest_profile = "fast"
+    portail._guest_role = "guest"
 
     envelope = _make_envelope()
     conn = _make_redis_conn()
@@ -130,10 +130,10 @@ async def test_portail_xadd_includes_sender_id(tmp_path: Path) -> None:
     portail.consumer_name = "portail_1"
     portail._dnd_cached = None
     portail._dnd_cache_at = 0.0
-    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
+    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
     portail._unknown_user_policy = "guest"
-    portail._guest_profile = "fast"
+    portail._guest_role = "guest"
 
     envelope = _make_envelope(sender_id="discord:987654321")
     conn = _make_redis_conn()
@@ -168,7 +168,7 @@ async def test_portail_error_xadd_includes_correlation_id(tmp_path: Path) -> Non
     portail.stream_out = "relais:security"
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
-    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/users.yaml"))
+    portail._user_registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
     conn = _make_redis_conn()
     # Forward xadd succeeds but raising an error mid-processing by injecting

@@ -20,6 +20,10 @@ class UserRecord:
     so that callers never need to consult a separate registry.
 
     Attributes:
+        user_id: Stable cross-channel identifier, equal to the YAML key in
+            portail.yaml (e.g. ``"usr_admin"``).  ``"guest"`` for synthetic
+            guest records.  Used by downstream bricks to resume conversations
+            across channels without knowing the channel-specific sender_id.
         display_name: Human-readable name for the user.
         role: Role name (e.g. ``"admin"``, ``"user"``, ``"guest"``).
         blocked: Whether the user account is blocked.
@@ -30,6 +34,7 @@ class UserRecord:
         prompt_path: Relative path to a prompt overlay file, or ``None``.
     """
 
+    user_id: str
     display_name: str
     role: str
     blocked: bool
@@ -43,10 +48,11 @@ class UserRecord:
         """Serialize this record into a plain JSON-safe dict.
 
         Returns:
-            A dict with all 8 fields, suitable for storing in
+            A dict with all 9 fields, suitable for storing in
             ``envelope.metadata["user_record"]``.
         """
         return {
+            "user_id": self.user_id,
             "display_name": self.display_name,
             "role": self.role,
             "blocked": self.blocked,
@@ -68,6 +74,7 @@ class UserRecord:
             A new frozen ``UserRecord`` instance.
         """
         return cls(
+            user_id=str(data.get("user_id") or ""),
             display_name=str(data.get("display_name") or ""),
             role=str(data.get("role") or ""),
             blocked=bool(data.get("blocked", False)),

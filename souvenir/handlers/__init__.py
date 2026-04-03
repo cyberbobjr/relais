@@ -12,8 +12,10 @@ Usage::
 
 from souvenir.handlers.base import BaseActionHandler, HandlerContext
 from souvenir.handlers.clear_handler import ClearHandler
+from souvenir.handlers.file_list_handler import FileListHandler
+from souvenir.handlers.file_read_handler import FileReadHandler
+from souvenir.handlers.file_write_handler import FileWriteHandler
 from souvenir.handlers.get_handler import GetHandler
-from souvenir.handlers.store_memory_handler import StoreMemoryHandler
 
 
 def build_registry() -> dict[str, BaseActionHandler]:
@@ -25,7 +27,9 @@ def build_registry() -> dict[str, BaseActionHandler]:
     return {
         "get": GetHandler(),
         "clear": ClearHandler(),
-        "store_memory": StoreMemoryHandler(),
+        "file_write": FileWriteHandler(),
+        "file_read": FileReadHandler(),
+        "file_list": FileListHandler(),
     }
 
 

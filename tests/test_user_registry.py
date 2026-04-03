@@ -1,9 +1,9 @@
 """Tests for portail.user_registry.UserRegistry.
 
-TDD — tests cover the new 8-field UserRecord, to_dict/from_dict round-trip,
+TDD — tests cover the new 9-field UserRecord, to_dict/from_dict round-trip,
 fully-resolved records (role data merged in), and build_guest_record().
 
-Config file format is now portail.yaml (users + roles + guest_profile).
+Config file format is now portail.yaml (users + roles + guest_role).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from portail.user_registry import UserRegistry
 
 _PORTAIL_YAML = dedent("""\
     unknown_user_policy: deny
-    guest_profile: fast
+    guest_role: guest
 
     users:
       usr_admin:
@@ -99,6 +99,7 @@ def test_user_record_is_frozen() -> None:
     Assigning to any field must raise AttributeError or TypeError.
     """
     record = UserRecord(
+        user_id="usr_alice",
         display_name="Alice",
         role="user",
         blocked=False,
@@ -120,6 +121,7 @@ def test_user_record_has_all_eight_fields() -> None:
     allowed_mcp_tools, llm_profile, prompt_path.
     """
     record = UserRecord(
+        user_id="usr_bob",
         display_name="Bob",
         role="admin",
         blocked=False,
@@ -143,6 +145,7 @@ def test_user_record_has_all_eight_fields() -> None:
 def test_user_record_prompt_path_default_is_none() -> None:
     """UserRecord.prompt_path defaults to None."""
     record = UserRecord(
+        user_id="usr_bob",
         display_name="Bob",
         role="user",
         blocked=False,
@@ -164,6 +167,7 @@ def test_user_record_prompt_path_default_is_none() -> None:
 def test_user_record_to_dict_contains_all_fields() -> None:
     """to_dict() must serialize all 8 fields into a plain dict."""
     record = UserRecord(
+        user_id="usr_alice",
         display_name="Alice",
         role="admin",
         blocked=False,
@@ -189,6 +193,7 @@ def test_user_record_to_dict_contains_all_fields() -> None:
 def test_user_record_from_dict_round_trip() -> None:
     """from_dict(to_dict(record)) must produce an identical record."""
     original = UserRecord(
+        user_id="usr_carol",
         display_name="Carol",
         role="user",
         blocked=True,
@@ -298,7 +303,7 @@ def test_resolve_user_llm_profile_from_user_overrides_role(tmp_path: Path) -> No
     """
     content = dedent("""\
         unknown_user_policy: deny
-        guest_profile: fast
+        guest_role: guest
         users:
           usr_custom_profile:
             display_name: "Custom Profile User"
@@ -334,7 +339,7 @@ def test_resolve_user_llm_profile_falls_back_to_role(tmp_path: Path) -> None:
     """
     content = dedent("""\
         unknown_user_policy: deny
-        guest_profile: fast
+        guest_role: guest
         users:
           usr_no_profile:
             display_name: "No Profile User"
@@ -586,7 +591,7 @@ def test_build_guest_record_returns_user_record(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(llm_profile="fast")
+    result = registry.build_guest_record(channel_profile="fast")
 
     assert isinstance(result, UserRecord)
 
@@ -601,7 +606,7 @@ def test_build_guest_record_has_guest_role(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(llm_profile="fast")
+    result = registry.build_guest_record(channel_profile="fast")
 
     assert result.role == "guest"
 
@@ -616,7 +621,7 @@ def test_build_guest_record_uses_given_llm_profile(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(llm_profile="coder")
+    result = registry.build_guest_record(channel_profile="coder")
 
     assert result.llm_profile == "coder"
 
@@ -631,7 +636,7 @@ def test_build_guest_record_empty_actions(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(llm_profile="fast")
+    result = registry.build_guest_record(channel_profile="fast")
 
     assert result.actions == []
 
@@ -646,7 +651,7 @@ def test_build_guest_record_not_blocked(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(llm_profile="fast")
+    result = registry.build_guest_record(channel_profile="fast")
 
     assert result.blocked is False
 
@@ -663,7 +668,7 @@ def test_build_guest_record_inherits_guest_role_skills(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(llm_profile="fast")
+    result = registry.build_guest_record(channel_profile="fast")
 
     # guest role in fixture has skills_dirs: []
     assert result.skills_dirs == []
@@ -677,7 +682,7 @@ def test_build_guest_record_without_config_returns_minimal_record() -> None:
     """
     registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
-    result = registry.build_guest_record(llm_profile="fast")
+    result = registry.build_guest_record(channel_profile="fast")
 
     assert isinstance(result, UserRecord)
     assert result.role == "guest"
@@ -754,7 +759,7 @@ def test_resolve_user_path_traversal_rejected(tmp_path: Path) -> None:
     """
     content = dedent("""\
         unknown_user_policy: deny
-        guest_profile: fast
+        guest_role: guest
         users:
           usr_traversal:
             display_name: "Traversal User"

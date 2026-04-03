@@ -26,9 +26,8 @@ from common.shutdown import GracefulShutdown
 # ---------------------------------------------------------------------------
 
 _USERS_YAML_WITH_GUEST_ROLE = dedent("""\
-    access_control:
-      default_mode: allowlist
-    groups: []
+    unknown_user_policy: guest
+    guest_role: guest
     users:
       usr_admin:
         display_name: "Admin User"
@@ -46,6 +45,7 @@ _USERS_YAML_WITH_GUEST_ROLE = dedent("""\
         actions: []
         skills_dirs: []
         allowed_mcp_tools: []
+        llm_profile: fast
 """)
 
 _USERS_YAML_WITHOUT_GUEST_ROLE = dedent("""\
@@ -78,7 +78,7 @@ def _write_yaml(tmp_path: Path, content: str) -> Path:
     Returns:
         Path to the created file.
     """
-    p = tmp_path / "users.yaml"
+    p = tmp_path / "portail.yaml"
     p.write_text(content, encoding="utf-8")
     return p
 
@@ -114,7 +114,7 @@ def _make_envelope(
 def _make_portail(
     users_yaml_path: Path,
     policy: str,
-    guest_profile: str = "fast",
+    guest_role: str = "guest",
 ) -> object:
     """Construct a Portail with a real registry, mocked Redis, and given policy.
 
@@ -124,7 +124,7 @@ def _make_portail(
     Args:
         users_yaml_path: Path to the portail.yaml to use.
         policy: Value for ``_unknown_user_policy`` (deny | guest | pending).
-        guest_profile: Value for ``_guest_profile``.
+        guest_role: Value for ``_guest_role``.
 
     Returns:
         A Portail instance ready for unit testing.
@@ -140,7 +140,7 @@ def _make_portail(
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
     portail._unknown_user_policy = policy
-    portail._guest_profile = guest_profile
+    portail._guest_role = guest_role
     portail._user_registry = UserRegistry(config_path=users_yaml_path)
 
     return portail
@@ -301,7 +301,7 @@ async def test_guest_policy_forwards_unknown_user_to_security(tmp_path: Path) ->
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -324,7 +324,7 @@ async def test_guest_policy_stamps_user_role_guest(tmp_path: Path) -> None:
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -348,7 +348,7 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -365,14 +365,14 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_guest_policy_stamps_llm_profile_from_guest_profile(tmp_path: Path) -> None:
-    """guest policy: llm_profile is set to the configured guest_profile value.
+async def test_guest_policy_stamps_llm_profile_from_guest_role_config(tmp_path: Path) -> None:
+    """guest policy: llm_profile is resolved from the guest role's llm_profile field.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -398,7 +398,7 @@ async def test_guest_policy_stamps_skills_from_guest_role(tmp_path: Path) -> Non
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -428,7 +428,7 @@ async def test_guest_policy_fail_closed_when_guest_role_absent(tmp_path: Path) -
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITHOUT_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -459,7 +459,7 @@ async def test_guest_policy_acks_message(tmp_path: Path) -> None:
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -480,7 +480,7 @@ async def test_guest_policy_does_not_publish_to_pending(tmp_path: Path) -> None:
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_yaml(tmp_path, _USERS_YAML_WITH_GUEST_ROLE)
-    portail = _make_portail(path, policy="guest", guest_profile="fast")
+    portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
     shutdown = _make_shutdown(stop_after=2)
@@ -630,7 +630,7 @@ async def test_pending_policy_does_not_affect_known_users(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_portail_init_loads_unknown_user_policy_from_portail_yaml(tmp_path: Path) -> None:
-    """Portail.__init__ reads unknown_user_policy and guest_profile from portail.yaml.
+    """Portail.__init__ reads unknown_user_policy and guest_role from portail.yaml.
 
     Verifies that both attributes are populated at construction time from UserRegistry
     (which reads portail.yaml top-level fields).
@@ -642,7 +642,7 @@ def test_portail_init_loads_unknown_user_policy_from_portail_yaml(tmp_path: Path
 
     portail_yaml_content = {
         "unknown_user_policy": "guest",
-        "guest_profile": "precise",
+        "guest_role": "vip",
         "users": {},
         "roles": {},
     }
@@ -658,11 +658,11 @@ def test_portail_init_loads_unknown_user_policy_from_portail_yaml(tmp_path: Path
         portail.group_name = "portail_group"
         portail.consumer_name = "portail_1"
         portail._user_registry = UserRegistry(config_path=portail_yaml_file)
-        portail._guest_profile = portail._user_registry.guest_profile
+        portail._guest_role = portail._user_registry.guest_role
         portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     assert portail._unknown_user_policy == "guest"
-    assert portail._guest_profile == "precise"
+    assert portail._guest_role == "vip"
 
 
 @pytest.mark.unit
@@ -678,4 +678,4 @@ def test_portail_init_defaults_to_deny_when_portail_yaml_missing() -> None:
     registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
     assert registry.unknown_user_policy == "deny"
-    assert registry.guest_profile == "fast"
+    assert registry.guest_role == "guest"

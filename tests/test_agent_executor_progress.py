@@ -1,0 +1,614 @@
+"""Unit tests for AgentExecutor progress_callback and fallback reply.
+
+Tests validate:
+- progress_callback is called with ('tool_call', tool_name) on tool_call_chunks
+- progress_callback is called with ('tool_result', 'name: preview') on tool messages
+- progress_callback is called with ('subagent_start', source) on subagent updates
+- fallback: when astream yields only tool messages (no AI text), full_reply
+  equals the last ToolMessage content (nemotron-mini pattern)
+- fallback: when astream yields nothing useful, full_reply is the placeholder string
+- existing streaming and error-propagation behaviour is unchanged
+"""
+
+from __future__ import annotations
+
+from typing import AsyncIterator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> MagicMock:
+    profile = MagicMock()
+    profile.model = model
+    profile.base_url = None
+    profile.api_key_env = None
+    return profile
+
+
+def _make_envelope(content: str = "Hello") -> MagicMock:
+    envelope = MagicMock()
+    envelope.content = content
+    envelope.correlation_id = "test-corr-id"
+    envelope.sender_id = "test:user"
+    return envelope
+
+
+def _v2_chunk(
+    chunk_type: str,
+    ns: tuple,
+    data: object,
+) -> dict:
+    """Build a v2 astream chunk dict.
+
+    Args:
+        chunk_type: 'messages' or 'updates'.
+        ns: Namespace tuple, e.g. () for main agent or ('tools:abc123',) for subagent.
+        data: For 'messages': (token, metadata_dict). For 'updates': {node_name: data}.
+
+    Returns:
+        Dict with keys 'type', 'ns', 'data'.
+    """
+    return {"type": chunk_type, "ns": ns, "data": data}
+
+
+def _ai_token(content: str, tool_call_chunks: list | None = None) -> MagicMock:
+    """Build a mock AIMessageChunk.
+
+    Args:
+        content: Text content of the token.
+        tool_call_chunks: Optional list of tool call chunk dicts.
+
+    Returns:
+        MagicMock resembling an AIMessageChunk.
+    """
+    token = MagicMock()
+    token.type = "AIMessageChunk"  # LangChain streaming type (not "ai")
+    token.content = content
+    token.tool_call_chunks = tool_call_chunks or []
+    return token
+
+
+def _tool_token(name: str, content: str) -> MagicMock:
+    """Build a mock ToolMessage token.
+
+    Args:
+        name: Name of the tool that produced this result.
+        content: The tool result content.
+
+    Returns:
+        MagicMock resembling a ToolMessage.
+    """
+    token = MagicMock()
+    token.type = "tool"
+    token.name = name
+    token.content = content
+    token.tool_call_chunks = None
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Tests — progress_callback on tool_call
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_emits_progress_on_tool_call() -> None:
+    """progress_callback is called with ('tool_call', tool_name) on tool_call_chunks.
+
+    Simulates a single AIMessageChunk with tool_call_chunks=[{"name": "web_search"}]
+    and verifies the progress_callback is called with the correct arguments.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    tool_call_chunk = {"name": "web_search", "args": ""}
+    ai_token = _ai_token(content="", tool_call_chunks=[tool_call_chunk])
+    chunk = _v2_chunk("messages", (), (ai_token, {}))
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield chunk
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    progress_calls: list[tuple[str, str]] = []
+
+    async def progress_callback(event: str, detail: str) -> None:
+        progress_calls.append((event, detail))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(
+            _make_envelope("Hi"),
+            context=[],
+            progress_callback=progress_callback,
+        )
+
+    assert ("tool_call", "web_search") in progress_calls
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_emits_progress_on_tool_result() -> None:
+    """progress_callback is called with ('tool_result', 'name: preview') on tool tokens.
+
+    Simulates a ToolMessage token and verifies the callback receives the
+    tool name and a preview of the content (up to 100 chars).
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    tool_tok = _tool_token("web_search", "résultat de recherche")
+    chunk = _v2_chunk("messages", (), (tool_tok, {}))
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield chunk
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    progress_calls: list[tuple[str, str]] = []
+
+    async def progress_callback(event: str, detail: str) -> None:
+        progress_calls.append((event, detail))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(
+            _make_envelope("Hi"),
+            context=[],
+            progress_callback=progress_callback,
+        )
+
+    assert ("tool_result", "web_search: résultat de recherche") in progress_calls
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_emits_progress_tool_result_truncated_at_100() -> None:
+    """Tool result detail is truncated at 100 characters.
+
+    Verifies that very long tool results are trimmed to 100 chars in the
+    progress_callback detail argument.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    long_content = "x" * 200
+    tool_tok = _tool_token("my_tool", long_content)
+    chunk = _v2_chunk("messages", (), (tool_tok, {}))
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield chunk
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    progress_calls: list[tuple[str, str]] = []
+
+    async def progress_callback(event: str, detail: str) -> None:
+        progress_calls.append((event, detail))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(
+            _make_envelope("Hi"),
+            context=[],
+            progress_callback=progress_callback,
+        )
+
+    # Find the tool_result call
+    tool_result_calls = [(e, d) for e, d in progress_calls if e == "tool_result"]
+    assert len(tool_result_calls) == 1
+    _event, detail = tool_result_calls[0]
+    # prefix "my_tool: " is 9 chars, so content should be capped at 100 chars total
+    assert len(detail) <= len("my_tool: ") + 100
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_emits_progress_on_subagent_start() -> None:
+    """progress_callback is called with ('subagent_start', source) on subagent model node.
+
+    Simulates a v2 'updates' chunk with non-empty ns and node_name='model',
+    which signals a subagent starting an LLM call.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    chunk = _v2_chunk(
+        "updates",
+        ("tools:abc123",),
+        {"model": {}},
+    )
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield chunk
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    progress_calls: list[tuple[str, str]] = []
+
+    async def progress_callback(event: str, detail: str) -> None:
+        progress_calls.append((event, detail))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(
+            _make_envelope("Hi"),
+            context=[],
+            progress_callback=progress_callback,
+        )
+
+    subagent_calls = [(e, d) for e, d in progress_calls if e == "subagent_start"]
+    assert len(subagent_calls) == 1
+    assert subagent_calls[0][0] == "subagent_start"
+    # detail contains the subagent source identifier
+    assert "tools:abc123" in subagent_calls[0][1]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_no_progress_on_main_agent_model_request() -> None:
+    """subagent_start is NOT emitted for the main agent (empty ns).
+
+    Only subagents (non-empty ns) trigger the subagent_start progress event.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    # Main agent: ns=() (empty tuple)
+    chunk = _v2_chunk("updates", (), {"model": {}})
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield chunk
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    progress_calls: list[tuple[str, str]] = []
+
+    async def progress_callback(event: str, detail: str) -> None:
+        progress_calls.append((event, detail))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(
+            _make_envelope("Hi"),
+            context=[],
+            progress_callback=progress_callback,
+        )
+
+    subagent_calls = [(e, d) for e, d in progress_calls if e == "subagent_start"]
+    assert len(subagent_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests — progress_callback is None (no errors when not provided)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_progress_callback_none_no_error() -> None:
+    """When progress_callback is None, tool events must not raise any error."""
+    from atelier.agent_executor import AgentExecutor
+
+    tool_call_chunk = {"name": "search", "args": "q=test"}
+    ai_tok = _ai_token(content="", tool_call_chunks=[tool_call_chunk])
+    tool_tok = _tool_token("search", "result")
+    ai_reply = _ai_token(content="Final answer.")
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (ai_tok, {}))
+        yield _v2_chunk("messages", (), (tool_tok, {}))
+        yield _v2_chunk("messages", (), (ai_reply, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(
+            _make_envelope("Hi"),
+            context=[],
+            # No progress_callback
+        )
+
+    assert result == "Final answer."
+
+
+# ---------------------------------------------------------------------------
+# Tests — fallback reply (nemotron-mini pattern)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_fallback_last_tool_result_when_reply_empty() -> None:
+    """When no AI text token is emitted, fallback to the last ToolMessage content.
+
+    This tests the nemotron-mini pattern where the model does not emit an AI
+    text token after ToolMessages — the last tool result is used as the reply.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    tool_call_chunk = {"name": "calculator", "args": '{"expr": "2+2"}'}
+    ai_tok = _ai_token(content="", tool_call_chunks=[tool_call_chunk])
+    tool_tok = _tool_token("calculator", "4")
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        # AI token with tool_call (no text content)
+        yield _v2_chunk("messages", (), (ai_tok, {}))
+        # Tool result — no AI text follows
+        yield _v2_chunk("messages", (), (tool_tok, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("What is 2+2?"), context=[])
+
+    assert result == "4"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_fallback_tool_result_list_content() -> None:
+    """Fallback works when ToolMessage content is a list of text blocks.
+
+    Some providers return content as a list of dicts with 'type'='text'.
+    The fallback must concatenate the text fields.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    tool_call_chunk = {"name": "my_tool", "args": "{}"}
+    ai_tok = _ai_token(content="", tool_call_chunks=[tool_call_chunk])
+
+    tool_tok = MagicMock()
+    tool_tok.type = "tool"
+    tool_tok.name = "my_tool"
+    tool_tok.content = [
+        {"type": "text", "text": "Part one. "},
+        {"type": "text", "text": "Part two."},
+    ]
+    tool_tok.tool_call_chunks = None
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (ai_tok, {}))
+        yield _v2_chunk("messages", (), (tool_tok, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("Do it"), context=[])
+
+    assert result == "Part one. Part two."
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_placeholder_when_all_empty() -> None:
+    """When astream yields no useful content, full_reply is the placeholder string.
+
+    Verifies that the constant placeholder '[Aucune réponse générée par le modèle.]'
+    is returned when no AI text and no tool result content is emitted.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    PLACEHOLDER = "[Aucune réponse générée par le modèle.]"
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        # Yield only an updates chunk — no messages
+        yield _v2_chunk("updates", (), {"tools": {}})
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("silence"), context=[])
+
+    assert result == PLACEHOLDER
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_fallback_overridden_by_ai_text() -> None:
+    """When AI text IS emitted after a tool result, the AI text takes priority.
+
+    Verifies that the fallback mechanism does not interfere with the normal
+    case where the model emits both a tool call and a subsequent AI text reply.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    tool_call_chunk = {"name": "search", "args": "q=relais"}
+    ai_tok = _ai_token(content="", tool_call_chunks=[tool_call_chunk])
+    tool_tok = _tool_token("search", "some results")
+    ai_reply = _ai_token(content="Here is the answer.")
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (ai_tok, {}))
+        yield _v2_chunk("messages", (), (tool_tok, {}))
+        yield _v2_chunk("messages", (), (ai_reply, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("search relais"), context=[])
+
+    assert result == "Here is the answer."
+
+
+# ---------------------------------------------------------------------------
+# Tests — existing behaviour preserved (v2 streaming format)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_text_tokens_accumulated() -> None:
+    """Text tokens from AIMessageChunk are assembled into full_reply.
+
+    Uses the v2 chunk format with type='messages'.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    tok1 = _ai_token("Hello")
+    tok2 = _ai_token(", world!")
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (tok1, {}))
+        yield _v2_chunk("messages", (), (tok2, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    received: list[str] = []
+
+    async def stream_callback(chunk: str) -> None:
+        received.append(chunk)
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(
+            _make_envelope("Hi"), context=[], stream_callback=stream_callback
+        )
+
+    assert result == "Hello, world!"
+    assert "".join(received) == "Hello, world!"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_error_wrapping_preserved() -> None:
+    """Permanent errors from astream are wrapped in AgentExecutionError."""
+    from atelier.agent_executor import AgentExecutor, AgentExecutionError
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        raise ValueError("unexpected boom")
+        yield  # make it a generator
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        with pytest.raises(AgentExecutionError):
+            await executor.execute(_make_envelope("Hi"), context=[])
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_context_prepended_in_messages() -> None:
+    """Context is prepended to the messages list passed to astream.
+
+    Validates that _build_messages is called with context + envelope content.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    captured: list[dict] = []
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        captured.append(input_data)
+        # Yield nothing — full_reply will be placeholder
+        return
+        yield  # make it a generator
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    context = [
+        {"role": "user", "content": "prior"},
+        {"role": "assistant", "content": "response"},
+    ]
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(_make_envelope("new"), context=context)
+
+    messages = captured[0]["messages"]
+    roles = [m["role"] for m in messages]
+    assert roles == ["user", "assistant", "user"]
+    assert messages[-1]["content"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# Tests — content normalisation edge cases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_text_preserved_when_tool_call_chunks_coexist() -> None:
+    """Text content is NOT lost when tool_call_chunks coexist in the same AIMessageChunk.
+
+    Some models emit a chunk that simultaneously carries both a tool_call_chunks
+    fragment (initiating a call) and a text narration.  Previously the code gated
+    text accumulation on 'not tool_call_chunks', silently dropping that text.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    # A chunk that carries both a tool_call fragment and text content
+    mixed_tok = _ai_token(
+        content="Searching for you…",
+        tool_call_chunks=[{"name": "web_search", "args": ""}],
+    )
+    ai_reply = _ai_token("Done.")
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (mixed_tok, {}))
+        yield _v2_chunk("messages", (), (ai_reply, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("find relais"), context=[])
+
+    assert "Searching for you…" in result
+    assert "Done." in result
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tool_result_list_with_str_items_not_dropped() -> None:
+    """ToolMessage.content list elements that are plain str are included in the fallback.
+
+    LangChain allows ToolMessage.content to be a mixed list of str and dict blocks.
+    Previously only dict blocks with type='text' were extracted; plain str items
+    were silently dropped, producing an empty fallback.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    PLACEHOLDER = "[Aucune réponse générée par le modèle.]"
+
+    # ToolMessage with a mixed list: one plain str + one text block dict
+    tool_tok = MagicMock()
+    tool_tok.type = "tool"
+    tool_tok.name = "calculator"
+    tool_tok.content = ["Result: ", {"type": "text", "text": "42"}]
+    tool_tok.tool_call_chunks = None
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (tool_tok, {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("calc"), context=[])
+
+    # Both the str element and the dict text block must appear in the fallback
+    assert result == "Result: 42"
+    assert result != PLACEHOLDER

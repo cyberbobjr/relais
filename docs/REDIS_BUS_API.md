@@ -110,10 +110,12 @@ XADD relais:security * payload <Envelope JSON>
 
 | Key | Type | Description |
 |-----|------|-------------|
+| `user_id` | `string` | Stable cross-channel user identifier, equal to the YAML key in portail.yaml (e.g. `"usr_admin"`). `"guest"` for unknown users under guest policy. Use this to resume conversations across channels. |
+| `user_record` | `dict` | Serialized `UserRecord` with all fields: `user_id`, `display_name`, `role`, `blocked`, `actions`, `skills_dirs`, `allowed_mcp_tools`, `llm_profile`, `prompt_path`. |
 | `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (Aiguilleur) → `user.llm_profile` (portail.yaml) → `role.llm_profile` (portail.yaml) → `"default"`. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
-| `user_role` | `string` | User role resolved from `UserRegistry` (users.yaml) — used by Atelier for role-based prompt layer selection. |
-| `display_name` | `string` | User display name from `UserRegistry` (users.yaml). |
-| `custom_prompt_path` | `string` (optional) | Custom prompt override path if defined in user profile (users.yaml). |
+| `user_role` | `string` | User role resolved from `UserRegistry` (portail.yaml) — used by Atelier for role-based prompt layer selection. |
+| `display_name` | `string` | User display name from `UserRegistry` (portail.yaml). |
+| `custom_prompt_path` | `string` (optional) | Custom prompt override path if defined in user profile (portail.yaml). |
 | `session_start` | `float` (optional) | Epoch timestamp if this is a new session |
 
 ---

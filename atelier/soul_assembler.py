@@ -3,7 +3,7 @@
 Layer assembly order:
   1. soul/SOUL.md               — core personality (always attempted)
   2. roles/{user_role}.md       — role-specific instructions
-  3. user_prompt_path           — per-user override (explicit path from users.yaml)
+  3. user_prompt_path           — per-user override (explicit path from portail.yaml)
   4. channels/{channel}_default.md — channel formatting rules
 
 Missing or empty files are silently skipped (logged at DEBUG level).

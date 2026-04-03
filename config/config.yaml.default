@@ -34,14 +34,12 @@ security:
   session_ttl: 86400
   # Taille maximale d'un message entrant (octets)
   max_message_size: 8192
-  # Politique pour les utilisateurs absents de users.yaml
+  # Politique pour les utilisateurs absents de portail.yaml
   # Valeurs possibles : deny | guest | pending
   #   deny    — rejette le message, aucune réponse envoyée
-  #   guest   — autorise avec le profil guest_profile (pas de mémoire, pas d'outils)
+  #   guest   — autorise avec le rôle défini par guest_role dans portail.yaml
   #   pending — rejette + publie sur relais:admin:pending_users pour revue humaine
   unknown_user_policy: "deny"
-  # Profil LLM attribué aux utilisateurs invités (uniquement pour unknown_user_policy=guest)
-  guest_profile: "fast"
 
 # ── Répertoires ──────────────────────────────────────────────────────────────
 paths:

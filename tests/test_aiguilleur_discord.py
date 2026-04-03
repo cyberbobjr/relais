@@ -667,3 +667,230 @@ async def test_all_typing_tasks_cancelled_on_close():
     mock_task_a.cancel.assert_called_once()
     mock_task_b.cancel.assert_called_once()
     assert client._typing_tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# _split_discord_message tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_split_discord_message_short_content_returned_as_is():
+    """Content at or below the limit must be returned as a single-element list."""
+    from aiguilleur.channels.discord.adapter import _split_discord_message
+
+    content = "hello world"
+    assert _split_discord_message(content, limit=2000) == [content]
+    assert _split_discord_message("x" * 2000, limit=2000) == ["x" * 2000]
+
+
+@pytest.mark.unit
+def test_split_discord_message_splits_on_double_newline():
+    """Content exceeding the limit splits at the last \\n\\n before the boundary."""
+    from aiguilleur.channels.discord.adapter import _split_discord_message
+
+    para1 = "A" * 100
+    para2 = "B" * 100
+    content = para1 + "\n\n" + para2
+    # limit=110 → must split at the \n\n
+    parts = _split_discord_message(content, limit=110)
+    assert len(parts) == 2
+    assert parts[0] == para1 + "\n\n"
+    assert parts[1] == para2
+
+
+@pytest.mark.unit
+def test_split_discord_message_splits_on_single_newline_when_no_double():
+    """Falls back to \\n when no \\n\\n is present before the boundary."""
+    from aiguilleur.channels.discord.adapter import _split_discord_message
+
+    line1 = "A" * 100
+    line2 = "B" * 100
+    content = line1 + "\n" + line2
+    parts = _split_discord_message(content, limit=110)
+    assert len(parts) == 2
+    assert parts[0] == line1 + "\n"
+    assert parts[1] == line2
+
+
+@pytest.mark.unit
+def test_split_discord_message_splits_on_space_when_no_newline():
+    """Falls back to space when no newline separator exists before the boundary."""
+    from aiguilleur.channels.discord.adapter import _split_discord_message
+
+    word1 = "A" * 100
+    word2 = "B" * 100
+    content = word1 + " " + word2
+    parts = _split_discord_message(content, limit=110)
+    assert len(parts) == 2
+    assert parts[0] == word1          # no trailing space
+    assert parts[1] == word2          # no leading space
+
+
+@pytest.mark.unit
+def test_split_discord_message_hard_cut_when_no_separator():
+    """Hard-cuts at the limit when no natural separator is found."""
+    from aiguilleur.channels.discord.adapter import _split_discord_message
+
+    content = "X" * 2500
+    parts = _split_discord_message(content, limit=2000)
+    assert len(parts) == 2
+    assert parts[0] == "X" * 2000
+    assert parts[1] == "X" * 500
+
+
+@pytest.mark.unit
+def test_split_discord_message_three_parts():
+    """Content requiring three parts is split correctly."""
+    from aiguilleur.channels.discord.adapter import _split_discord_message
+
+    content = "X" * 4500
+    parts = _split_discord_message(content, limit=2000)
+    assert len(parts) == 3
+    assert all(len(p) <= 2000 for p in parts)
+    assert "".join(parts) == content
+
+
+# ---------------------------------------------------------------------------
+# Long message splitting in _deliver_outgoing_message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_deliver_outgoing_sends_multiple_parts_for_long_message():
+    """_deliver_outgoing_message splits content > 2000 chars into multiple sends."""
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    long_content = "A" * 4500
+    env = Envelope(
+        content=long_content,
+        sender_id="discord:42",
+        channel="discord",
+        session_id="sess-1",
+        correlation_id="corr-long",
+        metadata={"reply_to": "999"},
+    )
+
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {}
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._deliver_outgoing_message({"payload": env.to_json()})
+
+    assert mock_channel.send.await_count == 3
+    all_sent = "".join(call.args[0] for call in mock_channel.send.await_args_list)
+    assert all_sent == long_content
+
+
+# ---------------------------------------------------------------------------
+# Progress event handling in _deliver_outgoing_message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_deliver_outgoing_progress_tool_call_sends_notification():
+    """A progress envelope with event='tool_call' triggers a [outil en cours: ...] send."""
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = Envelope(
+        content="",
+        sender_id="discord:42",
+        channel="discord",
+        session_id="sess-p",
+        correlation_id="corr-p",
+        metadata={
+            "reply_to": "999",
+            "message_type": "progress",
+            "progress_event": "tool_call",
+            "progress_detail": "web_search",
+        },
+    )
+
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {}
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._deliver_outgoing_message({"payload": env.to_json()})
+
+    mock_channel.send.assert_called_once()
+    sent_text = mock_channel.send.call_args.args[0]
+    assert "outil en cours" in sent_text
+    assert "web_search" in sent_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_deliver_outgoing_progress_tool_result_skipped():
+    """A progress envelope with event='tool_result' must NOT call channel.send."""
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    env = Envelope(
+        content="",
+        sender_id="discord:42",
+        channel="discord",
+        session_id="sess-tr",
+        correlation_id="corr-tr",
+        metadata={
+            "reply_to": "999",
+            "message_type": "progress",
+            "progress_event": "tool_result",
+            "progress_detail": "some result",
+        },
+    )
+
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {}
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._deliver_outgoing_message({"payload": env.to_json()})
+
+    mock_channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_deliver_outgoing_progress_does_not_cancel_typing():
+    """A progress envelope must NOT cancel the typing indicator task."""
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_task = MagicMock()
+    env = Envelope(
+        content="",
+        sender_id="discord:42",
+        channel="discord",
+        session_id="sess-nc",
+        correlation_id="corr-nc",
+        metadata={
+            "reply_to": "999",
+            "message_type": "progress",
+            "progress_event": "tool_call",
+            "progress_detail": "some_tool",
+        },
+    )
+
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock()
+
+    with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+        client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+        client._typing_tasks = {"corr-nc": mock_task}
+        client.get_channel = MagicMock(return_value=mock_channel)
+
+        await client._deliver_outgoing_message({"payload": env.to_json()})
+
+    mock_task.cancel.assert_not_called()
+    assert "corr-nc" in client._typing_tasks

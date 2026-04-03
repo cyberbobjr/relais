@@ -24,7 +24,7 @@ Technical overview
   ``relais:messages:outgoing:{channel}``.
 
 ``ACLManager`` (sentinelle.acl) resolves role-based permissions from
-users.yaml.
+sentinelle.yaml.
 
 Redis channels
 --------------

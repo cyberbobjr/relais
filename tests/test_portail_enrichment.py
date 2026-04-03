@@ -51,7 +51,7 @@ def _make_envelope(
 
 _PORTAIL_YAML = dedent("""\
     unknown_user_policy: deny
-    guest_profile: fast
+    guest_role: guest
 
     users:
       usr_admin:
@@ -129,7 +129,7 @@ def _make_portail(portail_yaml_path: Path | None = None):
             portail._user_registry = UserRegistry(
                 config_path=Path("/nonexistent/portail.yaml")
             )
-        portail._guest_profile = portail._user_registry.guest_profile
+        portail._guest_role = portail._user_registry.guest_role
         portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     return portail
@@ -449,20 +449,20 @@ def test_apply_guest_stamps_sets_user_record(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_apply_guest_stamps_uses_guest_profile(tmp_path: Path) -> None:
-    """_apply_guest_stamps uses the configured guest_profile for llm_profile.
+def test_apply_guest_stamps_uses_guest_role(tmp_path: Path) -> None:
+    """_apply_guest_stamps uses the configured guest_role; llm_profile falls back to 'default'.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
     path = _write_portail_yaml(tmp_path)
     portail = _make_portail(path)
-    portail._guest_profile = "fast"
     envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
 
     portail._apply_guest_stamps(envelope)
 
-    assert envelope.metadata["user_record"]["llm_profile"] == "fast"
+    assert envelope.metadata["user_record"]["role"] == "guest"
+    assert envelope.metadata["user_record"]["llm_profile"] == "default"
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +508,7 @@ async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
     portail._user_registry = UserRegistry(config_path=path)
-    portail._guest_profile = portail._user_registry.guest_profile
+    portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
@@ -564,7 +564,7 @@ async def test_process_stream_check_uses_user_record_key(tmp_path: Path) -> None
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
     portail._user_registry = UserRegistry(config_path=path)
-    portail._guest_profile = portail._user_registry.guest_profile
+    portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
@@ -616,7 +616,7 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
     portail._user_registry = UserRegistry(config_path=path)
-    portail._guest_profile = portail._user_registry.guest_profile
+    portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)
@@ -669,7 +669,7 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
     portail.group_name = "portail_group"
     portail.consumer_name = "portail_1"
     portail._user_registry = UserRegistry(config_path=path)
-    portail._guest_profile = portail._user_registry.guest_profile
+    portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
     await portail._process_stream(redis_conn, shutdown=shutdown)

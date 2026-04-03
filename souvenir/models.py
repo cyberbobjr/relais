@@ -46,6 +46,25 @@ class UserFact(SQLModel, table=True):
     fact_hash: str = Field(index=True)
 
 
+class MemoryFile(SQLModel, table=True):
+    """Fichier de mémoire long terme géré par le backend SouvenirBackend.
+
+    Chaque fichier est identifié par le couple ``(user_id, path)`` qui est
+    contraint à être unique — un upsert sur ce couple met à jour le contenu
+    existant plutôt que d'insérer un doublon.
+    """
+
+    __tablename__ = "memory_files"
+    __table_args__ = (UniqueConstraint("user_id", "path", name="uq_user_path"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    path: str = Field(index=True)
+    content: str
+    created_at: float = Field(default_factory=time.time)
+    modified_at: float = Field(default_factory=time.time)
+
+
 class ArchivedMessage(SQLModel, table=True):
     """Message archivé depuis le stream relais:messages:outgoing.
 

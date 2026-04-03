@@ -49,6 +49,7 @@ def _make_admin_record() -> UserRecord:
         Fully configured admin UserRecord.
     """
     return UserRecord(
+        user_id="usr_admin",
         display_name="Admin",
         role="admin",
         blocked=False,
@@ -70,6 +71,7 @@ def _make_user_record(actions: list[str] | None = None) -> UserRecord:
         Configured user UserRecord.
     """
     return UserRecord(
+        user_id="usr_user",
         display_name="User",
         role="user",
         blocked=False,
@@ -88,6 +90,7 @@ def _make_blocked_record() -> UserRecord:
         Blocked UserRecord with admin role.
     """
     return UserRecord(
+        user_id="usr_blocked",
         display_name="Blocked Admin",
         role="admin",
         blocked=True,

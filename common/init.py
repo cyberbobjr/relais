@@ -8,20 +8,19 @@ from .config_loader import get_relais_home
 DEFAULT_FILES = [
     ("config/config.yaml",          "config/config.yaml.default"),
     ("config/profiles.yaml",        "config/profiles.yaml.default"),
-    ("config/users.yaml",           "config/users.yaml.default"),
+    ("config/portail.yaml",           "config/portail.yaml.default"),
+    ("config/sentinelle.yaml",           "config/sentinelle.yaml.default"),
     ("config/mcp_servers.yaml",     "config/mcp_servers.yaml.default"),
     ("config/HEARTBEAT.md",         "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
     ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),
-    ("prompts/soul/variants/SOUL_concise.md",        "prompts/soul/variants/SOUL_concise.md.default"),
-    ("prompts/soul/variants/SOUL_professional.md",   "prompts/soul/variants/SOUL_professional.md.default"),
     # Channel formatting overlays (Layer 4) — named {channel}_default.md
     ("prompts/channels/whatsapp_default.md",  "prompts/channels/whatsapp_default.md"),
     ("prompts/channels/telegram_default.md",  "prompts/channels/telegram_default.md"),
-    # Reply-policy overlays (Layer 5) — named {policy}.md
-    ("prompts/policies/out_of_hours.md",  "prompts/policies/out_of_hours.md"),
-    ("prompts/policies/in_meeting.md",    "prompts/policies/in_meeting.md"),
-    ("prompts/policies/vacation.md",      "prompts/policies/vacation.md"),
+    # Reply-policy overlays (Layer 5)
+    ("prompts/policies/in_meeting.md",   "prompts/policies/in_meeting.md"),
+    ("prompts/policies/vacation.md",     "prompts/policies/vacation.md"),
+    ("prompts/policies/out_of_hours.md", "prompts/policies/out_of_hours.md"),
 ]
 
 def initialize_user_dir(system_install_path: Path | None = None):
@@ -47,7 +46,7 @@ def initialize_user_dir(system_install_path: Path | None = None):
         "prompts/policies",
         "prompts/roles",
         "prompts/users",
-        "skills/manual", "skills/auto",
+        "skills",
         "media", "logs", "backup", "storage",
     ]
     for d in dirs:
