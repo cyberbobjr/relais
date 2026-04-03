@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from common.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
+from atelier.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
 from atelier.agent_executor import _resolve_profile_model
 
 # Path to the actual project default profiles file (used for integration-style tests
 # that must verify the shipped configuration, not a fixture YAML).
-_DEFAULT_PROFILES_PATH = Path(__file__).parent.parent / "config" / "profiles.yaml.default"
+_DEFAULT_PROFILES_PATH = Path(__file__).parent.parent / "config" / "atelier" / "profiles.yaml.default"
 
 
 # ---------------------------------------------------------------------------
@@ -302,17 +302,17 @@ def test_load_profiles_raises_when_cascade_empty(monkeypatch: pytest.MonkeyPatch
     Args:
         monkeypatch: Pytest fixture for safe attribute patching.
     """
-    import common.profile_loader as _mod
+    import atelier.profile_loader as _mod
 
     monkeypatch.setattr(
         _mod,
         "resolve_config_path",
         lambda _filename: (_ for _ in ()).throw(
-            FileNotFoundError("profiles.yaml not found in config cascade")
+            FileNotFoundError("atelier/profiles.yaml not found in config cascade")
         ),
     )
 
-    with pytest.raises(FileNotFoundError, match="profiles.yaml not found"):
+    with pytest.raises(FileNotFoundError, match="atelier/profiles.yaml not found"):
         load_profiles()
 
 
@@ -337,7 +337,7 @@ def test_load_profiles_delegates_to_resolve_config_path(
         monkeypatch: Pytest fixture for safe attribute patching.
         tmp_path: Pytest-provided temporary directory.
     """
-    import common.profile_loader as _mod
+    import atelier.profile_loader as _mod
 
     controlled_yaml = tmp_path / "profiles.yaml"
     controlled_yaml.write_text(
@@ -363,8 +363,8 @@ def test_load_profiles_delegates_to_resolve_config_path(
 
     profiles = load_profiles()
 
-    assert calls == ["profiles.yaml"], (
-        "load_profiles() must call resolve_config_path('profiles.yaml') exactly once"
+    assert calls == ["atelier/profiles.yaml"], (
+        "load_profiles() must call resolve_config_path('atelier/profiles.yaml') exactly once"
     )
     assert profiles["default"].model == "cascade-delegated-model"
 

@@ -92,6 +92,7 @@ class SouvenirBackend(BackendProtocol):
             password = os.environ.get("REDIS_PASS_ATELIER") or os.environ.get("REDIS_PASSWORD")
             self._redis = redis_sync.Redis(
                 unix_socket_path=socket_path,
+                username="atelier",
                 password=password,
                 decode_responses=False,
             )

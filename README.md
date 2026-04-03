@@ -212,9 +212,12 @@ cd relais
 uv sync
 # ou : pip install -e .
 
-# 3. Initialiser le répertoire utilisateur (~/.relais/)
+# 3. Initialiser le répertoire utilisateur (`RELAIS_HOME`, par défaut `./.relais`)
 #    Crée la structure et copie tous les fichiers de configuration par défaut
 python -c "from common.init import initialize_user_dir; from pathlib import Path; initialize_user_dir(Path('.'))"
+
+# Optionnel : définir explicitement RELAIS_HOME avant les commandes ci-dessous
+export RELAIS_HOME="${RELAIS_HOME:-$(pwd)/.relais}"
 
 # 4. Appliquer les migrations SQLite (Souvenir)
 alembic upgrade head
@@ -228,18 +231,18 @@ cp .env.example .env
 
 ## Configuration
 
-Tous les fichiers de configuration se trouvent dans `~/.relais/config/` après l'initialisation. Ne modifiez jamais les fichiers sous `./config/` directement — ils servent de modèles.
+Tous les fichiers de configuration se trouvent dans `RELAIS_HOME/config/` après l'initialisation. Ne modifiez jamais les fichiers sous `./config/` directement — ils servent de modèles.
 
 ### Résolution de configuration (cascade)
 
-`~/.relais/config/` → `/opt/relais/config/` → `./config/`
+`RELAIS_HOME/config/` → `<INSTALL_CONFIG_DIR>/config/` → `./config/`
 
-Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (utile pour Docker ou multi-instance).
+Le premier fichier trouvé est utilisé. `RELAIS_HOME` permet de surcharger le répertoire utilisateur (utile pour Docker, CI ou multi-instance).
 
 ### Structure du répertoire utilisateur
 
 ```
-~/.relais/
+<RELAIS_HOME>/
 ├── config/
 │   ├── config.yaml          Configuration système principale
 │   ├── litellm.yaml         Modèles LLM et proxy
@@ -270,7 +273,7 @@ Le premier fichier trouvé est utilisé. `RELAIS_HOME` surcharge `~/.relais` (ut
 
 ```yaml
 redis:
-  unix_socket: ~/.relais/redis.sock   # Socket Unix Redis
+  unix_socket: <RELAIS_HOME>/redis.sock   # Socket Unix Redis
   password: "${REDIS_PASSWORD}"
 
 litellm:
@@ -291,10 +294,10 @@ security:
   max_message_size: 8192    # Taille max message entrant (octets)
 
 paths:
-  backup: ~/.relais/backup
-  media:  ~/.relais/media
-  skills: ~/.relais/skills
-  logs:   ~/.relais/logs
+  backup: <RELAIS_HOME>/backup
+  media:  <RELAIS_HOME>/media
+  skills: <RELAIS_HOME>/skills
+  logs:   <RELAIS_HOME>/logs
 ```
 
 ---
@@ -347,7 +350,7 @@ router_settings:
 
 Pour lancer le proxy manuellement :
 ```bash
-uv run --with "litellm[proxy]" litellm --config ~/.relais/config/litellm.yaml --port 4000
+uv run --with "litellm[proxy]" litellm --config "$RELAIS_HOME/config/litellm.yaml" --port 4000
 ```
 
 ---
@@ -560,7 +563,7 @@ channels:
 - `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["llm_profile"]` par l'Aiguilleur ; si absent, utilise `config.yaml > llm.default_profile`
 
 **Activation/désactivation sans redémarrage :**
-Modifier `enabled: true/false` dans `~/.relais/config/channels.yaml` et redémarrer AIGUILLEUR via supervisord (`supervisorctl restart aiguilleur`). Le changement ne demande pas la reconfiguration du reste du système.
+Modifier `enabled: true/false` dans `RELAIS_HOME/config/channels.yaml` et redémarrer AIGUILLEUR via supervisord (`supervisorctl restart aiguilleur`). Le changement ne demande pas la reconfiguration du reste du système.
 
 ---
 
@@ -602,7 +605,7 @@ mcp_servers:
 
 ### Personnalisation du system prompt
 
-L'Atelier assemble le system prompt à partir de **5 couches optionnelles** lues dans `~/.relais/prompts/`. Les fichiers manquants sont ignorés silencieusement — il suffit de créer ceux dont vous avez besoin.
+L'Atelier assemble le system prompt à partir de **5 couches optionnelles** lues dans `RELAIS_HOME/prompts/`. Les fichiers manquants sont ignorés silencieusement — il suffit de créer ceux dont vous avez besoin.
 
 | Couche | Répertoire | Convention de nom | Déclencheur |
 |--------|-----------|-------------------|-------------|
@@ -618,19 +621,19 @@ Les chemins des couches 2 et 3 sont des chemins relatifs configurés expliciteme
 
 ```
 # Personnalité — toujours active
-~/.relais/prompts/soul/SOUL.md
+<RELAIS_HOME>/prompts/soul/SOUL.md
 
 # Overlay pour le rôle "admin" — déclaré dans portail.yaml : roles.admin.prompt_path: "roles/admin.md"
-~/.relais/prompts/roles/admin.md
+<RELAIS_HOME>/prompts/roles/admin.md
 
 # Override personnel — déclaré dans portail.yaml : users.usr_xxx.prompt_path: "users/alice.md"
-~/.relais/prompts/users/alice.md
+<RELAIS_HOME>/prompts/users/alice.md
 
 # Formatage Telegram (canal "telegram")
-~/.relais/prompts/channels/telegram_default.md
+<RELAIS_HOME>/prompts/channels/telegram_default.md
 
 # Overlay activé quand reply_policy = "in_meeting"
-~/.relais/prompts/policies/in_meeting.md
+<RELAIS_HOME>/prompts/policies/in_meeting.md
 ```
 
 > **Variantes de personnalité** : `prompts/soul/variants/` contient des variantes livrées (`SOUL_concise.md`, `SOUL_professional.md`) que vous pouvez copier sur `prompts/soul/SOUL.md` pour changer la personnalité de base.
@@ -654,7 +657,7 @@ tasks:
   - cron: "0 3 * * 1"
     task: backup
     params:
-      destination: ~/.relais/backup/
+      destination: <RELAIS_HOME>/backup/
       retention_days: 30
     enabled: true
 
@@ -670,7 +673,7 @@ tasks:
 | `task` | Description | Params requis |
 |--------|-------------|---------------|
 | `daily_summary` | Génère et envoie un résumé LLM | `channel`, `llm_profile`, `prompt` |
-| `backup` | Sauvegarde `~/.relais/storage/` | `destination`, `retention_days` |
+| `backup` | Sauvegarde `RELAIS_HOME/storage/` | `destination`, `retention_days` |
 | `cleanup_logs` | Supprime les logs anciens | `max_age_days` |
 
 Pour désactiver sans supprimer : `enabled: false`.
@@ -682,7 +685,7 @@ Pour désactiver sans supprimer : `enabled: false`.
 | Variable | Description | Exemple |
 |----------|-------------|---------|
 | `ANTHROPIC_API_KEY` | Clé API directe vers Anthropic (utilisée par DeepAgents/LangChain) | `sk-ant-xxx` |
-| `REDIS_SOCKET_PATH` | Path socket Unix Redis | `~/.relais/redis.sock` |
+| `REDIS_SOCKET_PATH` | Path socket Unix Redis | `<RELAIS_HOME>/redis.sock` |
 | `REDIS_PASSWORD` | Mot de passe Redis admin — doit correspondre à `requirepass` dans `config/redis.conf` | |
 | `REDIS_PASS_PORTAIL` | Mot de passe brique Portail | |
 | `REDIS_PASS_SENTINELLE` | Mot de passe brique Sentinelle | |
@@ -691,7 +694,7 @@ Pour désactiver sans supprimer : `enabled: false`.
 | `DISCORD_BOT_TOKEN` | Token Discord bot | |
 | `TELEGRAM_BOT_TOKEN` | Token Telegram bot | |
 | `OPENROUTER_API_KEY` | Clé OpenRouter | |
-| `RELAIS_HOME` | Chemin alternatif à `~/.relais` | Optionnel |
+| `RELAIS_HOME` | Répertoire utilisateur RELAIS | Optionnel |
 
 ---
 
@@ -715,11 +718,28 @@ supervisorctl restart atelier
 Wrapper local :
 
 ```bash
+# Démarrer toutes les briques RELAIS
 ./supervisor.sh start all
+
+# Voir le statut des briques supervisées
 ./supervisor.sh status
+
+# Redémarrer toutes les briques
 ./supervisor.sh restart all
+
+# Vider les fichiers de logs dans .relais/logs
+./supervisor.sh clear
+
+# Arrêter toutes les briques et supervisord
 ./supervisor.sh stop all
 ```
+
+Le wrapper `supervisor.sh` centralise les commandes courantes RELAIS :
+
+- `./supervisor.sh start all` lance `supervisord` si nécessaire puis démarre toutes les briques.
+- `./supervisor.sh stop all` arrête les briques supervisées puis coupe `supervisord`.
+- `./supervisor.sh status` affiche l'état courant des services RELAIS.
+- `./supervisor.sh clear` supprime tous les fichiers présents dans `.relais/logs`.
 
 ### Option B : manuellement (développement)
 
@@ -740,20 +760,20 @@ uv run python archiviste/main.py
 
 ```bash
 # Inspecter les streams Redis
-redis-cli -s ~/.relais/redis.sock XLEN relais:messages:incoming
-redis-cli -s ~/.relais/redis.sock XLEN relais:security
-redis-cli -s ~/.relais/redis.sock XLEN relais:tasks
+redis-cli -s "$RELAIS_HOME/redis.sock" XLEN relais:messages:incoming
+redis-cli -s "$RELAIS_HOME/redis.sock" XLEN relais:security
+redis-cli -s "$RELAIS_HOME/redis.sock" XLEN relais:tasks
 
 # Messages en attente (PEL) par brique
-redis-cli -s ~/.relais/redis.sock XPENDING relais:messages:incoming portail_group
-redis-cli -s ~/.relais/redis.sock XPENDING relais:security sentinelle_group
-redis-cli -s ~/.relais/redis.sock XPENDING relais:tasks atelier_group
+redis-cli -s "$RELAIS_HOME/redis.sock" XPENDING relais:messages:incoming portail_group
+redis-cli -s "$RELAIS_HOME/redis.sock" XPENDING relais:security sentinelle_group
+redis-cli -s "$RELAIS_HOME/redis.sock" XPENDING relais:tasks atelier_group
 
 # Voir le contenu d'un stream
-redis-cli -s ~/.relais/redis.sock XRANGE relais:tasks - +
+redis-cli -s "$RELAIS_HOME/redis.sock" XRANGE relais:tasks - +
 
 # Suivre les logs JSON
-tail -f ~/.relais/logs/events.jsonl
+tail -f "$RELAIS_HOME/logs/events.jsonl"
 ```
 
 ---

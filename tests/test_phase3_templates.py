@@ -32,10 +32,11 @@ def _project_file(relative: str) -> Path:
 
 CONFIG_YAML_DEFAULTS = [
     "config/config.yaml.default",
-    "config/profiles.yaml.default",
+    "config/atelier/profiles.yaml.default",
     "config/portail.yaml.default",
     "config/sentinelle.yaml.default",
-    "config/mcp_servers.yaml.default",
+    "config/atelier/mcp_servers.yaml.default",
+    "config/atelier.yaml.default",
 ]
 
 CONFIG_MD_DEFAULTS = [

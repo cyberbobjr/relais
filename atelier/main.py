@@ -23,7 +23,7 @@ Key classes:
   and filters MCP tool definitions (enforces ``mcp_max_tools``).
 * ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
   system prompt from soul / role / user / channel / policy prompt files.
-* ``ProfileConfig`` — loaded from profiles.yaml; selects model, temperature,
+* ``ProfileConfig`` — loaded from atelier/profiles.yaml; selects model, temperature,
   max_tokens, mcp_timeout, mcp_max_tools per request.
 * ``StreamPublisher`` — publishes streaming entries to
   ``relais:messages:streaming:{channel}:{corr_id}`` (type ``token`` for text
@@ -96,7 +96,7 @@ logging.basicConfig(
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
-from common.profile_loader import load_profiles, resolve_profile
+from atelier.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
 from atelier.agent_executor import AgentExecutor, AgentExecutionError
@@ -104,6 +104,7 @@ from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
+from atelier.progress_config import load_progress_config
 from common.config_loader import resolve_prompts_dir, resolve_skills_dir
 from aiguilleur.channel_config import load_channels_config
 from atelier.tool_policy import ToolPolicy
@@ -143,6 +144,7 @@ class Atelier:
         # per message for resources that do not change during the process lifetime.
         self._profiles = load_profiles()
         self._mcp_servers_default = load_for_sdk()
+        self._progress_config = load_progress_config()
 
         # Channels that support incremental chunk streaming — loaded here
         # (not at module level) so tests can import atelier.main without
@@ -270,6 +272,7 @@ class Atelier:
                     channel=envelope.channel,
                     correlation_id=envelope.correlation_id,
                     source_envelope=envelope,
+                    progress_config=self._progress_config,
                 )
                 if streaming:
                     await redis_conn.publish(

@@ -274,13 +274,13 @@ Ce champ est présent sur toutes les enveloppes enrichies. L'Atelier le lit via 
 ### Phase 0 — Initialization utilisateur (synchrone, par brick)
 
 **Chaque brick exécute `initialize_user_dir()` au démarrage:**
-- Crée `~/.relais/` si absent
+- Crée `RELAIS_HOME/` si absent
 - Copie fichiers de config par défaut (idempotent)
 - Lance avant `asyncio.run()` — garantit structure avant async
 
 Aucune coordination requise: appels concurrents sont sûrs (idempotent, basé sur existence de fichiers).
 
-### Supervisord priorities (après ~/. relais/ prêt)
+### Supervisord priorities (après `RELAIS_HOME/` prêt)
 
 ```
 Priority 1 (infra basique)
@@ -370,8 +370,8 @@ Atelier utilise la configuration de résilience définie dans `profiles.yaml` (c
 
 Chaque brick charge config.yaml en ce ordre:
 
-1. `~/.relais/config/config.yaml` (utilisateur)
-2. `/opt/relais/config/config.yaml` (système)
+1. `RELAIS_HOME/config/config.yaml` (utilisateur)
+2. `<INSTALL_CONFIG_DIR>/config/config.yaml` (système)
 3. `./config/config.yaml` (projet)
 
 **Premier trouvé gagne.**
@@ -383,7 +383,7 @@ Chaque brick charge config.yaml en ce ordre:
 | Portail | `config.yaml`, `portail.yaml` (via `portail.UserRegistry`) |
 | Sentinelle | `config.yaml`, `sentinelle.yaml`, `guardrails.yaml` |
 | Atelier | `config.yaml`, `profiles.yaml`, `soul/SOUL.md`, `mcp_servers.yaml` |
-| Souvenir | `config.yaml`, `~/.relais/storage/memory.db` (SQLite via Alembic) |
+| Souvenir | `config.yaml`, `RELAIS_HOME/storage/memory.db` (SQLite via Alembic) |
 | Archiviste | `config.yaml` (retention policy) |
 | Aiguilleur | `config.yaml`, `aiguilleur/{canal}.yaml` |
 
@@ -413,21 +413,21 @@ config.yaml > llm.default_profile   (fallback système)
 from common.config_loader import get_relais_home, resolve_config_path, resolve_storage_dir
 
 # Répertoire utilisateur (respect de RELAIS_HOME env var)
-home = get_relais_home()            # ~/.relais  (ou $RELAIS_HOME si défini)
+home = get_relais_home()            # RELAIS_HOME (ou sa valeur par défaut)
 
 # Résolution de fichier de config avec cascade
-path = resolve_config_path("portail.yaml")   # cascade: ~/.relais/config/ → /opt/relais/config/ → ./config/
+path = resolve_config_path("portail.yaml")   # cascade: RELAIS_HOME/config/ → <INSTALL_CONFIG_DIR>/config/ → ./config/
 
 # Répertoire de stockage persistant (SQLite, etc.)
-storage = resolve_storage_dir()     # ~/.relais/storage/  (créé si absent)
+storage = resolve_storage_dir()     # RELAIS_HOME/storage/  (créé si absent)
 ```
 
-Toutes les briques utilisent `resolve_config_path()` et `resolve_storage_dir()` — **jamais** `Path.home() / ".relais"` directement.
+Toutes les briques utilisent `resolve_config_path()` et `resolve_storage_dir()` — **jamais** un chemin absolu utilisateur codé en dur.
 La variable d'environnement `RELAIS_HOME` permet de dérouter vers un autre chemin (Docker, multi-instance, CI).
 
 ### Initialisation des répertoires utilisateur
 
-**Au premier lancement de TOUT brick** (Portail, Sentinelle, Atelier, Souvenir, Archiviste, Aiguilleur/Discord, etc.), la structure `~/.relais/` est **auto-créée et pré-peuplée** — aucune configuration manuelle requise.
+**Au premier lancement de TOUT brick** (Portail, Sentinelle, Atelier, Souvenir, Archiviste, Aiguilleur/Discord, etc.), la structure `RELAIS_HOME/` est **auto-créée et pré-peuplée** — aucune configuration manuelle requise.
 
 Chaque brick appelle `initialize_user_dir()` **synchroniquement** dans son `__main__` block, **avant** `asyncio.run()`:
 
@@ -658,7 +658,7 @@ depuis `envelope.metadata["user_record"]`, stampé en amont par le Portail.
 **Mode permissif** : si aucun `sentinelle.yaml` n'est trouvé, l'ACL est désactivée avec un WARNING.
 
 ```yaml
-# ~/.relais/config/sentinelle.yaml
+# RELAIS_HOME/config/sentinelle.yaml
 access_control:
   default_mode: allowlist       # "allowlist" | "blocklist"
   channels:                     # Surcharges optionnelles par canal
@@ -700,7 +700,7 @@ elif result.modified_text:
 ```bash
 supervisorctl logs portail       # Logs Portail
 supervisorctl logs atelier -f    # Follow logs Atelier
-tail -f ~/.relais/logs/atelier.log  # Direct file
+tail -f "$RELAIS_HOME/logs/atelier.log"  # Direct file
 ```
 
 ### Alertes Scrutateur (phase 6)
@@ -745,7 +745,7 @@ Le schéma de SQLite est géré par Alembic. Le chemin de la base de données es
 ```bash
 # Appliquer toutes les migrations (production)
 alembic upgrade head
-# (Utilise automatiquement ~/.relais/storage/memory.db ou $RELAIS_HOME/storage/memory.db)
+# (Utilise automatiquement RELAIS_HOME/storage/memory.db)
 
 # Overrider le chemin si nécessaire (rare)
 RELAIS_DB_PATH=/custom/path/memory.db alembic upgrade head
@@ -1015,7 +1015,7 @@ pytest tests/test_commandant.py::test_handle_help_lists_all_command_names -v
 
 ### ACL denied?
 
-1. Vérifier `~/.relais/config/portail.yaml` (utilisateurs/rôles) et `~/.relais/config/sentinelle.yaml` (ACL)
+1. Vérifier `RELAIS_HOME/config/portail.yaml` (utilisateurs/rôles) et `RELAIS_HOME/config/sentinelle.yaml` (ACL)
 2. Logs Sentinelle: grep "acl_denied"
 3. Message en DLQ, chercher raison
 

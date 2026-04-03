@@ -795,7 +795,7 @@ async def test_deliver_outgoing_sends_multiple_parts_for_long_message():
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_deliver_outgoing_progress_tool_call_sends_notification():
-    """A progress envelope with event='tool_call' triggers a [outil en cours: ...] send."""
+    """A progress envelope with event='tool_call' triggers a send with event and detail."""
     from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     env = Envelope(
@@ -824,14 +824,14 @@ async def test_deliver_outgoing_progress_tool_call_sends_notification():
 
     mock_channel.send.assert_called_once()
     sent_text = mock_channel.send.call_args.args[0]
-    assert "outil en cours" in sent_text
+    assert "tool_call" in sent_text
     assert "web_search" in sent_text
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_deliver_outgoing_progress_tool_result_skipped():
-    """A progress envelope with event='tool_result' must NOT call channel.send."""
+async def test_deliver_outgoing_progress_tool_result_sends_notification():
+    """A progress envelope with event='tool_result' triggers a send with event and detail."""
     from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
 
     env = Envelope(
@@ -858,7 +858,10 @@ async def test_deliver_outgoing_progress_tool_result_skipped():
 
         await client._deliver_outgoing_message({"payload": env.to_json()})
 
-    mock_channel.send.assert_not_called()
+    mock_channel.send.assert_called_once()
+    sent_text = mock_channel.send.call_args.args[0]
+    assert "tool_result" in sent_text
+    assert "some result" in sent_text
 
 
 @pytest.mark.asyncio

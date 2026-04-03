@@ -351,11 +351,11 @@ class _RelaisDiscordClient(discord.Client):
             channel: Discord channel or DM to send the notification to.
         """
         event = envelope.metadata.get("progress_event", "")
-        if event != "tool_call":
+        if not event:
             return
         detail = envelope.metadata.get("progress_detail", "")
         try:
-            await channel.send(f"[outil en cours : {detail}]")
+            await channel.send(f"{event} : [{detail}]")
         except Exception as exc:
             logger.debug("Progress event delivery failed (ignored): %s", exc)
 

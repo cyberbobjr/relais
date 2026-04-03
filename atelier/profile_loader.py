@@ -1,7 +1,8 @@
-"""Profile loader — shared by Atelier and Souvenir bricks.
+"""Profile loader — Atelier brick.
 
 Reads LLM profiles from a YAML configuration file following the standard
 config cascade: ~/.relais/config/ > /opt/relais/config/ > ./config/.
+The profiles file is located at atelier/profiles.yaml in the config cascade.
 """
 
 from __future__ import annotations
@@ -106,14 +107,14 @@ def load_profiles(
 
     Raises:
         FileNotFoundError: config_path provided but does not exist, or no
-            profiles.yaml found in the config cascade.
+            atelier/profiles.yaml found in the config cascade.
         KeyError: The YAML file is missing the top-level 'profiles' key.
         yaml.YAMLError: The file content is not valid YAML.
     """
     if config_path is not None:
         resolved = Path(config_path)
     else:
-        resolved = resolve_config_path("profiles.yaml")
+        resolved = resolve_config_path("atelier/profiles.yaml")
 
     raw_text = resolved.read_text(encoding="utf-8")
     data = yaml.safe_load(raw_text)

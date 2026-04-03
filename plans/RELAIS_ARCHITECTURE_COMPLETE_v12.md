@@ -11,7 +11,7 @@
 ## Table des matières
 
 1. Vision & Objectifs
-2. Répertoire utilisateur — ~/.relais/
+2. Répertoire utilisateur — RELAIS_HOME
 3. Convention de nommage
 4. Taxonomie des briques
 5. Les Briques — tableau d'ensemble
@@ -21,7 +21,7 @@
 9. Le Portail — routage & politique de réponse
 10. La Sentinelle — sécurité & profils
 11. L'Atelier — exécution des agents, résilience LLM, outils internes
-12. Le Souvenir — mémoire, compaction, pagination
+12. Le Souvenir — mémoire, fichiers persistants, archivage
 13. L'Archiviste — logs & audit
 14. Le Commandant — commandes globales hors-LLM
 15. Corrélation end-to-end
@@ -58,44 +58,50 @@ Mac Mini M4 Pro 48 Go — machine dédiée, toujours allumée. Migration Linux/V
 
 ---
 
-## 2. Répertoire utilisateur — ~/.relais/
+## 2. Répertoire utilisateur — RELAIS_HOME
 
 ### Convention
 
-Toute la configuration personnalisée, les skills, les logs et les médias sont stockés dans le répertoire du **compte qui lance RELAIS**. Ce pattern suit la convention Unix/XDG — les applications daemon ne polluent pas l'installation système avec des données utilisateur.
+Toute la configuration personnalisée, les skills, les logs et les médias sont stockés dans `RELAIS_HOME`, résolu par `common/config_loader.py`.
+
+Comportement actuel du code :
+- si `RELAIS_HOME` est défini, il est utilisé tel quel
+- sinon, le défaut est `./.relais` à la racine du repo
+
+La documentation ci-dessous décrit donc le répertoire logique `RELAIS_HOME`, sans supposer un chemin local particulier.
 
 ```
-~/.relais/                        ← RELAIS_HOME (défaut)
+<RELAIS_HOME>/
 │
 ├── config/
-│   ├── config.yaml               ← surcharge /opt/relais/config/config.yaml
+│   ├── config.yaml               ← surcharge <INSTALL_CONFIG_DIR>/config/config.yaml
 │   ├── profiles.yaml             ← profils personnalisés
 │   ├── portail.yaml              ← registry utilisateurs + rôles (Portail)
 │   ├── sentinelle.yaml           ← ACL Sentinelle (access_control + groups)
 │   ├── mcp_servers.yaml          ← MCP servers additionnels
 │   └── HEARTBEAT.md              ← tâches planifiées personnalisées
 │
-├── soul/
-│   ├── SOUL.md                   ← personnalité JARVIS personnalisée
-│   └── variants/
-│       ├── SOUL_concise.md
-│       └── SOUL_professional.md
-│
-├── prompts/                      ← prompts de tâche personnalisés
-│   ├── marie.md
-│   └── family.md
+├── prompts/
+│   ├── soul/
+│   │   ├── SOUL.md               ← personnalité chargée par SoulAssembler
+│   │   └── variants/
+│   │       ├── SOUL_concise.md
+│   │       └── SOUL_professional.md
+│   ├── channels/
+│   ├── policies/
+│   ├── roles/
+│   └── users/
 │
 ├── skills/
-│   ├── manual/                   ← skills écrits à la main par l'utilisateur
-│   │   └── SKILL_my_custom.md
-│   └── auto/                     ← skills auto-générés par Le Forgeron
-│       └── SKILL_auto_mr_review_20260327.md
+│   └── CLAUDE.md                 ← registre créé par initialize_user_dir()
 │
 ├── media/                        ← fichiers médias temporaires (TTL 24h)
 │
 ├── logs/                         ← L'Archiviste écrit ici
-│   ├── relais.db                 ← SQLite L'Archiviste
-│   └── YYYY-MM-DD.jsonl          ← JSONL rotatifs
+│   └── events.jsonl
+│
+├── storage/
+│   └── memory.db                 ← SQLite Souvenir
 │
 └── backup/                       ← backups locaux (si backup.path non configuré)
 ```
@@ -103,28 +109,27 @@ Toute la configuration personnalisée, les skills, les logs et les médias sont 
 ### Cascade de résolution
 
 ```
-1. ~/.relais/config/     ← config utilisateur (priorité maximale)
-2. /opt/relais/config/   ← installation système
+1. RELAIS_HOME/config/   ← config utilisateur (priorité maximale)
+2. <INSTALL_CONFIG_DIR>/config/   ← installation système
 3. ./config/             ← répertoire courant (mode dev)
 ```
 
-La variable `RELAIS_HOME` permet de surcharger `~/.relais/` explicitement (ex: `/srv/relais` en production, `/tmp/relais-test` pour les tests d'intégration).
+La variable `RELAIS_HOME` permet de surcharger explicitement le répertoire de travail (ex: `/srv/relais` en production, `/tmp/relais-test` pour les tests d'intégration).
 
 ### Initialisation au premier lancement
 
-Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers `.default` depuis `/opt/relais/`. Les fichiers déjà présents ne sont jamais écrasés — l'opération est idempotente.
+Au démarrage, RELAIS crée automatiquement `RELAIS_HOME/` et y copie les fichiers `.default` disponibles depuis l'installation courante. Les fichiers déjà présents ne sont jamais écrasés — l'opération est idempotente.
 
 ### Impact par brique
 
 | Brique | Ce qui change |
 |---|---|
-| L'Archiviste | Écrit dans `~/.relais/logs/` |
-| Le Forgeron | Lit/écrit dans `~/.relais/skills/auto/` |
-| L'Atelier | Charge les skills depuis `~/.relais/skills/` |
-| Le Souvenir | DB dans `~/.relais/storage/memory.db` |
-| Le Portail | Charge `~/.relais/config/portail.yaml` (UserRegistry — users + rôles fusionnés) |
-| Le Vigile | Charge `~/.relais/soul/SOUL.md` pour hot reload |
-| Le Veilleur | Lit `~/.relais/config/HEARTBEAT.md` + backup vers `~/.relais/backup/` |
+| L'Archiviste | Écrit dans `RELAIS_HOME/logs/` |
+| L'Atelier | Charge les skills depuis `RELAIS_HOME/skills/` |
+| Le Souvenir | DB dans `RELAIS_HOME/storage/memory.db` |
+| Le Portail | Charge `RELAIS_HOME/config/portail.yaml` |
+| SoulAssembler | Charge `RELAIS_HOME/prompts/` si présent |
+| Le Veilleur | Planifié ; lirait `RELAIS_HOME/config/HEARTBEAT.md` |
 | Tous | Config chargée via cascade automatique |
 
 ---
@@ -182,13 +187,13 @@ Au démarrage, RELAIS crée automatiquement `~/.relais/` et y copie les fichiers
 
 | Brique | Module | Taxonomie | Rôle | Streams |
 |---|---|---|---|---|
-| 🚦 **L'Aiguilleur** | `aiguilleur/` | Relay | Adaptateur de canaux — processus unifié | ← `outgoing:{ch}` / → `incoming:{ch}` |
-| 🏛️ **Le Portail** | `portail/` | Transformer | Routage, identification, politique | ← `incoming:{ch}` / → `security` |
-| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, profils, guardrails (bidirectionnel) | ← `security` / → `tasks` ; ← `outgoing_pending` / → `outgoing:{ch}` |
+| 🚦 **L'Aiguilleur** | `aiguilleur/` | Relay | Adaptateur de canaux — processus unifié | ← `relais:messages:outgoing:{channel}` / → `relais:messages:incoming` |
+| 🏛️ **Le Portail** | `portail/` | Transformer | Résolution d'identité et enrichissement `user_record` | ← `relais:messages:incoming` / → `relais:security` |
+| 🛡️ **La Sentinelle** | `sentinelle/` | Transformer | ACL, routage commandes/messages, pass-through sortant | ← `relais:security` / → `relais:tasks`,`relais:commands` ; ← `relais:messages:outgoing_pending` / → `relais:messages:outgoing:{channel}` |
 | 📨 **Le Coursier** | Redis | Infrastructure | Bus messages Unix socket | — |
-| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `tasks` / → `outgoing_pending`, `tasks:failed` |
-| 💭 **Le Souvenir** | `souvenir/` | Stream Consumer | Mémoire contexte + longue durée | ← `memory:request` + `outgoing:*` / → `memory:response` |
-| 📚 **L'Archiviste** | `archiviste/` | Pure Observer | Logs → JSONL + SQLite | ← `logs` + `events:*` (pubsub) |
+| ⚒️ **L'Atelier** | `atelier/` | Stream Consumer | Exécution agents LLM | ← `relais:tasks` / → `relais:messages:outgoing_pending`,`relais:messages:streaming:{channel}:{corr}`,`relais:tasks:failed`,`relais:memory:request`,`relais:logs` |
+| 💭 **Le Souvenir** | `souvenir/` | Stream Consumer | Contexte Redis, archivage SQLite, fichiers mémoire persistants | ← `relais:memory:request` + `relais:messages:outgoing:{channel}` / → `relais:memory:response` |
+| 📚 **L'Archiviste** | `archiviste/` | Pure Observer | Audit JSONL + observation pipeline | ← `relais:logs`,`relais:events:*`,`relais:messages:incoming`,`relais:security`,`relais:tasks`,`relais:tasks:failed`,`relais:messages:outgoing:discord` |
 
 ### Briques planifiées
 
@@ -203,7 +208,7 @@ Voir section 23 pour le détail fonctionnel.
 | 📊 **Le Tableau** | `tableau/` | Admin + Relay | TUI bidirectionnel |
 | 🧵 **Le Tisserand** | `tisserand/` | Interceptor Chain | Extensions in-process |
 | 🔍 **Le Scrutateur** | `scrutateur/` | Pure Observer | Prometheus + Loki + ES |
-| 🎮 **Le Commandant** | `commandant/` | Transformer | Commandes globales hors-LLM (`/clear`) |
+| 🎮 **Le Commandant** | `commandant/` | Transformer | Commandes globales hors-LLM (`/clear`, `/help`) |
 
 ---
 
@@ -219,7 +224,7 @@ Voir section 23 pour le détail fonctionnel.
 | 20 | `relays` | L'Aiguilleur (processus unifié) |
 | 30 | — | Le Tableau (local, à la demande, `autostart=false`) |
 
-Toutes les briques loggent dans `~/.relais/logs/` via `stdout_logfile` supervisord.
+Toutes les briques loggent dans `RELAIS_HOME/logs/` via `stdout_logfile` supervisord.
 
 ### MCP servers lifecycle — modèle hybride
 
@@ -258,6 +263,9 @@ mcp_servers:
 
   # Serveurs contextuels — activés selon le profil actif
   contextual:
+```
+
+> **Note as-built :** le cycle de vie décrit ici correspond au loader et au session manager actuels. Les exemples `mcp-calendar`, `mcp-brave-search`, `mcp__jcodemunch`, `mcp__gitlab` sont illustratifs ; la source de vérité des serveurs réellement actifs reste `config/mcp_servers.yaml`.
     - name: code-tools
       enabled: true
       type: stdio
@@ -344,8 +352,8 @@ STREAMS (at-least-once — perte inacceptable)
   relais:tasks:failed                   Atelier → DLQ (AgentExecutionError exhausted)
   relais:memory:request                 Atelier → Souvenir
   relais:memory:response                Souvenir → Atelier
-  relais:messages:incoming:{channel}    Aiguilleur → Portail
-  relais:messages:outgoing_pending            Atelier → Sentinelle (outgoing pass-through)
+  relais:messages:incoming              Aiguilleur → Portail
+  relais:messages:outgoing_pending      Atelier → Sentinelle (outgoing pass-through)
   relais:messages:outgoing:{channel}    Sentinelle → Aiguilleur + Souvenir (observer)
   relais:messages:streaming:{ch}:{corr} Atelier → Aiguilleur (progressive chunks)
   relais:security                       Portail ↔ Sentinelle
@@ -355,17 +363,16 @@ STREAMS (at-least-once — perte inacceptable)
 LISTS (fast cache — volatile)
   relais:context:{session_id}           Souvenir stores (RPUSH/LTRIM), Atelier reads
 
+HASHES / KEYS
+  relais:active_sessions:{sender_id}    Portail stores (HSET + TTL 1h)
+
 PUB/SUB (fire & forget — perte acceptable)
-  relais:messages:incoming       Aiguilleur → Portail
-  relais:messages:outgoing:{ch}  → Aiguilleur cible
-  relais:push:{urgency}          Toutes → Crieur
-  relais:notifications:{role}    Crieur → Aiguilleurs
-  relais:active_sessions:*       Portail → (Crieur lit)
-  relais:events:*                Monitoring — Scrutateur
-  relais:admin:*                 Vigile ↔ Briques
-  relais:admin:reload            Vigile → Briques (hot reload)
-  relais:webhooks:*              Aiguilleur/rest → Crieur/Atelier
-  relais:media:*                 Aiguilleur → Portail (métadonnées médias)
+  relais:streaming:start:{channel}      Atelier → adaptateur du canal
+  relais:events:system                  Événements système observés par Archiviste
+  relais:events:messages                Événements messages observés par Archiviste
+  relais:push:{urgency}                 Planifié — Crieur
+  relais:notifications:{role}           Planifié — Crieur
+  relais:admin:*                        Planifié — Vigile
 ```
 
 ---
@@ -381,19 +388,11 @@ L'Aiguilleur est un **processus unique** (`aiguilleur/main.py`) qui gère tous l
 - **Restart automatique** — backoff exponentiel `min(2^restart_count, 30)` secondes, `max_restarts` configurable
 - **Découverte automatique** — convention `aiguilleur.channels.{name}.adapter.{Name}Aiguilleur`, surchargeable via `class_path`
 
-### Deux responsabilités à la sortie
+### État d'implémentation des canaux
 
-L'Aiguilleur fait la conversion Markdown à la **sortie uniquement** (réponses vers le canal). Chaque adaptateur connaît les règles syntaxiques de son canal :
+Le repo contient aujourd'hui un seul adaptateur concret : `aiguilleur/channels/discord/adapter.py`.
 
-| Canal | Conversion |
-|---|---|
-| Discord | Passthrough (Markdown standard natif) |
-| Telegram | Markdown → MarkdownV2 |
-| Slack | Markdown → mrkdwn |
-| WhatsApp | Strip (pas de Markdown) |
-| Signal | Strip |
-| REST | Passthrough (brut, client gère le rendu) |
-| TUI | Passthrough (Textual rend le Markdown) |
+Les autres canaux visibles dans `channels.yaml.default` sont des cibles de configuration ou des placeholders de supervision ; ils ne correspondent pas à des adaptateurs présents dans le code à ce stade.
 
 ### Configuration des canaux via `channels.yaml`
 
@@ -401,7 +400,7 @@ L'Aiguilleur fait la conversion Markdown à la **sortie uniquement** (réponses 
 channels:
   discord:
     enabled: true                    # Activé/désactivé
-    streaming: true                  # Streaming progressif support
+    streaming: false                 # Discord final-only dans l'implémentation actuelle
     type: native                     # "native" (Python, thread+asyncio) | "external" (subprocess)
     class_path: null                 # Override : "aiguilleur.channels.discord.adapter.DiscordAiguilleur"
     max_restarts: 5
@@ -452,28 +451,36 @@ channels:
 - `type` — `native` (thread Python + asyncio) ou `external` (subprocess)
 - `class_path` — override de la classe adaptateur
 - `max_restarts` — max avant abandon, restart avec backoff exponentiel
-- `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["llm_profile"]` par l'Aiguilleur au moment de la création de l'enveloppe entrante ; si absent, l'Aiguilleur lit `config.yaml > llm.default_profile` (fallback `"default"`)
+- `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["channel_profile"]` par l'Aiguilleur au moment de la création de l'enveloppe entrante ; si absent, l'Aiguilleur lit `config.yaml > llm.default_profile` (fallback `"default"`)
 
-> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.metadata["llm_profile"]` — pas la Sentinelle. La Sentinelle n'écrit jamais ce champ.
+> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.metadata["channel_profile"]`. Le Portail résout ensuite ce profil effectif dans `user_record.llm_profile`. La Sentinelle n'écrit jamais ce champ.
 - `command`/`args` — requis pour `type: external` uniquement
 
 ### Tableau des canaux
 
-| Canal | Lib | Markdown | Auto-start | Auth |
-|---|---|---|---|---|
-| Telegram | python-telegram-bot ≥ 21 | MarkdownV2 | Oui | Bot token |
-| Discord | discord.py ≥ 2.4 | Standard | Oui | Bot token |
-| Slack | slack-bolt Python | mrkdwn | Non | OAuth |
-| Matrix | matrix-nio ≥ 0.24 | HTML/MD | Non | Homeserver |
-| Teams | botbuilder-python ≥ 4.x | Adaptive Cards | Non | Azure App |
-| REST | FastAPI | Brut (passthrough) | Oui | API Key |
-| TUI | Textual | Standard | Non | Local |
-| WhatsApp | Baileys (Node.js) | Strip | Oui | QR code |
-| Signal | signal-cli | Strip | Non | Numéro dédié |
+| Canal | Statut repo | Notes |
+|---|---|---|
+| Discord | Implémenté | `discord.py`, réception mentions/DM, indicateur de frappe, sortie finale |
+| Telegram | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
+| Slack | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
+| REST | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
+| TUI | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
+| WhatsApp | Exemple externe | Exemple de config `type: external`, pas de code livré |
 
 ### Streaming progressif — édition temps réel
 
-Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier publie les chunks token-par-token et les événements de progression dans `relais:messages:streaming:{channel}:{correlation_id}`. L'Aiguilleur envoie un message placeholder, lit les chunks en boucle, et édite le message progressivement. Un flag `is_final` signale la fin du stream. Les entrées portent un champ `type` : `token` pour les fragments texte, `progress` pour les événements pipeline (tool_call, tool_result, subagent_start). Les événements `progress` sont aussi publiés sur `relais:messages:outgoing:{channel}` (Envelope avec `metadata["message_type"]="progress"`) pour que les adaptateurs non-streaming (Discord) affichent des indicateurs UX pendant les appels d'outils.
+L'Atelier publie les chunks token-by-token et les événements de progression dans `relais:messages:streaming:{channel}:{correlation_id}` via `StreamPublisher`.
+
+Dans l'état actuel du code :
+- Discord n'édite pas de message en temps réel ; il envoie une réponse finale sur `relais:messages:outgoing:discord`
+- l'adaptateur Discord maintient un indicateur de frappe tant que la requête est en vol
+- `StreamPublisher.push_progress()` publie aussi des enveloppes `message_type=progress` sur `relais:messages:outgoing:{channel}` pour les canaux non-streaming
+- un signal Pub/Sub `relais:streaming:start:{channel}` est émis au début d'un stream
+
+Chaque entrée du stream de streaming contient :
+- `type=token` ou `type=progress`
+- `seq`
+- `is_final`
 
 ---
 
@@ -481,9 +488,15 @@ Pour les canaux supportant l'édition de messages (Discord, Telegram), L'Atelier
 
 ### Rôle
 
-Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` et `RoleRegistry` (portail.yaml), enrichit l'enveloppe avec les métadonnées contextuelles (`user_role`, `display_name`, `llm_profile`, `custom_prompt_path`, `skills_dirs`, `allowed_mcp_tools`), met à jour le registre des sessions actives (`relais:active_sessions:{user_id}` — TTL 1h), applique la politique de réponse (vacation, in_meeting) et route **tout message accepté** vers La Sentinelle — y compris les commandes slash. Le Portail ne filtre pas les commandes et ne gère pas d'état DND.
+Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserRegistry` (`portail.yaml`), enrichit l'enveloppe avec une identité consolidée, met à jour le registre des sessions actives, puis route tout message accepté vers La Sentinelle.
 
-**`unknown_user_policy`** (champ `config.yaml:security:unknown_user_policy`) :
+Champs réellement écrits aujourd'hui :
+- `metadata.user_record` — dict sérialisé `UserRecord`
+- `metadata.user_id` — raccourci stable cross-canal
+
+Le Portail n'écrit pas de clés top-level `user_role`, `display_name`, `custom_prompt_path`, `skills_dirs` ou `allowed_mcp_tools` ; ces données vivent dans `metadata.user_record`.
+
+**`unknown_user_policy`** (champ top-level de `portail.yaml`) :
 - `deny` (défaut) : drop silencieux
 - `guest` : stamp identité guest synthétique, rôle `guest` (accès restreint)
 - `pending` : publie l'enveloppe sur `relais:admin:pending_users` pour validation manuelle, puis drop
@@ -497,7 +510,7 @@ Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserReg
 **Architecture clarifiée :**
 
 1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `portail.yaml`, stampe `envelope.metadata["user_record"]` (dict `UserRecord` fusionné — rôle + utilisateur, incluant `user_id`) et `envelope.metadata["user_id"]` (raccourci stable cross-canal, égal à la clé YAML, ex : `"usr_admin"`). Portail est le **seul écrivain** de l'identité utilisateur. `user_id` permet aux briques aval (Souvenir, Atelier) de reprendre une conversation quelque soit le canal d'origine sans connaître le `sender_id` spécifique au canal.
-2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : lit `user_record` depuis `envelope.metadata` (chargé par Portail), vérifie `blocked`, bifurque commandes et messages normaux, applique guardrails (bidirectionnel). Config ACL dans `sentinelle.yaml`.
+2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : lit `user_record` depuis `envelope.metadata` (chargé par Portail), bifurque commandes et messages normaux, puis republie le flux sortant. Config ACL dans `sentinelle.yaml`.
 
 > **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
 > En flux entrant, elle valide l'ACL et bifurque :
@@ -506,7 +519,9 @@ Le Portail valide le format Envelope entrant, résout l'utilisateur via `UserReg
 > - **Commande inconnue** → réponse inline `"Commande inconnue : /xxx"`, ACK sans forward
 > - **Commande non autorisée** → réponse inline `"Vous n'avez pas la permission d'exécuter /xxx"`, ACK sans forward
 >
-> En flux sortant, elle consomme `relais:messages:outgoing_pending`, applique les guardrails sortants, et publie vers `relais:messages:outgoing:{channel}`.
+> En flux sortant, elle consomme `relais:messages:outgoing_pending`, applique actuellement un pass-through, et publie vers `relais:messages:outgoing:{channel}`.
+
+> **Divergence connue :** le pipeline porte aujourd'hui une incohérence de vocabulaire entre `server` côté Discord et `group` côté Sentinelle/ACL. Le document décrit donc seulement le comportement observé, sans affirmer une matrice contextuelle harmonisée tant que le code n'est pas unifié.
 
 ### Les 3 rôles humains
 
@@ -522,7 +537,7 @@ USER        → Conversation standard. Read uniquement. Pas de bash.
               Reçoit ses propres notifications de tâches uniquement.
 ```
 
-### config/users.yaml
+### config/portail.yaml
 
 Schéma dict-keyed (clé = `usr_<id>`) avec identifiants contextuels par canal.
 
@@ -571,15 +586,13 @@ roles:
 
 ### Politique utilisateur inconnu
 
-La politique est un paramètre global sur `ACLManager` (pas par canal dans `channels.yaml`).
+La politique est portée par `UserRegistry` via `portail.yaml`.
 
 ```
 unknown_user_policy: "deny"     # rejet silencieux (défaut)
-unknown_user_policy: "guest"    # accès avec profil LLM limité (guest_profile)
+unknown_user_policy: "guest"    # accès avec rôle guest synthétique
 unknown_user_policy: "pending"  # rejet + notification dans relais:admin:pending_users
 ```
-
-Le mode `blocklist` rend cette politique sans effet : les inconnus sont admis par défaut.
 
 ---
 
@@ -593,13 +606,13 @@ L'Atelier suit ce flux pour chaque tâche entrante :
 Incoming envelope
   ↓
 Parse + load profile
-  — lit envelope.metadata["llm_profile"] (stampé par l'Aiguilleur)
-  — si absent : fallback sur config.yaml > llm.default_profile → "default"
+  — lit envelope.metadata["user_record"]["llm_profile"]
+  — si absent : fallback "default"
   — résout le ProfileConfig depuis profiles.yaml (model, max_turns, max_tokens, resilience)
   ↓
 Request context from Souvenir (relais:memory:request stream)
   ↓
-Assemble system prompt (SOUL + role + channel + policy + user_facts)
+Assemble system prompt (SOUL + role + user + channel)
   ↓
 Load MCP servers for profile (mcp_loader.load_for_sdk)
   ↓
@@ -610,7 +623,7 @@ Execute via AgentExecutor (boucle multi-tour explicite)
   ├─ Merge internal tools + MCP tools
   └─ Loop: stream → tool calls → results → next turn, until end_turn or max_turns
   ↓
-If streaming capable (Discord/Telegram): publish chunks to relais:messages:streaming:{channel}:{correlation_id}
+If streaming capable: publish chunks to relais:messages:streaming:{channel}:{correlation_id}
   ↓
 Publish response to relais:messages:outgoing_pending  (→ Sentinelle outgoing → outgoing:{channel})
   ↓
@@ -665,7 +678,12 @@ Les chemins resolus sont passés directement à `create_deep_agent(skills=[...])
 | `max_turns` | int | Tours max boucle agentique (défaut: 20) |
 | `base_url` | str \| None | Endpoint LLM custom (LM Studio, Ollama, etc.) ; supporte `${VAR}` |
 | `api_key_env` | str \| None | Nom de la variable d'env contenant la clé API |
-| `resilience` | ResilienceConfig | Retries, délais backoff, fallback model |
+| `resilience.retry_attempts` | int | Nombre de retries configurés |
+| `resilience.retry_delays` | list[int] | Délais de retry |
+| `resilience.fallback_model` | str \| None | Fallback déclaré dans la section résilience |
+| `fallback_model` | str \| None | Fallback déclaré au niveau du profil |
+| `mcp_timeout` | int | Timeout d'un appel MCP |
+| `mcp_max_tools` | int | Nombre max d'outils MCP exposés |
 
 > `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` sont retirés de `ProfileConfig` — voir `portail.yaml:roles:` pour le contrôle d'accès par rôle.
 
@@ -699,13 +717,13 @@ default:
 ```
 Mémoire contexte  → Redis (volatile, TTL 24h)
                     Cache rapide pour l'historique conversationnel
-                    Clé : relais:context:{user_id} (List Redis)
+                    Clé : relais:context:{session_id} (List Redis)
 
-Mémoire longue    → SQLite ~/.relais/storage/memory.db
+Mémoire longue    → SQLite RELAIS_HOME/storage/memory.db
                     Messages archivés
-                    Table: messages
+                    Table: archived_messages
 
-Fichiers mémoire  → SQLite ~/.relais/storage/memory.db
+Fichiers mémoire  → SQLite RELAIS_HOME/storage/memory.db
                     Fichiers persistants de l'agent (chemins virtuels /memories/...)
                     Table: memory_files (isolés par user_id)
 ```
@@ -727,10 +745,10 @@ Le Souvenir consomme deux streams en parallèle :
 ### Flux mémoire : get (Atelier → Souvenir → Atelier)
 
 ```
-1. Atelier → XADD relais:memory:request {action: "get", user_id, correlation_id}
+1. Atelier → XADD relais:memory:request {action: "get", session_id, correlation_id}
 
 2. Souvenir._handle_get_request():
-   a. Try Redis List relais:context:{user_id} (cache, fast path)
+   a. Try Redis List relais:context:{session_id} (cache, fast path)
    b. If miss → SQLite SELECT (fallback on Redis restart)
    c. XADD relais:memory:response {correlation_id, messages: [...]}
 
@@ -740,7 +758,7 @@ Le Souvenir consomme deux streams en parallèle :
 ### Flux mémoire : file_write/file_read/file_list (SouvenirBackend → Souvenir)
 
 ```
-SouvenirBackend (atelier/souvenir_backend.py, runs in thread pool via asyncio.to_thread)
+SouvenirBackend (atelier/souvenir_backend.py, opérations synchrones appelées depuis l'agent)
   ↓
 redis_sync.Redis.xadd(relais:memory:request, {action, user_id, path, content, correlation_id})
   ↓
@@ -765,27 +783,25 @@ SouvenirBackend polls relais:memory:response (timeout 3s) → returns WriteResul
 2. Souvenir._handle_outgoing():
    a. Extract user message from envelope.metadata["user_message"]
    b. Extract assistant reply from envelope.content
-   c. RPUSH relais:context:{user_id} [user_msg, assistant_reply]
+   c. RPUSH relais:context:{session_id} [user_msg, assistant_reply]
       LTRIM -20, EXPIRE 24h
    d. long_term_store.archive(envelope)     ← SQLite messages
 ```
 
 ### Compaction contexte
 
-Quand l'historique dépasse 80% du context window du modèle, un LLM léger (Haiku) génère un résumé qui remplace les anciens messages.
+Planifié. Aucun mécanisme de compaction n'est branché dans `souvenir/main.py` aujourd'hui.
 
 ### Scopes mémoire
 
-| Scope | Historique | Faits | Profils |
-|---|---|---|---|
-| `global` | Toutes sessions récentes | Benjamin + tous | ADMIN |
-| `own` | Session courante | Benjamin | USER, SUPERVISOR |
-| `sender` | Sessions avec l'expéditeur | Benjamin + expéditeur | AUTO_REPLY |
-| `task` | Contexte parent uniquement | Aucun | SUB_AGENT |
+Concepts de design non implémentés dans le pipeline actuel. Le comportement réel se limite à :
+- contexte court terme par `session_id`
+- archivage SQLite par session et sender
+- fichiers mémoire persistants isolés par `user_id`
 
 ### Pagination native
 
-Le Souvenir expose une API de requête paginée sur la mémoire longue terme : `limit`, `offset`, `since`, `until`, `search`. Utilisée par Le Vigile pour les requêtes admin ("montre page 2 des logs d'hier").
+`LongTermStore` expose des méthodes de requête utilitaires internes, dont une requête paginée. Aucune API admin ou interface utilisateur branchée n'exploite encore cette pagination dans le pipeline actuel.
 
 ---
 
@@ -795,21 +811,24 @@ L'Archiviste est un observer pur — il consomme sans jamais publier.
 
 **Deux consumer groups en parallèle :**
 
-1. `archiviste_logs_group` — observe `relais:logs` (logs critiques de toutes les briques)
+1. `archiviste_group` — observe `relais:logs`, `relais:events:system`, `relais:events:messages`
 2. `archiviste_pipeline_group` — observe tous les streams du pipeline pour visibilité end-to-end
 
 **Streams observés :**
-- `relais:messages:incoming:*` (par canal)
+- `relais:messages:incoming`
 - `relais:security`
 - `relais:tasks`
 - `relais:tasks:failed` (DLQ)
-- `relais:messages:outgoing:*` (par canal)
+- `relais:messages:outgoing:discord`
 
-**Pub/Sub :** `relais:events:*` (fire & forget)
+**Événements observés en plus :**
+- `relais:logs`
+- `relais:events:system`
+- `relais:events:messages`
 
 **Enrichissement des logs :** Chaque entrée dans `relais:logs` est enrichie par les briques avec `correlation_id`, `sender_id`, et `content_preview` (60 premiers caractères). L'Archiviste préfixe les lignes de log avec `[{cid[:8]}] {sender_id} | message`.
 
-**Rétention :** L'Archiviste traite les commandes `SYSTEM:cleanup_logs` du Veilleur — suppression des JSONL selon `retention.jsonl_days`, purge SQLite selon `retention.sqlite_days`, les logs d'audit ne sont jamais supprimés.
+**Rétention :** non implémentée dans L'Archiviste actuel. Toute logique de cleanup pilotée par Le Veilleur reste planifiée.
 
 ---
 
@@ -840,6 +859,7 @@ Le Commandant consomme `relais:commands` (`commandant_group`). Toutes les envelo
 | Commande | Description | Portée |
 |---|---|---|
 | `/clear` | Efface l'historique de la session courante | Session courante |
+| `/help` | Affiche la liste des commandes disponibles | Session courante |
 
 ### Comportement détaillé
 
@@ -848,9 +868,14 @@ Le Commandant consomme `relais:commands` (`commandant_group`). Toutes les envelo
 1. Le Commandant publie `{"action": "clear", "session_id": <session_id>, "envelope_json": <envelope serialisée>}` sur `relais:memory:request`
 2. Le Souvenir efface :
    - Le contexte Redis court terme (`relais:context:{session_id}`)
-   - Les messages SQLite de la session (table `messages`)
-   - Les `user_facts` sont **conservés**
+   - Les messages SQLite de la session (`archived_messages`)
 3. Le Souvenir répond sur `relais:messages:outgoing:{channel}` : `"✓ Historique de conversation effacé."` (confirmation envoyée par `ClearHandler` après le vrai nettoyage, si `envelope_json` est présent dans la requête)
+
+#### `/help`
+
+1. Le Commandant parcourt `COMMAND_REGISTRY`
+2. Il construit une réponse texte listant chaque commande et sa description
+3. Il publie cette réponse sur `relais:messages:outgoing:{channel}`
 
 ### Accès Redis requis
 
@@ -862,7 +887,7 @@ Le Commandant consomme `relais:commands` (`commandant_group`). Toutes les envelo
 
 ### Extensibilité
 
-Toute nouvelle commande hors-LLM s'ajoute dans Le Commandant sans toucher aux autres briques. Le registre des commandes est un dictionnaire `{"/nom": handler_function}` — ajout en O(1). Les commandes doivent également être déclarées dans `KNOWN_COMMANDS` (`common/command_utils.py`) pour être reconnues par La Sentinelle.
+Toute nouvelle commande hors-LLM s'ajoute dans Le Commandant sans toucher aux autres briques. La source de vérité est `COMMAND_REGISTRY` dans `commandant/commands.py`; `common.command_utils` en dérive automatiquement `KNOWN_COMMANDS` pour la reconnaissance côté Sentinelle.
 
 La détection et le rejet des commandes inconnues ou non autorisées sont entièrement gérés par La Sentinelle — le Commandant ne reçoit que des commandes valides et autorisées.
 
@@ -891,9 +916,9 @@ prompts/
 ├── soul/
 │   └── SOUL.md                    ← Layer 1: Core personality (always attempted)
 ├── roles/
-│   ├── admin.md                   ← Layer 2: Role overlay (path depuis users.yaml:roles:prompt_path)
+│   ├── admin.md                   ← Layer 2: Role overlay (`roles/{role}.md`)
 │   └── user.md
-├── users/                         ← Layer 3: Per-user override (chemin explicite depuis users.yaml:custom_prompt_path)
+├── users/                         ← Layer 3: Per-user override (chemin explicite relatif via `prompt_path`)
 │   └── discord_12345_678.md
 └── channels/
     ├── discord_default.md         ← Layer 4: Channel formatting rules
@@ -905,12 +930,12 @@ prompts/
 
 | Ordre | Source | Fichier | Toujours présent |
 |-------|--------|------|---|
-| 1 | Personality | `soul/SOUL.md` | Oui (erreur si absent) |
-| 2 | Role | `prompts/roles/{role}.md` (via `users.yaml:roles:prompt_path`) | Non (optionnel) |
-| 3 | User | chemin explicite `users.yaml:custom_prompt_path` | Non (optionnel, warning si fichier absent) |
+| 1 | Personality | `soul/SOUL.md` | Oui (chargement tenté systématiquement) |
+| 2 | Role | `prompts/roles/{role}.md` | Non (optionnel) |
+| 3 | User | chemin explicite relatif `prompt_path` | Non (optionnel, warning si fichier absent) |
 | 4 | Channel | `prompts/channels/{channel}_default.md` | Non (warning si absent) |
 
-> **Note :** Les couches 5 (reply_policy) et 6 (user_facts) ont été retirées de l'assembleur. La politique de réponse est gérée en amont par le Portail (`reply_policy` dans `users.yaml:users:`) ; les user_facts ne sont plus injectés dans le system prompt.
+> **Note as-built :** `SoulAssembler` ignore silencieusement les fichiers manquants ou vides. Les couches de policy ou de user facts ne sont pas assemblées aujourd'hui.
 
 ### Internationalisation — SOUL.md gère tout
 
@@ -918,184 +943,63 @@ SOUL.md instruit JARVIS d'utiliser la langue de son interlocuteur. Le LLM détec
 
 ### Construction du prompt final
 
-```
-Couche 1 : SOUL.md           si apply_soul=true        ~500 tokens
-Couche 2 : Mémoire longue    si memory.long_term=true   0-1000 tokens
-Couche 3 : Historique        si memory.context=true      0-2000 tokens
-           (compacté si > 80% context window)
-Couche 4 : Prompt de tâche   toujours présent           ~200 tokens
-─────────────────────────────────────────────────────────────────────
-Message utilisateur                                      N tokens
-```
+Dans l'état actuel du code, le prompt système est uniquement la concaténation des couches `SOUL`, `role`, `user`, `channel`. Le contexte conversationnel est injecté séparément au moment de construire la liste des messages envoyés à l'agent.
 
 ---
 
-## 16. Profils — config/profiles.yaml complet
+## 16. Profils — config/profiles.yaml
 
-> **Migration architecture (2026-04-01) :** Les champs `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` ont été **retirés de `ProfileConfig`** (profiles.yaml). Ces contraintes d'accès sont désormais définies par **rôle** dans `users.yaml:roles:` (champs `skills_dirs`, `allowed_mcp_tools`, `prompt_path`) et stampées par le Portail via `RoleRegistry`. Les exemples YAML ci-dessous reflètent les profils de conception originale — la structure réelle de `profiles.yaml` ne contient plus ces champs.
+La structure réelle parsée par `common/profile_loader.py` est volontairement compacte. Les politiques d'accès aux skills et outils MCP sont portées par `portail.yaml` via `UserRecord`, pas par `profiles.yaml`.
 
 ### Règle de résolution du profil
 
 Le profil actif pour un message entrant est résolu dans cet ordre strict (le premier trouvé gagne) :
 
 1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["channel_profile"]`, résolu par le Portail)
-2. **`users.yaml:llm_profile`** — préférence par utilisateur (portail.yaml, champ optionnel ; `null` = pas de préférence)
+2. **`portail.yaml:users.<id>.llm_profile`** — préférence par utilisateur (champ optionnel ; `null` = pas de préférence)
 3. **`roles.<role>.llm_profile`** — préférence par rôle (portail.yaml, champ optionnel)
 4. **`config.yaml > llm.default_profile`** — profil système par défaut
 5. **`"default"`** — valeur de repli ultime si `llm.default_profile` est absent de `config.yaml`
 
-> La résolution est effectuée par le **Portail** (`portail/main.py`) et le résultat est stampé dans `envelope.metadata["llm_profile"]` sur le stream `relais:security`. Le champ `user.llm_profile` dans portail.yaml est donc **actif** — `null` signifie "pas de préférence, laisser le canal ou le rôle décider".
+> La résolution est effectuée par le **Portail** et le résultat est stocké dans `metadata.user_record.llm_profile`. L'Atelier relit ensuite cette valeur depuis `user_record`.
 
 ```yaml
 profiles:
-
-  # ── Profils humains — SOUL appliqué ──────────────────────────────────────
-
-  ADMIN:
-    type: human
-    apply_soul: true
-    model: anthropic:claude-opus-4-6
-    memory: { context: true, long_term: true, scope: global }
-    allowed_tools: ["*"]
-    allowed_mcp: ["*"]
-    sub_agent_limits: { max_depth: 2, max_token_budget: 50000 }
-    resilience:
-      retry_attempts: 3
-      retry_delays: [2, 5, 15]
-      fallback_model: ollama:llama3.2
-    guardrails:
-      max_tokens_per_day: null
-      forbidden_bash_patterns: []
-      require_confirmation: [stop_all, revoke_user, delete_memory]
-
-  SUPERVISOR:
-    type: human
-    apply_soul: true
+  default:
     model: anthropic:claude-sonnet-4-6
-    memory: { context: true, long_term: true, scope: own }
-    allowed_tools: [Read, "Bash(git *)", "Bash(docker ps*)", "Bash(docker logs*)"]
-    allowed_mcp: ["mcp__gitlab__*", mcp__brave__search, mcp__jcodemunch__read_file]
-    sub_agent_limits: { max_depth: 1, max_token_budget: 20000 }
+    temperature: 0.7
+    max_tokens: 2048
+    max_turns: 20
+    base_url: null
+    api_key_env: ANTHROPIC_API_KEY
+    fallback_model: null
+    mcp_timeout: 10
+    mcp_max_tools: 20
     resilience:
       retry_attempts: 3
       retry_delays: [2, 5, 15]
-      fallback_model: ollama:llama3.2
-    guardrails:
-      max_tokens_per_day: 200000
-      forbidden_bash_patterns: ["rm *", "sudo *", "curl * | bash"]
-      require_confirmation: ["restart:*"]
-
-  USER:
-    type: human
-    apply_soul: true
-    model: anthropic:claude-haiku-4-5
-    memory: { context: true, long_term: true, scope: own }
-    allowed_tools: [Read]
-    allowed_mcp: [mcp__brave__search]
-    sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    resilience:
-      retry_attempts: 3
-      retry_delays: [2, 5, 15]
-      fallback_model: ollama:llama3.2
-      fallback_message: "Service momentanément limité, je continue avec un modèle local."
-    guardrails:
-      max_tokens_per_day: 50000
-      forbidden_bash_patterns: ["*"]
-      forbidden_topics: [credentials, "internal system"]
-
-  # ── Profils conversationnels — SOUL appliqué ──────────────────────────────
-
-  AUTO_REPLY:
-    type: auto_reply
-    apply_soul: true
-    model: anthropic:claude-sonnet-4-6
-    memory: { context: true, long_term: true, scope: sender }
-    allowed_tools: [Read, mcp__calendar__read_agenda, mcp__brave__search]
-    allowed_mcp: ["mcp__calendar__*", mcp__brave__search]
-    sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    resilience:
-      retry_attempts: 3
-      retry_delays: [2, 5, 15]
-      fallback_model: ollama:llama3.2
-    guardrails:
-      max_tokens_per_response: 500
-      forbidden_topics: [credentials, "banking data"]
-      mandatory_signature: "— JARVIS, assistant de Benjamin"
-      max_sub_agents: 0
-
-  # ── Profils techniques silencieux — pas de SOUL ───────────────────────────
-
-  SUB_AGENT:
-    type: technical
-    apply_soul: false
-    model: ollama:qwen3-coder-30b
-    memory: { context: true, long_term: false, scope: task }
-    allowed_tools: [Read, "Bash(git *)", "mcp__jcodemunch__*"]
-    allowed_mcp: ["mcp__jcodemunch__*", mcp__gitlab__get_mr]
-    sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    resilience:
-      retry_attempts: 2
-      retry_delays: [1, 3]
-      fallback_model: null
-    guardrails:
-      max_tokens_per_turn: 2000
-
-  SCHEDULER_AGENT:
-    type: technical
-    apply_soul: false
-    model: anthropic:claude-haiku-4-5
-    memory: { context: false, long_term: true, scope: global }
-    allowed_tools: [Read, "mcp__gitlab__*", "mcp__calendar__*", mcp__brave__search]
-    allowed_mcp: ["*"]
-    sub_agent_limits: { max_depth: 1, max_token_budget: 10000 }
-    resilience:
-      retry_attempts: 3
-      retry_delays: [2, 5, 15]
-      fallback_model: ollama:llama3.2
-    guardrails:
-      max_tokens_per_run: 5000
-
-  LEARNER_AGENT:
-    type: technical
-    apply_soul: false
-    model: anthropic:claude-sonnet-4-6
-    memory: { context: false, long_term: false, scope: task }
-    allowed_tools: [Read, Write]
-    allowed_mcp: []
-    sub_agent_limits: { max_depth: 0, max_token_budget: 0 }
-    resilience:
-      retry_attempts: 3
-      retry_delays: [2, 5, 15]
-      fallback_model: null
-    guardrails:
-      max_tokens_per_run: 10000
-
-  memory_extractor:
-    model: glm-4.7-flash
-    temperature: 0.1
-    max_tokens: 512
-    max_turns: 1
-    stream: false
-    memory:
-      short_term_messages: 0
-    resilience:
-      retry_attempts: 2
-      retry_delays: [1, 3]
       fallback_model: null
 ```
+
+**Champs effectivement parsés :**
+- `model`
+- `temperature`
+- `max_tokens`
+- `max_turns`
+- `base_url`
+- `api_key_env`
+- `fallback_model`
+- `mcp_timeout`
+- `mcp_max_tools`
+- `resilience.retry_attempts`
+- `resilience.retry_delays`
+- `resilience.fallback_model`
 
 ---
 
 ## 17. Politique de réponse automatique
 
-Voir section 9. Résumé des modes :
-
-| Mode | Comportement |
-|---|---|
-| `ignore` | Archivé silencieusement |
-| `manual` | Notification owner uniquement |
-| `auto_immediate` | Réponse JARVIS sans délai |
-| `auto_deferred` | Attente N sec, puis JARVIS |
+Non implémentée dans le pipeline actuel. Toute logique de reply policy, vacation, in_meeting ou debounce relève encore du design cible et doit être considérée comme planifiée.
 
 ---
 
@@ -1103,29 +1007,31 @@ Voir section 9. Résumé des modes :
 
 ### Principe
 
-Les médias (images, audio, documents) sont stockés temporairement dans `~/.relais/media/` avec un TTL de 24h. L'agent ne voit pas directement le fichier — une référence locale (`MediaRef`) est injectée dans l'Envelope et transformée en section dans le prompt.
+Le type `MediaRef` existe dans `common/envelope.py` et peut être sérialisé dans une `Envelope`.
+
+En revanche, le pipeline actuel ne branche pas encore d'ingestion média complète côté adaptateurs, ni de stockage TTL effectif, ni d'injection média dans le prompt.
 
 **Champ `media_refs` de l'Envelope :**
 
 | Champ | Type | Description |
 |-------|------|-------------|
 | `media_id` | str | UUID unique |
-| `path` | str | Chemin local dans `~/.relais/media/` |
+| `path` | str | Chemin local dans `RELAIS_HOME/media/` |
 | `mime_type` | str | Type MIME |
 | `size_bytes` | int | Taille en octets |
 | `expires_in_hours` | int | TTL (24h) |
 
 ### Nettoyage
 
-Le Veilleur nettoie les fichiers médias expirés lors de son tick quotidien (`SYSTEM:cleanup_media`). Les fichiers dont la clé Redis `relais:media:{media_id}` a expiré sont supprimés.
+Planifié. Aucun nettoyage média opérationnel n'est branché dans les adaptateurs actuels.
 
 ---
 
 ## 19. Système d'extensions
 
 ```
-INTERCEPTEUR (tisserand/)  In-process · Python · 2s timeout · return None = blocage
-OBSERVER (relais:events:*) Out-of-process · Tout langage · Fire & forget
+INTERCEPTEUR (tisserand/)  Planifié
+OBSERVER (relais:events:*) Partiellement préparé côté Archiviste
 ```
 
 **Règle de décision fondamentale :**
@@ -1136,21 +1042,13 @@ OBSERVER (relais:events:*) Out-of-process · Tout langage · Fire & forget
 
 ### Intercepteurs natifs
 
-| Extension | Priority | Rôle |
-|---|---|---|
-| `quota-enforcer` | 5 | Bloque si quota dépassé (Redis INCR + TTL minuit) |
-| `content-filter` | 1 | Bloque patterns dangereux |
-| `custom-tools` | 50 | Injecte MCP supplémentaires par utilisateur |
-
-**Interface intercepteur :** `on_request`, `on_stream_chunk`, `on_tool_call_start`, `on_command` — timeout 2s par intercepteur, exception → skippé + loggé, RELAIS ne crashe jamais à cause d'une extension.
-
-Observer tiers — aucun SDK requis, juste un client Redis avec compte ACL. Exemples dans `observers/`.
+Le framework d'intercepteurs n'est pas implémenté dans le repo courant. Cette section documente donc une direction d'architecture future, pas une capacité active.
 
 ---
 
 ## 20. Sécurité
 
-### .env — secrets complets
+### .env — secrets et intégrations
 
 ```bash
 # LLM providers
@@ -1158,12 +1056,12 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENROUTER_API_KEY=sk-or-...
 
 # Messaging bridges
-TELEGRAM_BOT_TOKEN=...
 DISCORD_BOT_TOKEN=...
+
+# Canaux / intégrations planifiés
+TELEGRAM_BOT_TOKEN=...
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_SIGNING_SECRET=...
-
-# REST canal
 REST_API_KEY=...
 
 # Redis
@@ -1173,27 +1071,16 @@ REDIS_PASS_PORTAIL=...
 REDIS_PASS_SENTINELLE=...
 REDIS_PASS_ATELIER=...
 REDIS_PASS_SOUVENIR=...
-REDIS_PASS_VEILLEUR=...
-REDIS_PASS_CRIEUR=...
-REDIS_PASS_FORGERON=...
 REDIS_PASS_ARCHIVISTE=...
-REDIS_PASS_VIGILE=...
-REDIS_PASS_SCRUTATEUR=...
-REDIS_PASS_TISSERAND=...
+# Les autres credentials de briques planifiées sont omis ici
 
 # MCP servers
 GITLAB_TOKEN=...
 GITLAB_URL=https://gitlab.company.com
 BRAVE_API_KEY=...
-GOOGLE_CREDENTIALS_PATH=/opt/relais/config/google_credentials.json
+GOOGLE_CREDENTIALS_PATH=<INSTALL_CONFIG_DIR>/config/google_credentials.json
 
-# Webhooks HMAC
-WEBHOOK_SECRET_GITHUB=...
-WEBHOOK_SECRET_GITLAB=...
-WEBHOOK_SECRET_GRAFANA=...
-
-# Backup
-BACKUP_PATH=/Volumes/Backup/relais
+# Variables supplémentaires selon les MCP/configs actifs
 ```
 
 ### Graceful shutdown
@@ -1205,7 +1092,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 ## 21. Structure du projet
 
 ```
-/opt/relais/                           ← Installation système (code uniquement)
+<repo>/
 │                                         Ne contient PAS de données utilisateur
 ├── .env.example
 ├── .env                               ← JAMAIS committé
@@ -1217,29 +1104,27 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 ├── config/                            ← Templates système (*.default)
 │   ├── config.yaml.default
 │   ├── profiles.yaml.default
-│   ├── users.yaml.default
+│   ├── portail.yaml.default
 │   ├── mcp_servers.yaml.default
+│   ├── channels.yaml.default
 │   ├── redis.conf
 │   └── HEARTBEAT.md.default
 │
-├── soul/                              ← Templates SOUL par défaut
-│   ├── SOUL.md.default
-│   └── variants/
-│       ├── SOUL_concise.md.default
-│       └── SOUL_professional.md.default
-│
 ├── prompts/                           ← Prompts système par défaut
+│   ├── soul/
+│   │   ├── SOUL.md.default
+│   │   └── variants/
+│   │       ├── SOUL_concise.md.default
+│   │       └── SOUL_professional.md.default
 │   ├── channels/
-│   │   ├── discord_default.md
 │   │   ├── telegram_default.md
 │   │   └── whatsapp_default.md
 │   ├── policies/
 │   │   ├── out_of_hours.md
 │   │   ├── vacation.md
 │   │   └── in_meeting.md
-│   └── roles/
-│       ├── admin.md
-│       └── user.md
+│   ├── roles/
+│   └── users/
 │
 ├── common/
 │   ├── envelope.py                    ← Envelope + PushEnvelope + MediaRef
@@ -1247,8 +1132,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── shutdown.py
 │   ├── config_loader.py               ← get_relais_home() + resolve_config_path()
 │   ├── init.py                        ← initialize_user_dir()
-│   ├── user_registry.py               ← UserRegistry + UserRecord
-│   ├── role_registry.py               ← RoleRegistry + RoleConfig (skills_dirs, allowed_mcp_tools)
+│   ├── user_record.py                 ← UserRecord
 │   ├── profile_loader.py              ← ProfileConfig + ResilienceConfig (shared by Atelier + Souvenir)
 │   └── markdown_converter.py
 │
@@ -1257,95 +1141,75 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── base.py                        ← AiguilleurBase ABC
 │   ├── channel_config.py
 │   └── channels/
-│       ├── discord/adapter.py
-│       ├── telegram/adapter.py
-│       ├── slack/adapter.py
-│       └── rest/adapter.py
+│       └── discord/adapter.py
 │
 ├── portail/
-│   └── main.py
+│   ├── main.py
+│   └── user_registry.py
 │
 ├── sentinelle/
 │   ├── main.py
-│   ├── acl.py                         ← ACLManager context-aware (allowlist/blocklist)
-│   └── guardrails.py                  ← ContentFilter (pré/post-LLM)
+│   └── acl.py                         ← ACLManager context-aware (allowlist/blocklist)
 │
 ├── atelier/
 │   ├── main.py
 │   ├── agent_executor.py
 │   ├── mcp_adapter.py
 │   ├── mcp_session_manager.py
-│   ├── tool_policy.py                 ← ToolPolicy — skills + MCP access enforcement
+│   ├── tool_policy.py
 │   ├── mcp_loader.py
-│   ├── profile_loader.py
 │   ├── soul_assembler.py
-│   └── stream_publisher.py
+│   ├── stream_publisher.py
+│   └── souvenir_backend.py
 │
 ├── souvenir/
 │   ├── main.py
 │   ├── context_store.py
+│   ├── file_store.py
 │   ├── long_term_store.py
-│   ├── memory_extractor.py
 │   ├── models.py
+│   ├── handlers/
 │   └── migrations/
 │
 ├── archiviste/
 │   └── main.py
 │
-├── mcp/                               ← MCP servers globaux supervisord
-│   ├── calendar/server.py
-│   └── brave-search/server.js
-│
-├── extensions/                        ← Intercepteurs Le Tisserand
-│   ├── quota-enforcer/
-│   ├── content-filter/
-│   └── custom-tools/
-│
-├── observers/                         ← Exemples observers out-of-process
-│   ├── example_python.py
-│   ├── example_node.js
-│   └── example_go.go
-│
 └── tests/
-    ├── unit/
-    ├── integration/
-    └── e2e/
+    └── *.py
 
 ─────────────────────────────────────────────────────────────────────
 
-~/.relais/                             ← Répertoire utilisateur (données & config)
+<RELAIS_HOME>/                        ← Répertoire utilisateur (données & config)
 │                                         Résolu par get_relais_home()
 │                                         Override via RELAIS_HOME=...
+│                                         Défaut actuel du code : `<repo>/.relais`
 │                                         Créé automatiquement au 1er lancement
 ├── config/
 │   ├── config.yaml
 │   ├── profiles.yaml
-│   ├── users.yaml
+│   ├── portail.yaml
+│   ├── sentinelle.yaml
 │   ├── mcp_servers.yaml
+│   ├── channels.yaml
 │   └── HEARTBEAT.md
 │
-├── soul/
-│   ├── SOUL.md
-│   └── variants/
-│       ├── SOUL_concise.md
-│       └── SOUL_professional.md
-│
 ├── prompts/
-│   ├── marie.md
-│   └── family.md
+│   ├── soul/
+│   ├── channels/
+│   ├── policies/
+│   ├── roles/
+│   └── users/
 │
 ├── skills/
 │   ├── CLAUDE.md                      ← registre skills actifs
-│   ├── manual/
-│   │   └── SKILL_my_custom.md
-│   └── auto/
-│       └── SKILL_auto_mr_review_20260327.md
 │
 ├── media/                             ← TTL 24h
 │
 ├── logs/
-│   ├── relais.db
-│   └── YYYY-MM-DD.jsonl
+│   └── events.jsonl
+│
+├── storage/
+│   └── memory.db
 │
 └── backup/
 ```
@@ -1365,11 +1229,11 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │  4.  MOINS DE 300 LIGNES par fichier main.py                    │
 │                                                                  │
 │  RÉPERTOIRE UTILISATEUR                                         │
-│  5.  ~/.relais/ = config + skills + logs + médias               │
-│      /opt/relais/ = code système uniquement                     │
-│      Cascade : ~/.relais/ > /opt/relais/ > ./                   │
+│  5.  RELAIS_HOME = config + skills + logs + médias              │
+│      <INSTALL_CONFIG_DIR>/ = code système uniquement            │
+│      Cascade : RELAIS_HOME > <INSTALL_CONFIG_DIR> > ./          │
 │      Override via RELAIS_HOME=... si nécessaire                 │
-│      initialize_user_dir() crée ~/.relais/ au 1er lancement     │
+│      Défaut actuel du code : <repo>/.relais                     │
 │                                                                  │
 │  INFRASTRUCTURE                                                  │
 │  6.  REDIS = Unix socket — port TCP = 0 — ACL par brique       │
@@ -1388,26 +1252,26 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │                                                                  │
 │  AGENTS & PROFILS                                               │
 │  17. 3 RÔLES HUMAINS : ADMIN · SUPERVISEUR · USER              │
-│  18. usr_system dans users.yaml — sessions CRON → Benjamin     │
-│  19. UN PROFIL = model + tools + memory + resilience + limits  │
-│  20. LLM RESILIENCE : retry 3× backoff → fallback Ollama       │
-│  21. SOUL si apply_soul=true — i18n géré par SOUL.md seul      │
-│  22. PROMPT = SOUL + long-term + history (compacté) + task     │
-│  23. COMPACTION à 80% context window — Haiku génère le résumé  │
-│  24. SOUS-AGENTS : max profondeur 2 + budget tokens par tâche  │
+│  18. usr_system dans portail.yaml — usage planifié             │
+│  19. UN PROFIL = modèle + paramètres provider + résilience     │
+│  20. LLM RESILIENCE : retries/DLQ selon ProfileConfig          │
+│  21. SOUL + role + user + channel = prompt système             │
+│  22. Le contexte conversationnel est injecté hors prompt       │
+│  23. Compaction et sous-agents restent planifiés               │
+│  24. Les accès skills/MCP sont portés par UserRecord           │
 │                                                                  │
 │  MÉDIAS & DONNÉES                                               │
-│  25. MÉDIAS stockés dans ~/.relais/media/ TTL 24h              │
-│  26. SKILLS versionnés par nom de fichier — anciens conservés  │
-│  27. BACKUP configurable — rsync + SQLite .backup() API        │
-│  28. RÉTENTION configurable — JSONL 90j, SQLite 1 an, audit ∞  │
-│  29. PAGINATION native dans Le Souvenir — limit/offset         │
-│  30. MARKDOWN converti par L'Aiguilleur à la sortie            │
+│  25. MediaRef est disponible, pipeline média complet planifié  │
+│  26. Les skills sont chargés depuis RELAIS_HOME/skills         │
+│  27. Backup/Rétention restent des briques futures              │
+│  28. LongTermStore expose des requêtes utilitaires internes    │
+│  29. Pagination disponible côté store, pas côté interface      │
+│  30. Conversion Markdown multi-canal reste partiellement future│
 │                                                                  │
 │  EXTENSIBILITÉ                                                   │
-│  31. INTERCEPTEURS via Le Tisserand — in-process — 2s timeout  │
-│  32. OBSERVERS via Redis events — out-of-process — tout langage│
-│  33. REST API : API Key + FastAPI /docs auto-générée           │
+│  31. Le Tisserand reste planifié                                │
+│  32. L'Archiviste observe déjà logs + pipeline + events        │
+│  33. Les autres observers/outils d'admin restent planifiés     │
 │                                                                  │
 │  DÉCISION FONDAMENTALE                                          │
 │  34. "PEUT BLOQUER ?" → Le Tisserand                           │
@@ -1419,7 +1283,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │      "ANALYSE BATCH?"→ Le Forgeron (lit SQLite, exit)          │
 │      "LOG ?"          → L'Archiviste (observer Stream)         │
 │      "MONITORE ?"     → Le Scrutateur (observer Pub/Sub)       │
-│      "OÙ EST LA DATA?"→ ~/.relais/ (cascade depuis /opt/relais)│
+│      "OÙ EST LA DATA?"→ RELAIS_HOME (défaut : <repo>/.relais)  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1517,7 +1381,7 @@ retention:
 Pas de Git, pas de SQLite de versioning.
 Les fichiers auto-générés sont nommés avec la date et jamais supprimés.
 
-~/.relais/skills/auto/
+<RELAIS_HOME>/skills/auto/
   SKILL_auto_mr_review_20260327.md    ← version courante dans CLAUDE.md
   SKILL_auto_mr_review_20260315.md    ← version précédente — conservée
   SKILL_auto_mr_review_20260301.md    ← version encore plus ancienne

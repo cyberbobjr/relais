@@ -6,12 +6,13 @@ from .config_loader import get_relais_home
 # Default template files shipped with the system installation
 # Format: (destination_relative_path, source_relative_path_in_system)
 DEFAULT_FILES = [
-    ("config/config.yaml",          "config/config.yaml.default"),
-    ("config/profiles.yaml",        "config/profiles.yaml.default"),
-    ("config/portail.yaml",           "config/portail.yaml.default"),
-    ("config/sentinelle.yaml",           "config/sentinelle.yaml.default"),
-    ("config/mcp_servers.yaml",     "config/mcp_servers.yaml.default"),
-    ("config/HEARTBEAT.md",         "config/HEARTBEAT.md.default"),
+    ("config/config.yaml",                    "config/config.yaml.default"),
+    ("config/atelier/profiles.yaml",          "config/atelier/profiles.yaml.default"),
+    ("config/portail.yaml",                   "config/portail.yaml.default"),
+    ("config/sentinelle.yaml",                "config/sentinelle.yaml.default"),
+    ("config/atelier/mcp_servers.yaml",       "config/atelier/mcp_servers.yaml.default"),
+    ("config/atelier.yaml",                   "config/atelier.yaml.default"),
+    ("config/HEARTBEAT.md",                   "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
     ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),
     # Channel formatting overlays (Layer 4) — named {channel}_default.md
@@ -41,6 +42,7 @@ def initialize_user_dir(system_install_path: Path | None = None):
     # Create directory structure
     dirs = [
         "config",
+        "config/atelier",
         "prompts/soul/variants",
         "prompts/channels",
         "prompts/policies",

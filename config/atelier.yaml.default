@@ -1,0 +1,15 @@
+# Configuration comportementale du brick Atelier.
+# Copié dans ~/.relais/config/atelier.yaml au premier lancement.
+
+# ── Progression temps réel ───────────────────────────────────────────────────
+progress:
+  # Interrupteur maître — false désactive toute publication de progression
+  enabled: true
+  events:
+    tool_call: true
+    tool_result: true
+    subagent_start: true
+  # Publier aussi sur relais:messages:outgoing:{channel} (canaux non-streaming)
+  publish_to_outgoing: true
+  # Longueur max du détail publié (tronqué au-delà)
+  detail_max_length: 100

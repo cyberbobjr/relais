@@ -58,7 +58,7 @@ class McpServerConfig:
     env: dict[str, str] = field(default_factory=dict)
 
 
-_FILENAME = "mcp_servers.yaml"
+_FILENAME = "atelier/mcp_servers.yaml"
 
 
 # ---------------------------------------------------------------------------

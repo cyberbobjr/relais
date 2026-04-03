@@ -16,7 +16,7 @@ from langchain.chat_models import BaseChatModel, init_chat_model
 
 from deepagents import create_deep_agent
 from common.config_loader import get_relais_home
-from common.profile_loader import ProfileConfig
+from atelier.profile_loader import ProfileConfig
 from common.envelope import Envelope
 
 logger = logging.getLogger(__name__)
@@ -159,11 +159,10 @@ class AgentExecutor:
         skills: List of absolute directory paths to skill directories,
                 passed directly to ``create_deep_agent(skills=...)``.
                 Defaults to an empty list (no skills injected).
-        backend: Optional backend instance routed to ``/memories/`` paths.
-                 When provided, replaces the default ``LocalShellBackend``
-                 with the given backend inside a ``CompositeBackend``.
-                 When ``None``, falls back to ``LocalShellBackend`` rooted
-                 at ``RELAIS_HOME`` (legacy behaviour).
+        backend: Optional backend instance used for ``/memories/`` paths
+                 inside the ``CompositeBackend``.  When ``None`` (default),
+                 a ``LocalShellBackend`` rooted at ``RELAIS_HOME`` is used
+                 for both the default route and the ``/memories/`` route.
     """
 
     def __init__(
@@ -178,7 +177,6 @@ class AgentExecutor:
         memories_backend: BackendProtocol = backend or LocalShellBackend(
             root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True
         )
-        # LocalShellBackend(root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True)
         composite_backend = CompositeBackend(
             default=LocalShellBackend(root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True),
             routes={

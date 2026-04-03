@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 
-from common.profile_loader import ProfileConfig
+from atelier.profile_loader import ProfileConfig
 
 # ---------------------------------------------------------------------------
 # Optional MCP dependency

@@ -16,11 +16,13 @@ Usage:
   ./supervisor.sh restart all
   ./supervisor.sh reload all
   ./supervisor.sh status
+  ./supervisor.sh clear
 
 Notes:
   - start all démarre supervisord si nécessaire puis lance tous les programmes.
   - reload all correspond à supervisorctl reload.
   - stop all arrête les programmes supervisés et coupe le démon supervisord.
+  - clear supprime tous les fichiers présents dans .relais/logs.
 EOF
 }
 
@@ -240,6 +242,14 @@ run_supervisorctl() {
     supervisorctl -c "$CONFIG_PATH" "$@"
 }
 
+clear_logs() {
+    local logs_dir="$REPO_ROOT/.relais/logs"
+
+    mkdir -p "$logs_dir"
+    find "$logs_dir" -mindepth 1 \( -type f -o -type l \) -delete
+    echo "Logs supprimés dans $logs_dir."
+}
+
 ACTION="${1:-}"
 TARGET="${2:-}"
 
@@ -309,6 +319,13 @@ case "$ACTION" in
             exit 1
         fi
         run_supervisorctl status
+        ;;
+    clear)
+        if [[ -n "$TARGET" ]]; then
+            usage
+            exit 1
+        fi
+        clear_logs
         ;;
     -h|--help|help|"")
         usage
