@@ -123,6 +123,7 @@ class UserRegistry:
             actions=list(role_def.get("actions") or []),
             skills_dirs=list(role_def.get("skills_dirs") or []),
             allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
+            allowed_subagents=list(role_def.get("allowed_subagents") or []),
             prompt_path=None,
             role_prompt_path=role_def.get("prompt_path") or None,
         )
@@ -236,6 +237,7 @@ class UserRegistry:
                 actions=list(role_def.get("actions") or []),
                 skills_dirs=list(role_def.get("skills_dirs") or []),
                 allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
+                allowed_subagents=list(role_def.get("allowed_subagents") or []),
                 prompt_path=raw_prompt_path,
                 role_prompt_path=raw_role_prompt_path,
             )

@@ -56,6 +56,7 @@ def _make_admin_record() -> UserRecord:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
+        allowed_subagents=[],
         prompt_path=None,
     )
 
@@ -77,6 +78,7 @@ def _make_user_record(actions: list[str] | None = None) -> UserRecord:
         actions=actions if actions is not None else ["help"],
         skills_dirs=[],
         allowed_mcp_tools=[],
+        allowed_subagents=[],
         prompt_path=None,
     )
 
@@ -95,6 +97,7 @@ def _make_blocked_record() -> UserRecord:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
+        allowed_subagents=[],
         prompt_path=None,
     )
 

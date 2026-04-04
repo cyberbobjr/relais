@@ -107,6 +107,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from common.config_loader import resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from aiguilleur.channel_config import load_channels_config
 from atelier.tool_policy import ToolPolicy
+from atelier.agents import SubagentRegistry
 
 logger = logging.getLogger("atelier")
 
@@ -153,6 +154,9 @@ class Atelier:
         # a property that always derives from _skills_base_dir so the override
         # is automatically picked up.
         self._skills_base_dir: Path = resolve_skills_dir()
+
+        # Subagent registry — auto-discovers modules in atelier/agents/.
+        self._subagent_registry: SubagentRegistry = SubagentRegistry.discover()
 
         # Persistent LangGraph checkpointer — owned by the Atelier singleton so
         # it survives across per-message AgentExecutor instances.  Uses a
@@ -258,6 +262,11 @@ class Atelier:
                 else:
                     mcp_tools = []
 
+                # Resolve subagents and delegation prompt from the registry,
+                # filtered by the user's allowed_subagents patterns.
+                subagents = self._subagent_registry.specs_for_user(ur)
+                delegation_prompt = self._subagent_registry.delegation_prompt_for_user(ur)
+
                 agent_executor = AgentExecutor(
                     profile=profile,
                     soul_prompt=soul_prompt,
@@ -265,6 +274,8 @@ class Atelier:
                     skills=skills,
                     backend=SouvenirBackend(user_id=user_id),
                     checkpointer=self._checkpointer,
+                    subagents=subagents,
+                    delegation_prompt=delegation_prompt,
                 )
 
                 # 7. Execute — streaming only for capable channels; progress for all.
@@ -430,61 +441,6 @@ class Atelier:
                 self._checkpointer = None
                 await self.client.close()
                 logger.info("Atelier stopped gracefully")
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat shims (deprecated — use atelier.tool_policy.ToolPolicy)
-# ---------------------------------------------------------------------------
-# These thin wrappers re-expose the three functions that previously lived
-# here as module-level helpers.  External tests that import them directly
-# from atelier.main continue to work unchanged.
-
-
-def _parse_tool_policy(raw: object) -> tuple[str, ...]:
-    """Normalise a metadata value into a tuple of strings.
-
-    .. deprecated::
-        Import from ``atelier.tool_policy.ToolPolicy`` instead.
-
-    Args:
-        raw: The raw value from ``envelope.metadata``.
-
-    Returns:
-        A tuple of strings, never None.
-    """
-    return ToolPolicy._parse_policy(raw)
-
-
-def _resolve_skills_paths(skills_dirs: tuple[str, ...], base: Path) -> list[str]:
-    """Expand skill directory specs into existing absolute paths.
-
-    .. deprecated::
-        Use ``ToolPolicy(base_dir=base).resolve_skills(list(skills_dirs))``.
-
-    Args:
-        skills_dirs: Tuple of directory names or ``"*"`` wildcard.
-        base: The base skills directory.
-
-    Returns:
-        List of absolute path strings for directories that exist on disk.
-    """
-    return ToolPolicy(base_dir=base)._resolve_paths(skills_dirs)
-
-
-def _filter_mcp_tools(tools: list, patterns: tuple[str, ...]) -> list:
-    """Filter tools by fnmatch patterns.
-
-    .. deprecated::
-        Use ``ToolPolicy(base_dir=Path()).filter_mcp_tools(tools, list(patterns))``.
-
-    Args:
-        tools: List of LangChain ``BaseTool`` instances.
-        patterns: Tuple of fnmatch-style glob patterns.
-
-    Returns:
-        Filtered list of tools.
-    """
-    return ToolPolicy._filter_tools(tools, patterns)
 
 
 if __name__ == "__main__":

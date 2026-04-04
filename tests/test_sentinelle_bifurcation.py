@@ -58,6 +58,7 @@ def _make_admin_record() -> UserRecord:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
+        allowed_subagents=[],
         prompt_path=None,
     )
 
@@ -76,6 +77,7 @@ def _make_user_record() -> UserRecord:
         actions=[],
         skills_dirs=[],
         allowed_mcp_tools=[],
+        allowed_subagents=[],
         prompt_path=None,
     )
 

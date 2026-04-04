@@ -96,7 +96,7 @@ flowchart TD
 - `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`), puis publie sur `relais:security`.
 - `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
 - `Commandant` consomme `relais:commands`. `/help` répond directement sur `relais:messages:outgoing:{channel}`. `/clear` publie une requête `clear` sur `relais:memory:request`.
-- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`.
+- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents auto-découverts dans `atelier/agents/` ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
 - `Souvenir` consomme `relais:memory:request` (actions : `clear`, `file_write`, `file_read`, `file_list`) et observe les streams `relais:messages:outgoing:{channel}` pour archiver chaque tour dans SQLite (`messages_raw`). L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
 
@@ -211,6 +211,7 @@ Points importants :
 - `roles.*.prompt_path`
 - `roles.*.skills_dirs`
 - `roles.*.allowed_mcp_tools`
+- `roles.*.allowed_subagents`
 
 Exemple réduit :
 
@@ -234,11 +235,13 @@ roles:
     actions: ["*"]
     skills_dirs: ["*"]
     allowed_mcp_tools: ["*"]
+    allowed_subagents: ["*"]
     prompt_path: null
   guest:
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
+    allowed_subagents: []
     prompt_path: null
 ```
 

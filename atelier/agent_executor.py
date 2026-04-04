@@ -54,6 +54,7 @@ Long-term memory:
 - Before answering any question about the user or long-term memory, first check `/memories/` for relevant user and long-term information.
 """.strip()
 
+
 # Error class names raised by LLM providers (anthropic, openai, google, …) that
 # indicate a transient condition — caller must NOT ACK the message so it stays in
 # the PEL for automatic re-delivery.  We detect by name to stay provider-agnostic
@@ -192,6 +193,15 @@ class AgentExecutor:
                       history lost on restart).  Pass an ``AsyncSqliteSaver``
                       owned by the Atelier singleton for cross-restart
                       persistence.
+        subagents: List of SubAgent specs (dicts with ``name``,
+                   ``description``, ``system_prompt``, and optionally
+                   ``model``, ``tools``, ``skills``).  Each spec is
+                   registered as a child agent invocable via the ``task``
+                   tool.  Defaults to an empty list (no subagents).
+        delegation_prompt: Pre-assembled delegation prompt from the
+                   subagent registry.  Appended to the system prompt so
+                   the main agent knows when to delegate via ``task()``.
+                   Empty string means no delegation instructions.
     """
 
     def __init__(
@@ -202,6 +212,8 @@ class AgentExecutor:
         skills: list[str] | None = None,
         backend: BackendProtocol | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
+        subagents: list[dict[str, Any]] | None = None,
+        delegation_prompt: str = "",
     ) -> None:
         self._profile = profile
         memories_backend: BackendProtocol = backend or LocalShellBackend(
@@ -216,10 +228,13 @@ class AgentExecutor:
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
-            system_prompt=_with_long_term_memory_prompt(soul_prompt),
+            system_prompt=_enrich_system_prompt(
+                soul_prompt, delegation_prompt=delegation_prompt,
+            ),
             skills=skills or [],
             backend=composite_backend,
             checkpointer=checkpointer or MemorySaver(),
+            subagents=subagents or [],
         )
 
     async def execute(
@@ -433,8 +448,23 @@ class AgentExecutor:
         return full_reply
 
 
-def _with_long_term_memory_prompt(soul_prompt: str) -> str:
-    """Append long-term memory operating rules to the assembled system prompt."""
-    if LONG_TERM_MEMORY_PROMPT in soul_prompt:
-        return soul_prompt
-    return f"{soul_prompt.rstrip()}\n\n{LONG_TERM_MEMORY_PROMPT}"
+def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> str:
+    """Append operational rules to the assembled system prompt.
+
+    Appends long-term memory instructions unconditionally, and the
+    delegation prompt (assembled by ``SubagentRegistry``) when non-empty.
+
+    Args:
+        soul_prompt: The base system prompt assembled by SoulAssembler.
+        delegation_prompt: Pre-assembled delegation prompt from the
+            subagent registry.  Empty string means no subagents.
+
+    Returns:
+        The enriched system prompt string.
+    """
+    parts = [soul_prompt.rstrip()]
+    if LONG_TERM_MEMORY_PROMPT not in soul_prompt:
+        parts.append(LONG_TERM_MEMORY_PROMPT)
+    if delegation_prompt:
+        parts.append(delegation_prompt)
+    return "\n\n".join(parts)

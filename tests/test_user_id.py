@@ -150,6 +150,7 @@ def test_user_record_has_user_id_field() -> None:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
+        allowed_subagents=[],
         prompt_path=None,
     )
 
@@ -167,6 +168,7 @@ def test_user_record_to_dict_includes_user_id() -> None:
         actions=[],
         skills_dirs=[],
         allowed_mcp_tools=[],
+        allowed_subagents=[],
         prompt_path=None,
     )
 
@@ -187,6 +189,7 @@ def test_user_record_from_dict_round_trips_user_id() -> None:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
+        allowed_subagents=[],
         prompt_path=None,
     )
 

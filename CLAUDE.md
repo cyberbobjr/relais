@@ -44,6 +44,7 @@ The main pipeline flows through these bricks in order:
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
    - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
+   - **Subagent registry**: `atelier/agents/` package with auto-discovery via `SubagentRegistry.discover()`; each subagent is a Python module exposing `SPEC_NAME`, `build_spec()`, `delegation_snippet()`; user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `config-admin` (configuration CRUD)
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
@@ -78,7 +79,7 @@ The main pipeline flows through these bricks in order:
   - `litellm.yaml`: Model definitions, router settings, master key
   - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
   - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)
-  - `portail.yaml.default`: User registry with display_name, role, channels
+  - `portail.yaml.default`: User registry with display_name, role, channels, allowed_subagents (fnmatch patterns)
   - `sentinelle.yaml.default`: ACL for sentinelle brick
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 
@@ -310,6 +311,13 @@ Per-profile MCP constraints (fields in `ProfileConfig`):
 4. Add Redis ACL entry in `config/redis.conf` with stream permissions
 5. Update `docs/ARCHITECTURE.md` with brick role
 6. Add unit tests in `tests/test_{brick_name}.py`
+
+### Adding a New Subagent
+
+1. Create `atelier/agents/{name}.py` implementing the protocol: `SPEC_NAME`, `build_spec()`, `delegation_snippet()`
+2. Add the subagent name to relevant roles' `allowed_subagents` in portail.yaml
+3. No changes needed to `agent_executor.py` or `main.py` (auto-discovery via `SubagentRegistry.discover()`)
+4. Add tests in `tests/test_{name}_subagent.py`
 
 ### Handling Message Errors
 

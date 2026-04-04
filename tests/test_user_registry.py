@@ -106,6 +106,7 @@ def test_user_record_is_frozen() -> None:
         actions=["send"],
         skills_dirs=[],
         allowed_mcp_tools=[],
+        allowed_subagents=[],
         prompt_path=None,
     )
     with pytest.raises((AttributeError, TypeError)):
@@ -128,6 +129,7 @@ def test_user_record_has_all_required_fields() -> None:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
+        allowed_subagents=[],
         prompt_path="users/bob.md",
         role_prompt_path="roles/admin.md",
     )
@@ -153,6 +155,7 @@ def test_user_record_prompt_path_default_is_none() -> None:
         actions=[],
         skills_dirs=[],
         allowed_mcp_tools=[],
+        allowed_subagents=[],
         prompt_path=None,
     )
     assert record.prompt_path is None
@@ -174,6 +177,7 @@ def test_user_record_to_dict_contains_all_fields() -> None:
         actions=["*"],
         skills_dirs=["code"],
         allowed_mcp_tools=["search__*"],
+        allowed_subagents=[],
         prompt_path="users/alice.md",
         role_prompt_path="roles/admin.md",
     )
@@ -201,6 +205,7 @@ def test_user_record_from_dict_round_trip() -> None:
         actions=["send"],
         skills_dirs=[],
         allowed_mcp_tools=[],
+        allowed_subagents=[],
         prompt_path=None,
     )
     restored = UserRecord.from_dict(original.to_dict())

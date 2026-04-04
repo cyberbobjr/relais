@@ -11,7 +11,7 @@ echo "[$(date)] post-commit hook démarré" >> "$LOG"
 cd "$REPO_DIR"
 
 # Lancer claude en non-interactif en arrière-plan
-nohup "$CLAUDE_BIN" --dangerously-skip-permissions -p \
+nohup "$CLAUDE_BIN" --dangerously-skip-permissions --model claude-haiku-4-5-20251001 -p \
 "A git commit was just made in /Users/benjaminmarchand/IdeaProjects/relais. Do the following in order:
 
 1. Run \`git diff HEAD~1 HEAD\` to see what changed in the last commit.
