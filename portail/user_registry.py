@@ -4,9 +4,10 @@ Portail is the sole consumer of this module.  Downstream bricks only need
 ``UserRecord`` (from ``common.user_record``) to deserialize the pre-stamped
 ``envelope.metadata["user_record"]`` dict.
 
-Role data (actions, skills_dirs, allowed_mcp_tools, llm_profile, prompt_path)
-is merged into every resolved ``UserRecord`` at load time so that Portail
-receives a single, self-contained record without needing a separate lookup.
+Role data (actions, skills_dirs, allowed_mcp_tools, llm_profile) is merged
+into every resolved ``UserRecord`` at load time.  Prompt paths are kept
+separate by origin: ``prompt_path`` comes from the user entry only (no role
+fallback), and ``role_prompt_path`` comes from the role entry only.
 """
 
 from __future__ import annotations
@@ -130,7 +131,8 @@ class UserRegistry:
             skills_dirs=list(role_def.get("skills_dirs") or []),
             allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
             llm_profile=llm_profile,
-            prompt_path=role_def.get("prompt_path") or None,
+            prompt_path=None,
+            role_prompt_path=role_def.get("prompt_path") or None,
         )
 
     @property
@@ -175,7 +177,8 @@ class UserRegistry:
 
         Resolution priority:
         - ``llm_profile``: user-level > role-level > ``"default"``
-        - ``prompt_path``: user-level > role-level > ``None``
+        - ``prompt_path``: user-level only (no role fallback) — ``None`` when absent
+        - ``role_prompt_path``: role-level only — ``None`` when absent
         - ``actions``, ``skills_dirs``, ``allowed_mcp_tools``: role-level only
 
         Enters permissive mode (empty indexes) when the file cannot be found
@@ -221,12 +224,15 @@ class UserRegistry:
             role_name = str(user.get("role") or "")
             role_def: dict[str, Any] = roles_raw.get(role_name) or {}
 
-            # prompt_path: user-level > role-level > None
+            # prompt_path: user-level only (no role fallback)
             raw_prompt_path = user.get("prompt_path") or None
-            if raw_prompt_path is None:
-                raw_prompt_path = role_def.get("prompt_path") or None
             if raw_prompt_path is not None:
                 raw_prompt_path = self._validate_path(raw_prompt_path)
+
+            # role_prompt_path: role-level only
+            raw_role_prompt_path = role_def.get("prompt_path") or None
+            if raw_role_prompt_path is not None:
+                raw_role_prompt_path = self._validate_path(raw_role_prompt_path)
 
             # llm_profile: user-level > role-level > "default"
             llm_profile = (
@@ -249,6 +255,7 @@ class UserRegistry:
                 allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
                 llm_profile=llm_profile,
                 prompt_path=raw_prompt_path,
+                role_prompt_path=raw_role_prompt_path,
             )
 
             identifiers: dict[str, Any] = user.get("identifiers") or {}

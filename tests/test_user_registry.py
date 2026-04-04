@@ -114,11 +114,11 @@ def test_user_record_is_frozen() -> None:
 
 
 @pytest.mark.unit
-def test_user_record_has_all_eight_fields() -> None:
-    """UserRecord must expose all 8 required fields.
+def test_user_record_has_all_required_fields() -> None:
+    """UserRecord must expose all required fields including role_prompt_path.
 
     Fields: display_name, role, blocked, actions, skills_dirs,
-    allowed_mcp_tools, llm_profile, prompt_path.
+    allowed_mcp_tools, llm_profile, prompt_path, role_prompt_path.
     """
     record = UserRecord(
         user_id="usr_bob",
@@ -129,7 +129,8 @@ def test_user_record_has_all_eight_fields() -> None:
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
         llm_profile="fast",
-        prompt_path="roles/admin.md",
+        prompt_path="users/bob.md",
+        role_prompt_path="roles/admin.md",
     )
     assert record.display_name == "Bob"
     assert record.role == "admin"
@@ -138,7 +139,8 @@ def test_user_record_has_all_eight_fields() -> None:
     assert record.skills_dirs == ["*"]
     assert record.allowed_mcp_tools == ["*"]
     assert record.llm_profile == "fast"
-    assert record.prompt_path == "roles/admin.md"
+    assert record.prompt_path == "users/bob.md"
+    assert record.role_prompt_path == "roles/admin.md"
 
 
 @pytest.mark.unit
@@ -165,7 +167,7 @@ def test_user_record_prompt_path_default_is_none() -> None:
 
 @pytest.mark.unit
 def test_user_record_to_dict_contains_all_fields() -> None:
-    """to_dict() must serialize all 8 fields into a plain dict."""
+    """to_dict() must serialize all fields including role_prompt_path."""
     record = UserRecord(
         user_id="usr_alice",
         display_name="Alice",
@@ -175,7 +177,8 @@ def test_user_record_to_dict_contains_all_fields() -> None:
         skills_dirs=["code"],
         allowed_mcp_tools=["search__*"],
         llm_profile="precise",
-        prompt_path="roles/admin.md",
+        prompt_path="users/alice.md",
+        role_prompt_path="roles/admin.md",
     )
     d = record.to_dict()
 
@@ -186,7 +189,8 @@ def test_user_record_to_dict_contains_all_fields() -> None:
     assert d["skills_dirs"] == ["code"]
     assert d["allowed_mcp_tools"] == ["search__*"]
     assert d["llm_profile"] == "precise"
-    assert d["prompt_path"] == "roles/admin.md"
+    assert d["prompt_path"] == "users/alice.md"
+    assert d["role_prompt_path"] == "roles/admin.md"
 
 
 @pytest.mark.unit
@@ -401,8 +405,11 @@ def test_resolve_user_prompt_path_user_overrides_role(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_resolve_user_prompt_path_falls_back_to_role(tmp_path: Path) -> None:
-    """prompt_path falls back to role-level when user has no override.
+def test_resolve_user_prompt_path_does_not_fall_back_to_role(tmp_path: Path) -> None:
+    """prompt_path is None when user has no override; role_prompt_path carries the role path.
+
+    prompt_path must NOT fall back to the role-level path — it stays None.
+    The role path is available separately on role_prompt_path.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -414,7 +421,8 @@ def test_resolve_user_prompt_path_falls_back_to_role(tmp_path: Path) -> None:
     result = registry.resolve_user("discord:user001", "discord")
 
     assert result is not None
-    assert result.prompt_path == "roles/user.md"
+    assert result.prompt_path is None
+    assert result.role_prompt_path == "roles/user.md"
 
 
 @pytest.mark.unit

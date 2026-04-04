@@ -35,6 +35,11 @@ class ChannelConfig:
                       When set, the Aiguilleur stamps envelope.metadata["llm_profile"]
                       with this value, overriding config.yaml:llm.default_profile.
                       None means fall back to the system default profile.
+        prompt_path:  Optional relative path (relative to prompts_dir) to the
+                      channel formatting overlay.  When set, the Aiguilleur stamps
+                      envelope.metadata["channel_prompt_path"] with this value so
+                      that Atelier can load it explicitly via soul_assembler.
+                      None means no channel overlay is loaded.
     """
 
     name: str
@@ -46,6 +51,7 @@ class ChannelConfig:
     class_path: str | None = None
     max_restarts: int = 5
     profile: str | None = None
+    prompt_path: str | None = None
 
 
 def _parse_int(value: object, default: int) -> int:
@@ -88,6 +94,7 @@ def load_channels_config() -> dict[str, ChannelConfig]:
             class_path=values.get("class") or None,
             max_restarts=_parse_int(values.get("max_restarts", 5), default=5),
             profile=values.get("profile") or None,
+            prompt_path=values.get("prompt_path") or None,
         )
 
     return result

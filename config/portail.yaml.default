@@ -77,9 +77,10 @@ users:
 # llm_profile : profil LLM pour ce rôle (fallback si pas de llm_profile
 #   sur l'utilisateur). null = fallback sur "default".
 #
-# prompt_path : chemin relatif (depuis prompts/) vers un overlay de prompt
-#   pour tous les utilisateurs de ce rôle (fallback si pas de prompt_path
-#   sur l'utilisateur). null = pas d'overlay de rôle.
+# prompt_path : chemin relatif (depuis prompts/) vers l'overlay de prompt du rôle
+#   (role_prompt_path). Chargé explicitement par Atelier en tant que couche rôle.
+#   N'est PAS un fallback pour prompt_path utilisateur — les deux champs sont
+#   indépendants. null = pas d'overlay de rôle.
 #
 roles:
   admin:

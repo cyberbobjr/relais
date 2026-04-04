@@ -78,13 +78,13 @@ def test_all_layers_assembled_in_order(tmp_path: Path) -> None:
     _write(prompts / "soul" / "SOUL.md", "SOUL")
     _write(prompts / "roles" / "admin.md", "ROLE")
     _write(prompts / "users" / "discord_123.md", "USER")
-    _write(prompts / "channels" / "telegram_default.md", "CHANNEL")
+    _write(prompts / "channels" / "discord_default.md", "CHANNEL")
 
     result = assemble_system_prompt(
         prompts,
-        channel="telegram",
+        role_prompt_path="roles/admin.md",
         user_prompt_path="users/discord_123.md",
-        user_role="admin",
+        channel_prompt_path="channels/discord_default.md",
     )
 
     sep = "\n\n---\n\n"
@@ -107,7 +107,7 @@ def test_missing_soul_returns_other_layers(tmp_path: Path) -> None:
     prompts = _make_prompts_dir(tmp_path)
     _write(prompts / "roles" / "user.md", "ROLE_CONTENT")
 
-    result = assemble_system_prompt(prompts, user_role="user")
+    result = assemble_system_prompt(prompts, role_prompt_path="roles/user.md")
 
     assert result == "ROLE_CONTENT"
     assert not result.startswith("\n\n---\n\n")
@@ -129,7 +129,7 @@ def test_missing_layer_skipped_silently(tmp_path: Path) -> None:
     _write(prompts / "soul" / "SOUL.md", "SOUL_CONTENT")
     # roles/admin.md intentionally not created
 
-    result = assemble_system_prompt(prompts, user_role="admin")
+    result = assemble_system_prompt(prompts, role_prompt_path="roles/admin.md")
 
     assert result == "SOUL_CONTENT"
     assert "admin" not in result
@@ -200,6 +200,53 @@ def test_user_prompt_path_rejects_traversal(tmp_path: Path, caplog: pytest.LogCa
 
 
 # ---------------------------------------------------------------------------
+# Test 5b – channel_prompt_path loads the explicit file
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_channel_prompt_path_loads_explicit_file(tmp_path: Path) -> None:
+    """channel_prompt_path loads a relative path resolved against prompts_dir.
+
+    Args:
+        tmp_path: pytest temporary directory.
+    """
+    prompts = _make_prompts_dir(tmp_path)
+    _write(prompts / "soul" / "SOUL.md", "SOUL")
+    _write(prompts / "channels" / "discord_default.md", "CHANNEL_CONTENT")
+
+    result = assemble_system_prompt(
+        prompts,
+        channel_prompt_path="channels/discord_default.md",
+    )
+
+    assert "CHANNEL_CONTENT" in result
+
+
+@pytest.mark.unit
+def test_channel_prompt_path_rejects_absolute_path(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """channel_prompt_path rejects absolute paths with a warning.
+
+    Args:
+        tmp_path: pytest temporary directory.
+        caplog: pytest log capture fixture.
+    """
+    import logging
+
+    prompts = _make_prompts_dir(tmp_path)
+    absolute_path = tmp_path / "outside.md"
+    absolute_path.write_text("SHOULD NOT LOAD", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        result = assemble_system_prompt(prompts, channel_prompt_path=absolute_path)
+
+    assert "SHOULD NOT LOAD" not in result
+    assert any("must be relative" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # Test 6 – no layers returns empty string
 # ---------------------------------------------------------------------------
 
@@ -234,7 +281,7 @@ def test_empty_file_skipped(tmp_path: Path) -> None:
     _write(prompts / "soul" / "SOUL.md", "")
     _write(prompts / "roles" / "user.md", "ROLE_TEXT")
 
-    result = assemble_system_prompt(prompts, user_role="user")
+    result = assemble_system_prompt(prompts, role_prompt_path="roles/user.md")
 
     assert result == "ROLE_TEXT"
     # Empty soul file must not appear at all, even as an empty separator fragment

@@ -28,6 +28,12 @@
 #                          this value. Omit to fall back to the system default profile.
 #                          Example: fast, precise, coder
 #                          See config/profiles.yaml for available profiles.
+#   prompt_path (str)    — Optional relative path (relative to prompts_dir) to the
+#                          channel formatting overlay loaded by Atelier.
+#                          The Aiguilleur stamps envelope.metadata["channel_prompt_path"]
+#                          with this value so Atelier loads it explicitly.
+#                          null means no channel overlay is loaded for this channel.
+#                          Example: channels/discord_default.md
 
 channels:
 

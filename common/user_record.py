@@ -15,9 +15,15 @@ from typing import Any
 class UserRecord:
     """Immutable snapshot of a single user's fully-merged profile.
 
-    All role-level fields (actions, skills_dirs, allowed_mcp_tools,
-    llm_profile, prompt_path) are already merged in by ``UserRegistry._load()``
-    so that callers never need to consult a separate registry.
+    Prompt-path fields are kept separate by origin so that the soul assembler
+    can load each layer independently:
+
+    - ``role_prompt_path``: explicit path from ``roles[*].prompt_path`` in
+      portail.yaml.  Applied as the role overlay layer.
+    - ``prompt_path``: explicit path from ``users[*].prompt_path`` in
+      portail.yaml.  Applied as the per-user override layer.  ``None`` when the
+      user has no ``prompt_path`` configured — the role-level path is **not**
+      used as a fallback here.
 
     Attributes:
         user_id: Stable cross-channel identifier, equal to the YAML key in
@@ -31,7 +37,9 @@ class UserRecord:
         skills_dirs: List of allowed skill directory names; ``["*"]`` = all.
         allowed_mcp_tools: List of allowed MCP tool identifiers; ``["*"]`` = all.
         llm_profile: LLM profile name (e.g. ``"default"``, ``"fast"``).
-        prompt_path: Relative path to a prompt overlay file, or ``None``.
+        prompt_path: Relative path to the per-user prompt overlay, or ``None``.
+        role_prompt_path: Relative path to the role-level prompt overlay, or
+            ``None``.
     """
 
     user_id: str
@@ -43,12 +51,13 @@ class UserRecord:
     allowed_mcp_tools: list[str]
     llm_profile: str
     prompt_path: str | None
+    role_prompt_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this record into a plain JSON-safe dict.
 
         Returns:
-            A dict with all 9 fields, suitable for storing in
+            A dict with all 10 fields, suitable for storing in
             ``envelope.metadata["user_record"]``.
         """
         return {
@@ -61,6 +70,7 @@ class UserRecord:
             "allowed_mcp_tools": list(self.allowed_mcp_tools),
             "llm_profile": self.llm_profile,
             "prompt_path": self.prompt_path,
+            "role_prompt_path": self.role_prompt_path,
         }
 
     @classmethod
@@ -83,4 +93,5 @@ class UserRecord:
             allowed_mcp_tools=list(data.get("allowed_mcp_tools") or []),
             llm_profile=str(data.get("llm_profile") or "default"),
             prompt_path=data.get("prompt_path") or None,
+            role_prompt_path=data.get("role_prompt_path") or None,
         )

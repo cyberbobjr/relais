@@ -159,6 +159,10 @@ class _RelaisDiscordClient(discord.Client):
             if channel_config is not None and channel_config.profile is not None
             else get_default_llm_profile()
         )
+        # Channel prompt path — None when not configured in channels.yaml
+        self._channel_prompt_path: str | None = (
+            channel_config.prompt_path if channel_config is not None else None
+        )
         # Active typing indicator tasks keyed by correlation_id
         self._typing_tasks: dict[str, asyncio.Task] = {}
 
@@ -274,6 +278,7 @@ class _RelaisDiscordClient(discord.Client):
                 "reply_to": str(message.channel.id),
                 "access_context": "dm" if is_dm else "server",
                 "channel_profile": self._llm_profile,
+                "channel_prompt_path": self._channel_prompt_path,
             },
         )
 

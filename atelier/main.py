@@ -2,10 +2,12 @@
 
 Functional role
 ---------------
-Executes the agentic LLM loop for each authorized task.  Fetches short-term
-context from Souvenir, assembles the system prompt (soul + role + user layers),
-runs the DeepAgents loop with MCP and internal tools, streams token-by-token
-output to the channel, and publishes the final reply for Sentinelle to deliver.
+Executes the agentic LLM loop for each authorized task.  Conversation history
+is managed natively by the persistent LangGraph checkpointer (AsyncSqliteSaver,
+``checkpoints.db``), keyed by ``user_id``.  Assembles the system prompt (soul +
+role + user layers), runs the DeepAgents loop with MCP and internal tools,
+streams token-by-token output to the channel, and publishes the final reply for
+Sentinelle to deliver.
 
 Technical overview
 ------------------
@@ -217,9 +219,9 @@ class Atelier:
             # 2. Assemble soul system prompt
             soul_prompt = assemble_system_prompt(
                 prompts_dir=_PROMPTS_DIR,
-                channel=envelope.channel,
+                role_prompt_path=ur.get("role_prompt_path"),
                 user_prompt_path=ur.get("prompt_path"),
-                user_role=ur.get("role"),
+                channel_prompt_path=envelope.metadata.get("channel_prompt_path"),
             )
 
             # 3. Select MCP servers for this profile.
