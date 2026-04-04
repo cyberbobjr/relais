@@ -112,9 +112,9 @@ async def test_clear_handler_handles_missing_envelope_json() -> None:
 
 
 def test_build_registry_contains_all_actions() -> None:
-    """build_registry() retourne les 4 actions attendues."""
+    """build_registry() retourne les 5 actions attendues."""
     registry = build_registry()
-    assert set(registry.keys()) == {"clear", "file_write", "file_read", "file_list"}
+    assert set(registry.keys()) == {"archive", "clear", "file_write", "file_read", "file_list"}
     assert isinstance(registry["clear"], ClearHandler)
     assert isinstance(registry["file_write"], FileWriteHandler)
     assert isinstance(registry["file_read"], FileReadHandler)

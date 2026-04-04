@@ -10,6 +10,7 @@ Usage::
         await handler.handle(ctx)
 """
 
+from souvenir.handlers.archive_handler import ArchiveHandler
 from souvenir.handlers.base import BaseActionHandler, HandlerContext
 from souvenir.handlers.clear_handler import ClearHandler
 from souvenir.handlers.file_list_handler import FileListHandler
@@ -24,6 +25,7 @@ def build_registry() -> dict[str, BaseActionHandler]:
         Dict mapping each supported action string to its handler.
     """
     return {
+        "archive": ArchiveHandler(),
         "clear": ClearHandler(),
         "file_write": FileWriteHandler(),
         "file_read": FileReadHandler(),

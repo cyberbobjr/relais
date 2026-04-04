@@ -3,21 +3,18 @@
 Functional role
 ---------------
 Archives conversational turns and handles agent memory file operations.
-Passively observes outgoing replies to persist full turn history in SQLite.
+Archival is triggered by Atelier via an ``archive`` action on
+``relais:memory:request`` — the full message history no longer transits
+through the outgoing envelope stream.
 
 Technical overview
 ------------------
-``Souvenir`` runs two concurrent asyncio consumer loops:
+``Souvenir`` runs a single asyncio consumer loop on ``relais:memory:request``.
 
-* Request loop — handles ``clear`` / ``file_write`` / ``file_read`` /
-  ``file_list`` actions from Commandant/agents.
-* Outgoing observer loop — watches per-channel outgoing streams to archive
-  each exchange to SQLite.
-
-> **Note**: Atelier no longer fetches context from Souvenir.  Conversation
-> history is managed by the LangGraph checkpointer (``AsyncSqliteSaver``,
-> ``checkpoints.db``) owned by Atelier.  The ``get`` action and the
-> ``relais:memory:response`` stream have been removed.
+* ``archive`` — persists the completed agent turn to SQLite (sent by Atelier
+  after each successful LLM call).
+* ``clear`` / ``file_write`` / ``file_read`` / ``file_list`` — memory file
+  operations triggered by agents via ``SouvenirBackend``.
 
 Key classes:
 
@@ -32,30 +29,18 @@ Key classes:
 Redis channels
 --------------
 Consumed:
-  - relais:memory:request               (consumer group: souvenir_group)
-  - relais:messages:outgoing:{channel}  for each channel in _DEFAULT_CHANNELS
-                                        (consumer group: souvenir_outgoing_group)
+  - relais:memory:request   (consumer group: souvenir_group)
 
 Produced:
+  - relais:memory:response  — responses to file_read / file_list / clear
   - relais:logs             — operational log entries
 
-Processing flow — request loop
-------------------------------
+Processing flow
+---------------
   (1) Consume from relais:memory:request (souvenir_group).
   (2) Parse action field from JSON payload.
-  (3) Dispatch to registered handler (clear / file_write / file_read / file_list).
+  (3) Dispatch to registered handler (archive / clear / file_write / file_read / file_list).
   (4) XACK.
-
-Processing flow — outgoing observer loop
------------------------------------------
-  (1) Consume from relais:messages:outgoing:{channel}
-      (souvenir_outgoing_group).
-  (2) Deserialize Envelope.
-  (3) Read messages_raw list from envelope.metadata["messages_raw"] (produced
-      by Atelier via atelier.message_serializer.serialize_messages()).
-  (4) Archive turn to SQLite long-term store: one row per correlation_id
-      (upsert), fields user_content + assistant_content + messages_raw JSON.
-  (5) XACK.
 """
 
 import asyncio
@@ -72,7 +57,6 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
 from souvenir.file_store import FileStore
@@ -81,19 +65,14 @@ from souvenir.long_term_store import LongTermStore
 
 logger = logging.getLogger("souvenir")
 
-# Canaux dont les streams sortants sont observés.
-_DEFAULT_CHANNELS = ["discord", "telegram"]
-
 
 class Souvenir:
     """Brique mémoire : archivage long terme (SQLite/SQLModel) et fichiers agent.
 
-    Consomme deux familles de streams :
-
-    1. ``relais:memory:request`` — actions ``clear`` / ``file_write`` / ``file_read`` / ``file_list``.
-    2. ``relais:messages:outgoing:{channel}`` — observe les réponses sortantes
-       pour archiver le tour complet dans SQLite (``messages_raw``) et extraire
-       des faits utilisateur.
+    Consomme ``relais:memory:request`` pour les actions ``archive`` / ``clear``
+    / ``file_write`` / ``file_read`` / ``file_list``.  L'archivage SQLite est
+    déclenché par Atelier via l'action ``archive`` — l'historique ne transite
+    plus dans les enveloppes sortantes.
     """
 
     def __init__(self) -> None:
@@ -105,31 +84,10 @@ class Souvenir:
         self.consumer_name = "souvenir_1"
         self._long_term = LongTermStore()
         self._file_store = FileStore()
-        self._channels: list[str] = _DEFAULT_CHANNELS
         self._action_registry = build_registry()
 
     # ------------------------------------------------------------------
-    # Public handler methods (testable without a running Redis)
-    async def _handle_outgoing(
-        self,
-        envelope: Envelope,
-        long_term_store: LongTermStore,
-    ) -> None:
-        """Traite un message sortant : archivage en SQLite long terme.
-
-        Reads messages_raw from envelope.metadata (full LangChain message
-        list for the turn, serialized by Atelier) and archives the turn to
-        SQLite (upsert on correlation_id).
-
-        Args:
-            envelope: L'enveloppe du message sortant (réponse de l'assistant).
-            long_term_store: Store long terme SQLite.
-        """
-        messages_raw: list[dict] = envelope.metadata.get("messages_raw") or []
-        await long_term_store.archive(envelope, messages_raw)
-
-    # ------------------------------------------------------------------
-    # Internal consumer loops
+    # Internal consumer loop
     # ------------------------------------------------------------------
 
     async def _process_request_stream(
@@ -205,78 +163,6 @@ class Souvenir:
                 logger.error("Request stream error: %s", exc)
                 await asyncio.sleep(1)
 
-    async def _process_outgoing_streams(
-        self,
-        redis_conn: Any,
-        shutdown: GracefulShutdown | None = None,
-    ) -> None:
-        """Observe ``relais:messages:outgoing:{channel}`` pour tous les canaux connus.
-
-        Crée un consumer group par canal (idempotent) puis entre dans une
-        boucle de lecture. Chaque message est désérialisé en ``Envelope`` et
-        traité par ``_handle_outgoing``.
-
-        Exits cleanly when ``shutdown.is_stopping()`` returns True.
-
-        Args:
-            redis_conn: Connexion Redis async.
-            shutdown: GracefulShutdown instance controlling the loop lifetime.
-                If None a new instance is created (backward-compatible).
-        """
-        if shutdown is None:
-            shutdown = GracefulShutdown()
-
-        outgoing_group = "souvenir_outgoing_group"
-        stream_map: dict[str, str] = {}
-        for channel in self._channels:
-            stream = f"relais:messages:outgoing:{channel}"
-            try:
-                await redis_conn.xgroup_create(stream, outgoing_group, mkstream=True)
-            except Exception as exc:
-                if "BUSYGROUP" not in str(exc):
-                    logger.warning("Outgoing group error for %s: %s", channel, exc)
-            stream_map[stream] = ">"
-
-        logger.info(
-            "Souvenir observing outgoing streams: %s", list(stream_map.keys())
-        )
-
-        while not shutdown.is_stopping():
-            try:
-                results = await redis_conn.xreadgroup(
-                    outgoing_group,
-                    self.consumer_name,
-                    stream_map,
-                    count=10,
-                    block=2000,
-                )
-
-                for _stream, messages in results:
-                    for message_id, data in messages:
-                        try:
-                            raw = data.get("payload", "{}")
-                            envelope = Envelope.from_json(
-                                raw if isinstance(raw, str) else raw.decode()
-                            )
-                            await self._handle_outgoing(
-                                envelope=envelope,
-                                long_term_store=self._long_term,
-                            )
-                        except Exception as inner_exc:
-                            logger.error(
-                                "Failed to process outgoing message %s: %s",
-                                message_id,
-                                inner_exc,
-                            )
-                        finally:
-                            await redis_conn.xack(
-                                _stream, outgoing_group, message_id
-                            )
-
-            except Exception as exc:
-                logger.error("Outgoing stream error: %s", exc)
-                await asyncio.sleep(1)
-
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
@@ -284,8 +170,8 @@ class Souvenir:
     async def start(self) -> None:
         """Démarre la brique Souvenir.
 
-        Initialise les tables SQLite, obtient la connexion Redis et lance les
-        deux boucles de consommation en parallèle via ``asyncio.gather``.
+        Initialise les tables SQLite, obtient la connexion Redis et lance la
+        boucle de consommation ``relais:memory:request``.
 
         Registers SIGTERM/SIGINT handlers via GracefulShutdown so both consumer
         loops exit cleanly when the process receives a termination signal.
@@ -307,10 +193,7 @@ class Souvenir:
             )
             await self._long_term._create_tables()
             await self._file_store._create_tables()
-            await asyncio.gather(
-                self._process_request_stream(redis_conn, shutdown=shutdown),
-                self._process_outgoing_streams(redis_conn, shutdown=shutdown),
-            )
+            await self._process_request_stream(redis_conn, shutdown=shutdown)
         except asyncio.CancelledError:
             logger.info("Souvenir shutting down...")
         finally:

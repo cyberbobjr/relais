@@ -75,6 +75,7 @@ as ``message_type=progress`` envelopes.  Publishing is governed by
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -304,7 +305,6 @@ class Atelier:
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.metadata["user_message"] = envelope.content
-            response_env.metadata["messages_raw"] = agent_result.messages_raw
             if streaming:
                 await stream_pub.finalize()
                 response_env.metadata["streamed"] = True
@@ -312,6 +312,20 @@ class Atelier:
 
             out_stream = "relais:messages:outgoing_pending"
             await redis_conn.xadd(out_stream, {"payload": response_env.to_json()})
+
+            # Archive the turn directly to Souvenir via relais:memory:request.
+            # messages_raw stays off the outgoing envelope to avoid serializing
+            # the full conversation history through every downstream consumer.
+            await redis_conn.xadd(
+                "relais:memory:request",
+                {
+                    "payload": json.dumps({
+                        "action": "archive",
+                        "envelope_json": response_env.to_json(),
+                        "messages_raw": agent_result.messages_raw,
+                    })
+                },
+            )
 
             await redis_conn.xadd("relais:logs", {
                 "level": "INFO",

@@ -68,7 +68,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         ("relais:security", "sentinelle_group"),
         ("relais:tasks", "atelier_group"),
         ("relais:messages:outgoing_pending", "sentinelle_outgoing_group"),
-        ("relais:messages:outgoing:discord", "souvenir_outgoing_group"),
+        ("relais:memory:request", "souvenir_group"),
     ]:
         await redis_conn.xgroup_create(stream, group, id="0", mkstream=True)
 
@@ -141,13 +141,15 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     assert response_env.session_id == initial.session_id
 
     # ── STEP 4: Souvenir → SQLite ─────────────────────────────────────────────
+    # Atelier now publishes an archive action to relais:memory:request instead
+    # of embedding messages_raw in the outgoing envelope.
     db_path = tmp_path / "smoke_memory.db"
 
     souvenir = Souvenir()
     souvenir._long_term = LongTermStore(db_path=db_path)
     await souvenir._long_term._create_tables()
 
-    await souvenir._process_outgoing_streams(
+    await souvenir._process_request_stream(
         redis_conn, shutdown=_one_shot()
     )
 

@@ -206,38 +206,6 @@ async def test_souvenir_request_stream_exits_on_shutdown() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_souvenir_outgoing_stream_exits_on_shutdown() -> None:
-    """Souvenir._process_outgoing_streams exits when GracefulShutdown.is_stopping() is True.
-
-    Wires a pre-set shutdown stub and asserts the coroutine completes within
-    1 second (no infinite loop).
-    """
-    from souvenir.main import Souvenir
-
-    souvenir = Souvenir.__new__(Souvenir)
-    souvenir.stream_req = "relais:memory:request"
-    souvenir.stream_res = "relais:memory:response"
-    souvenir.group_name = "souvenir_group"
-    souvenir.consumer_name = "souvenir_1"
-    souvenir._channels = ["discord", "telegram"]
-
-    redis_conn = _make_redis_mock()
-
-    with patch("souvenir.main.GracefulShutdown", return_value=_PreSetShutdown()):
-        try:
-            await asyncio.wait_for(
-                souvenir._process_outgoing_streams(redis_conn),
-                timeout=1.0,
-            )
-        except asyncio.TimeoutError:
-            pytest.fail(
-                "Souvenir._process_outgoing_streams did not exit after shutdown was requested "
-                "(loop still running after 1 s — GracefulShutdown not wired)"
-            )
-
-
 # ---------------------------------------------------------------------------
 # T4: Archiviste exits when shutdown is requested
 # ---------------------------------------------------------------------------
