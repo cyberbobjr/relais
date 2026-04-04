@@ -28,12 +28,12 @@ L'implémentation locale inclut surtout un adaptateur Discord complet. La config
 flowchart TD
     USERS([Utilisateurs externes])
   AIG["AIGUILLEUR<br/>adaptateur de canal"]
-  PORTAIL["PORTAIL<br/>valide Envelope<br/>résout UserRegistry<br/>stamp user_record + user_id"]
+  PORTAIL["PORTAIL<br/>valide Envelope<br/>résout UserRegistry<br/>stamp user_record + user_id + llm_profile"]
     PENDING[(relais:admin:pending_users)]
   SENT_IN["SENTINELLE entrant<br/>ACL + routage"]
   ATELIER["ATELIER<br/>DeepAgents LangGraph"]
   COMMANDANT["COMMANDANT<br/>slash commands hors LLM"]
-  SOUVENIR["SOUVENIR<br/>contexte Redis + archive SQLite"]
+  SOUVENIR["SOUVENIR<br/>archive SQLite + fichiers agent"]
   SENT_OUT["SENTINELLE sortant<br/>pass-through actuel"]
     OUT["relais:messages:outgoing:{channel}"]
     STREAM["relais:messages:streaming:{channel}:{correlation_id}"]
@@ -52,11 +52,6 @@ flowchart TD
     SENT_IN -->|"commande connue + ACL OK<br/>relais:commands"| COMMANDANT
     SENT_IN -->|"commande inconnue ou refusee<br/>reply inline"| OUT
 
-    ATELIER -->|"relais:memory:request"| MEM_REQ
-    MEM_REQ --> SOUVENIR
-    SOUVENIR -->|"relais:memory:response"| MEM_RES
-    MEM_RES --> ATELIER
-
     ATELIER -->|"relais:messages:streaming:{channel}:{correlation_id}"| STREAM
     ATELIER -->|"relais:messages:outgoing_pending<br/>reponse finale"| SENT_OUT
     ATELIER -->|"relais:messages:outgoing:{channel}<br/>progress events"| OUT
@@ -64,6 +59,7 @@ flowchart TD
 
     COMMANDANT -->|"help -> outgoing:{channel}"| OUT
     COMMANDANT -->|"clear -> memory:request"| MEM_REQ
+    MEM_REQ --> SOUVENIR
 
     SENT_OUT -->|"relais:messages:outgoing:{channel}"| OUT
     OUT --> AIG
@@ -87,8 +83,7 @@ flowchart TD
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |
-| `relais:memory:request` | Atelier, Commandant | Souvenir |
-| `relais:memory:response` | Souvenir | Atelier |
+| `relais:memory:request` | Commandant | Souvenir |
 | `relais:messages:outgoing_pending` | Atelier | Sentinelle |
 | `relais:messages:outgoing:{channel}` | Sentinelle, Atelier, Commandant, Souvenir | Aiguilleur, Souvenir |
 | `relais:messages:streaming:{channel}:{correlation_id}` | Atelier | adaptateur de canal streaming |
@@ -98,11 +93,11 @@ flowchart TD
 
 ### Comportement des briques
 
-- `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `metadata["user_record"]` et `metadata["user_id"]`, puis publie sur `relais:security`.
+- `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`), puis publie sur `relais:security`.
 - `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
 - `Commandant` consomme `relais:commands`. `/help` répond directement sur `relais:messages:outgoing:{channel}`. `/clear` publie une requête `clear` sur `relais:memory:request`.
-- `Atelier` consomme `relais:tasks`, récupère le contexte via `relais:memory:request` / `relais:memory:response`, publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`.
-- `Souvenir` consomme `relais:memory:request` et observe les streams `relais:messages:outgoing:{channel}` pour alimenter le contexte Redis et l'archive SQLite.
+- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`.
+- `Souvenir` consomme `relais:memory:request` (actions : `clear`, `file_write`, `file_read`, `file_list`) et observe les streams `relais:messages:outgoing:{channel}` pour archiver chaque tour dans SQLite (`messages_raw`). L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
 
 ---

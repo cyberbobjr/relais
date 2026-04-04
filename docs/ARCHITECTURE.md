@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-03
+**Dernière mise à jour :** 2026-04-04
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -33,11 +33,11 @@ Utilisateur
      -> relais:commands -> Commandant
 
 Atelier
-  -> relais:memory:request -> Souvenir -> relais:memory:response
   -> relais:messages:streaming:{channel}:{correlation_id}
   -> relais:messages:outgoing_pending -> Sentinelle sortant -> relais:messages:outgoing:{channel}
   -> relais:messages:outgoing:{channel} pour certains progress events
   -> relais:tasks:failed en cas d'échec non récupérable
+  (historique conversationnel géré par LangGraph checkpointer AsyncSqliteSaver — checkpoints.db)
 
 Commandant
   -> relais:messages:outgoing:{channel} pour /help
@@ -70,9 +70,7 @@ Aiguilleur
 
 | Stream / clé | Producteur | Consommateur |
 |--------------|------------|--------------|
-| `relais:memory:request` | Atelier, Commandant | Souvenir |
-| `relais:memory:response` | Souvenir | Atelier |
-| `relais:context:{session_id}` | Souvenir | usage interne mémoire court terme |
+| `relais:memory:request` | Commandant | Souvenir |
 
 ### Streaming et erreurs
 
@@ -95,13 +93,15 @@ Aiguilleur
 - Démarre un adaptateur par canal activé.
 - L'implémentation complète présente dans le dépôt est surtout l'adaptateur Discord.
 - Côté Discord, l'entrée est `relais:messages:incoming` et la sortie `relais:messages:outgoing:discord`.
+- Chaque adaptateur estampille `envelope.metadata["channel_profile"]` depuis `ChannelConfig.profile` (channels.yaml).
+- Chaque adaptateur estampille `envelope.metadata["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (channels.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 
 ### Portail
 
 - Consomme `relais:messages:incoming`.
 - Valide l'enveloppe.
 - Résout l'utilisateur avec `UserRegistry`.
-- Écrit `metadata["user_record"]` et `metadata["user_id"]`.
+- Écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`).
 - Applique `unknown_user_policy` :
   - `deny` : drop silencieux
   - `guest` : stamp guest puis forward
@@ -122,13 +122,13 @@ Aiguilleur
 ### Atelier
 
 - Consomme `relais:tasks`.
-- Récupère l'historique auprès de Souvenir via `relais:memory:request` / `relais:memory:response`.
+- Gère l'historique conversationnel via un checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`). L'ID de thread est `user_id` (stable cross-session).
 - Assemble le prompt système avec `SoulAssembler`.
 - Exécute `AgentExecutor`.
 - Publie :
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
   - certains événements de progression sur `relais:messages:outgoing:{channel}`
-  - la réponse finale sur `relais:messages:outgoing_pending`
+  - la réponse finale (avec `metadata["messages_raw"]`) sur `relais:messages:outgoing_pending`
   - les erreurs finales sur `relais:tasks:failed`
 
 ### Commandant
@@ -139,16 +139,12 @@ Aiguilleur
 
 ### Souvenir
 
-- Consomme `relais:memory:request`.
-- Répond sur `relais:memory:response`.
+- Consomme `relais:memory:request` (actions : `clear`, `file_write`, `file_read`, `file_list`).
 - Observe les streams `relais:messages:outgoing:{channel}` pour les canaux de `_DEFAULT_CHANNELS`.
-- Maintient le contexte court terme dans Redis et archive les échanges dans `storage/memory.db`.
-- Chaque tour est stocké comme un **blob JSON unique** contenant la liste complète de messages
-  LangChain (`messages_raw`) produite par `atelier.message_serializer.serialize_messages()` —
-  pas de paire user/assistant séparée.
-- `ContextStore` : un blob par tour dans la Redis List `relais:context:{session_id}` (max 20 tours, TTL 24 h).
+- Archive chaque tour dans `storage/memory.db` via `LongTermStore`.
 - `LongTermStore` : une ligne par tour dans `archived_messages` (upsert sur `correlation_id`) avec
   `messages_raw` JSON, `user_content` et `assistant_content` comme champs dénormalisés.
+- L'action `clear` efface les lignes SQLite pour la session et supprime le thread du checkpointer LangGraph (`user_id`).
 
 ### Archiviste
 
@@ -186,12 +182,12 @@ La résolution suit :
 
 ## Prompts
 
-`assemble_system_prompt()` assemble actuellement 4 couches :
+`assemble_system_prompt()` assemble actuellement 4 couches. Tous les chemins sont explicites — aucun chemin n'est inféré par convention à partir du nom de rôle ou du canal :
 
-1. `prompts/soul/SOUL.md`
-2. `prompts/roles/{role}.md`
-3. `prompt_path` utilisateur relatif à `prompts/`
-4. `prompts/channels/{channel}_default.md`
+1. `prompts/soul/SOUL.md` — personnalité de base (toujours chargée)
+2. `role_prompt_path` — chemin relatif configuré dans `portail.yaml` (`roles[*].prompt_path`), estampillé dans `UserRecord.role_prompt_path` par Portail
+3. `user_prompt_path` — chemin relatif configuré dans `portail.yaml` (`users[*].prompt_path`), estampillé dans `UserRecord.prompt_path` par Portail. Indépendant de `role_prompt_path` — aucun fallback entre les deux.
+4. `channel_prompt_path` — chemin relatif configuré dans `channels.yaml` (`channels[*].prompt_path`), estampillé dans `envelope.metadata["channel_prompt_path"]` par l'Aiguilleur
 
 Les fichiers `prompts/policies/*.md` existent dans les templates, mais ils ne sont pas injectés automatiquement dans le prompt principal par le code actuel.
 

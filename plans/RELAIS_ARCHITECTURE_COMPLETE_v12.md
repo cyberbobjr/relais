@@ -455,7 +455,7 @@ channels:
 - `max_restarts` — max avant abandon, restart avec backoff exponentiel
 - `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["channel_profile"]` par l'Aiguilleur au moment de la création de l'enveloppe entrante ; si absent, l'Aiguilleur lit `config.yaml > llm.default_profile` (fallback `"default"`)
 
-> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.metadata["channel_profile"]`. Le Portail résout ensuite ce profil effectif dans `user_record.llm_profile`. La Sentinelle n'écrit jamais ce champ.
+> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.metadata["channel_profile"]`. Le Portail stampe ensuite le profil effectif dans `envelope.metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`). La Sentinelle n'écrit jamais ce champ.
 - `command`/`args` — requis pour `type: external` uniquement
 
 ### Tableau des canaux
@@ -555,14 +555,12 @@ groups:                         # Groupes WhatsApp / Telegram — auth par group
     group_id: "120363000000000@g.us"
     allowed: true
     blocked: false
-    llm_profile: fast
 
 users:
   usr_benjamin:
     display_name: "Benjamin"
     role: admin
     blocked: false
-    llm_profile: precise
     identifiers:
       discord:
         dm: "789012345678"          # accès DM
@@ -576,7 +574,6 @@ users:
     display_name: "RELAIS System"
     role: admin
     blocked: false
-    llm_profile: default
     notes: "Compte interne — ne pas supprimer"
 
 roles:
@@ -608,7 +605,7 @@ L'Atelier suit ce flux pour chaque tâche entrante :
 Incoming envelope
   ↓
 Parse + load profile
-  — lit envelope.metadata["user_record"]["llm_profile"]
+  — lit envelope.metadata["llm_profile"] (stampé par le Portail)
   — si absent : fallback "default"
   — résout le ProfileConfig depuis atelier/profiles.yaml (model, max_turns, max_tokens, resilience)
   ↓
@@ -958,13 +955,12 @@ La structure réelle parsée par `atelier/profile_loader.py` est volontairement 
 
 Le profil actif pour un message entrant est résolu dans cet ordre strict (le premier trouvé gagne) :
 
-1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["channel_profile"]`, résolu par le Portail)
-2. **`portail.yaml:users.<id>.llm_profile`** — préférence par utilisateur (champ optionnel ; `null` = pas de préférence)
-3. **`roles.<role>.llm_profile`** — préférence par rôle (portail.yaml, champ optionnel)
-4. **`config.yaml > llm.default_profile`** — profil système par défaut
-5. **`"default"`** — valeur de repli ultime si `llm.default_profile` est absent de `config.yaml`
+1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["channel_profile"]`)
+2. **`"default"`** — valeur de repli ultime
 
-> La résolution est effectuée par le **Portail** et le résultat est stocké dans `metadata.user_record.llm_profile`. L'Atelier relit ensuite cette valeur depuis `user_record`.
+> La résolution est effectuée par le **Portail** et le résultat est stampé dans `envelope.metadata["llm_profile"]` (clé top-level, pas dans `user_record`). L'Atelier relit ensuite cette valeur depuis `envelope.metadata["llm_profile"]`.
+>
+> Note : les champs `llm_profile` au niveau utilisateur (`portail.yaml:users.<id>.llm_profile`) et rôle (`roles.<role>.llm_profile`) ont été supprimés — la priorité se fait désormais uniquement via le canal ou la valeur par défaut système.
 
 ```yaml
 profiles:

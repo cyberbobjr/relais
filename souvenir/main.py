@@ -2,19 +2,22 @@
 
 Functional role
 ---------------
-Maintains conversational memory for all users.  Serves context history to
-Atelier on demand and passively observes outgoing replies to archive exchanges
-in long-term storage.
+Archives conversational turns and handles agent memory file operations.
+Passively observes outgoing replies to persist full turn history in SQLite.
 
 Technical overview
 ------------------
 ``Souvenir`` runs two concurrent asyncio consumer loops:
 
-* Request loop — handles ``get`` / ``file_write`` / ``file_read`` /
-  ``file_list`` actions from Atelier and returns a JSON payload on
-  ``relais:memory:response``.
+* Request loop — handles ``clear`` / ``file_write`` / ``file_read`` /
+  ``file_list`` actions from Commandant/agents.
 * Outgoing observer loop — watches per-channel outgoing streams to archive
   each exchange to SQLite.
+
+> **Note**: Atelier no longer fetches context from Souvenir.  Conversation
+> history is managed by the LangGraph checkpointer (``AsyncSqliteSaver``,
+> ``checkpoints.db``) owned by Atelier.  The ``get`` action and the
+> ``relais:memory:response`` stream have been removed.
 
 Key classes:
 
@@ -34,16 +37,14 @@ Consumed:
                                         (consumer group: souvenir_outgoing_group)
 
 Produced:
-  - relais:memory:response  — context history reply to Atelier
   - relais:logs             — operational log entries
 
 Processing flow — request loop
 ------------------------------
   (1) Consume from relais:memory:request (souvenir_group).
   (2) Parse action field from JSON payload.
-  (3) Dispatch to registered handler.
-  (4) Publish JSON response to relais:memory:response.
-  (5) XACK.
+  (3) Dispatch to registered handler (clear / file_write / file_read / file_list).
+  (4) XACK.
 
 Processing flow — outgoing observer loop
 -----------------------------------------
@@ -85,13 +86,13 @@ _DEFAULT_CHANNELS = ["discord", "telegram"]
 
 
 class Souvenir:
-    """Brique mémoire : court terme (Redis) et long terme (SQLite/SQLModel).
+    """Brique mémoire : archivage long terme (SQLite/SQLModel) et fichiers agent.
 
     Consomme deux familles de streams :
 
     1. ``relais:memory:request`` — actions ``clear`` / ``file_write`` / ``file_read`` / ``file_list``.
     2. ``relais:messages:outgoing:{channel}`` — observe les réponses sortantes
-       pour mettre à jour le contexte Redis, archiver dans SQLite et extraire
+       pour archiver le tour complet dans SQLite (``messages_raw``) et extraire
        des faits utilisateur.
     """
 
