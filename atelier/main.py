@@ -40,8 +40,9 @@ Consumed:
   - relais:tasks               (consumer group: atelier_group)
 
 Produced:
-  - relais:messages:outgoing_pending   — full reply envelope → Sentinelle
+  - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw)
   - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
+  - relais:memory:request      — archive action with full messages_raw for Souvenir
   - relais:tasks:failed        — DLQ for exhausted retry attempts
   - relais:logs                — operational log entries
 
@@ -56,8 +57,10 @@ Message flow (one task at a time):
     │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── AgentResult(reply_text, messages_raw)  ← full turn captured via aget_state()
-    │  (5) build response Envelope; stamp metadata["messages_raw"] = messages_raw
-    │      (Souvenir reads this to persist the full LangChain message history)
+    │  (5) build response Envelope (without messages_raw to avoid serializing full
+    │      conversation history through every downstream consumer)
+    │  (6) publish archive action to relais:memory:request with envelope + messages_raw
+    │      (Souvenir processes this to persist the full LangChain message history)
     └──► relais:messages:outgoing_pending
 
 XACK contract:

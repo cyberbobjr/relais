@@ -64,13 +64,14 @@ Aiguilleur
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |
 | `relais:messages:outgoing_pending` | Atelier | Sentinelle |
-| `relais:messages:outgoing:{channel}` | Sentinelle, Atelier, Commandant, Souvenir | Aiguilleur, Souvenir |
+| `relais:messages:outgoing:{channel}` | Sentinelle, Atelier, Commandant | Aiguilleur |
 
 ### Mémoire
 
 | Stream / clé | Producteur | Consommateur |
 |--------------|------------|--------------|
-| `relais:memory:request` | Commandant | Souvenir |
+| `relais:memory:request` | Atelier, Commandant | Souvenir |
+| `relais:memory:response` | Souvenir | agents (via SouvenirBackend) |
 
 ### Streaming et erreurs
 
@@ -128,7 +129,8 @@ Aiguilleur
 - Publie :
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
   - certains événements de progression sur `relais:messages:outgoing:{channel}`
-  - la réponse finale (avec `metadata["messages_raw"]`) sur `relais:messages:outgoing_pending`
+  - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw` pour éviter de sérialiser l'historique complet dans chaque stream sortant)
+  - une action `archive` sur `relais:memory:request` avec la réponse complète et `messages_raw` pour archivage Souvenir
   - les erreurs finales sur `relais:tasks:failed`
 
 ### Commandant
@@ -139,12 +141,13 @@ Aiguilleur
 
 ### Souvenir
 
-- Consomme `relais:memory:request` (actions : `clear`, `file_write`, `file_read`, `file_list`).
-- Observe les streams `relais:messages:outgoing:{channel}` pour les canaux de `_DEFAULT_CHANNELS`.
+- Consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`).
+- Action `archive` : publiée par Atelier après chaque tour LLM complété, contient l'enveloppe de réponse + `messages_raw` (historique LangChain sérialisé pour ce tour).
 - Archive chaque tour dans `storage/memory.db` via `LongTermStore`.
 - `LongTermStore` : une ligne par tour dans `archived_messages` (upsert sur `correlation_id`) avec
   `messages_raw` JSON, `user_content` et `assistant_content` comme champs dénormalisés.
 - L'action `clear` efface les lignes SQLite pour la session et supprime le thread du checkpointer LangGraph (`user_id`).
+- Les actions de fichiers (`file_*`) servent les requêtes d'agents via `SouvenirBackend`, répondent sur `relais:memory:response`.
 
 ### Archiviste
 

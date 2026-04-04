@@ -55,6 +55,7 @@ flowchart TD
     ATELIER -->|"relais:messages:streaming:{channel}:{correlation_id}"| STREAM
     ATELIER -->|"relais:messages:outgoing_pending<br/>reponse finale"| SENT_OUT
     ATELIER -->|"relais:messages:outgoing:{channel}<br/>progress events"| OUT
+    ATELIER -->|"relais:memory:request<br/>archive action"| MEM_REQ
     ATELIER -->|"relais:tasks:failed"| DLQ
 
     COMMANDANT -->|"help -> outgoing:{channel}"| OUT
@@ -64,8 +65,6 @@ flowchart TD
     SENT_OUT -->|"relais:messages:outgoing:{channel}"| OUT
     OUT --> AIG
     AIG --> USERS
-
-    OUT -. observe .-> SOUVENIR
 
     PORTAIL -. logs .-> ARCHIVISTE
     SENT_IN -. logs .-> ARCHIVISTE
@@ -85,7 +84,7 @@ flowchart TD
 | `relais:commands` | Sentinelle | Commandant |
 | `relais:memory:request` | Commandant | Souvenir |
 | `relais:messages:outgoing_pending` | Atelier | Sentinelle |
-| `relais:messages:outgoing:{channel}` | Sentinelle, Atelier, Commandant, Souvenir | Aiguilleur, Souvenir |
+| `relais:messages:outgoing:{channel}` | Sentinelle, Atelier, Commandant | Aiguilleur |
 | `relais:messages:streaming:{channel}:{correlation_id}` | Atelier | adaptateur de canal streaming |
 | `relais:tasks:failed` | Atelier | observateurs / diagnostics |
 | `relais:admin:pending_users` | Portail | revue manuelle |
@@ -97,7 +96,7 @@ flowchart TD
 - `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
 - `Commandant` consomme `relais:commands`. `/help` répond directement sur `relais:messages:outgoing:{channel}`. `/clear` publie une requête `clear` sur `relais:memory:request`.
 - `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents auto-découverts dans `atelier/agents/` ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
-- `Souvenir` consomme `relais:memory:request` (actions : `clear`, `file_write`, `file_read`, `file_list`) et observe les streams `relais:messages:outgoing:{channel}` pour archiver chaque tour dans SQLite (`messages_raw`). L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
+- `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
 
 ---

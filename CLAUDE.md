@@ -45,14 +45,15 @@ The main pipeline flows through these bricks in order:
    - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
    - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
    - **Subagent registry**: `atelier/agents/` package with auto-discovery via `SubagentRegistry.discover()`; each subagent is a Python module exposing `SPEC_NAME`, `build_spec()`, `delegation_snippet()`; user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `config-admin` (configuration CRUD)
-   - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop)
+   - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
-   - Dual-stream consumer: `relais:memory:request` (Atelier requests) + `relais:messages:outgoing:*` (response observer)
+   - Single-stream consumer: `relais:memory:request` for archive/clear/file_* actions
+   - Archive action: Atelier publishes completed turns with full `messages_raw` list (serialized LangChain messages); Souvenir persists to SQLite
    - Short-term: Redis List `relais:context:{session_id}` (max 20 turn blobs, each blob = full serialized LangChain message list for one turn, TTL 24h)
-   - Outgoing observer reads `envelope.metadata["messages_raw"]` (serialized by `atelier.message_serializer`) to persist the full turn history
    - Long-term: SQLite `~/.relais/storage/memory.db`; one row per turn (upsert on `correlation_id`), fields `user_content`, `assistant_content`, `messages_raw` JSON
    - Memory extractor: `MemoryExtractor` uses `langchain.chat_models.init_chat_model` (provider:model-id format) to call the LLM directly — no LiteLLM proxy required; confidence threshold 0.7
+   - Handlers: `ArchiveHandler` (persist turn), `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`
 
 ### Observer & Support Services
 
