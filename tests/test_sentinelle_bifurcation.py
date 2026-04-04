@@ -58,7 +58,6 @@ def _make_admin_record() -> UserRecord:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
-        llm_profile="default",
         prompt_path=None,
     )
 
@@ -77,7 +76,6 @@ def _make_user_record() -> UserRecord:
         actions=[],
         skills_dirs=[],
         allowed_mcp_tools=[],
-        llm_profile="default",
         prompt_path=None,
     )
 

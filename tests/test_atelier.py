@@ -283,7 +283,7 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
     # Override the stored _profiles to match what the test expects
     atelier._profiles = profiles
 
-    envelope = _make_envelope(metadata={"user_record": {"llm_profile": "fast"}})
+    envelope = _make_envelope(metadata={"llm_profile": "fast", "user_record": {}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -700,15 +700,18 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_stream_passes_user_role_to_assemble_system_prompt() -> None:
-    """_process_stream passes envelope.metadata['user_role'] to assemble_system_prompt.
+async def test_process_stream_passes_role_prompt_path_to_assemble_system_prompt() -> None:
+    """_process_stream forwards user_record['role_prompt_path'] to assemble_system_prompt.
 
-    When Portail has stamped a user_role into the envelope metadata, Atelier
-    must forward it as the user_role keyword argument so the role overlay is
-    included in the assembled system prompt.
+    When Portail has stamped a role_prompt_path into user_record, Atelier
+    must forward it as the role_prompt_path keyword argument so the role
+    overlay is included in the assembled system prompt.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(metadata={"user_record": {"role": "admin", "llm_profile": "default"}})
+    envelope = _make_envelope(metadata={
+        "llm_profile": "default",
+        "user_record": {"role_prompt_path": "roles/admin.md"},
+    })
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -739,18 +742,18 @@ async def test_process_stream_passes_user_role_to_assemble_system_prompt() -> No
 
     mock_sp.assert_called_once()
     call_kwargs = mock_sp.call_args.kwargs
-    assert call_kwargs.get("user_role") == "admin"
+    assert call_kwargs.get("role_prompt_path") == "roles/admin.md"
 
 
 @pytest.mark.asyncio
-async def test_process_stream_user_role_none_when_absent_in_metadata() -> None:
-    """_process_stream passes user_role=None when metadata has no user_role key.
+async def test_process_stream_role_prompt_path_none_when_absent_in_user_record() -> None:
+    """_process_stream passes role_prompt_path=None when user_record has no role_prompt_path.
 
-    When the envelope carries no user_role (e.g. unknown user), the call must
-    still succeed with user_role=None rather than raising KeyError.
+    When the envelope carries no role_prompt_path (e.g. unknown user), the call
+    must still succeed with role_prompt_path=None rather than raising KeyError.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(metadata={"llm_profile": "default"})  # no user_role
+    envelope = _make_envelope(metadata={"llm_profile": "default"})  # no user_record
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -781,7 +784,7 @@ async def test_process_stream_user_role_none_when_absent_in_metadata() -> None:
 
     mock_sp.assert_called_once()
     call_kwargs = mock_sp.call_args.kwargs
-    assert call_kwargs.get("user_role") is None
+    assert call_kwargs.get("role_prompt_path") is None
 
 
 # ---------------------------------------------------------------------------
@@ -940,7 +943,6 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
     envelope = _make_envelope(metadata={"user_record": {
         "skills_dirs": ["coding"],
         "allowed_mcp_tools": [],
-        "llm_profile": "default",
     }})
     redis_conn = _make_redis_mock()
 

@@ -15,8 +15,8 @@ Technical overview
 * ``UserRegistry`` — loads and caches user records from portail.yaml;
   resolves ``sender_id`` → ``UserRecord``.
 * ``_enrich_envelope`` — writes the canonical ``user_record`` dict and
-  derived fields (``display_name``, ``user_role``, ``llm_profile``,
-  ``custom_prompt_path``) into ``envelope.metadata``.
+  ``llm_profile`` (from ``channel_profile`` or ``"default"``) into
+  ``envelope.metadata``.
 * ``_apply_guest_stamps`` — stamps minimal guest metadata when the sender
   is unknown and the guest policy is "allow".
 * ``_update_active_sessions`` — maintains a Redis Hash used by Crieur to
@@ -40,8 +40,8 @@ Processing flow
   (2) Deserialize Envelope from JSON payload.
   (3) Resolve sender via UserRegistry.
   (4) Apply unknown_user_policy: drop silently or stamp guest metadata.
-  (5) Enrich envelope.metadata with user_record, display_name, user_role,
-      llm_profile (resolved from channel_profile), custom_prompt_path.
+  (5) Enrich envelope.metadata with user_record, user_id, and llm_profile
+      (from channel_profile or "default").
   (6) Update relais:active_sessions:{sender_id} hash.
   (7) Forward enriched envelope to relais:security.
   (8) XACK the message (unconditional — validation errors are logged and
@@ -101,42 +101,34 @@ class Portail:
         )
 
     def _enrich_envelope(self, envelope: "Envelope") -> None:
-        """Stamp a single ``user_record`` dict into envelope.metadata.
+        """Stamp ``user_record`` dict and ``llm_profile`` into envelope.metadata.
 
         Resolves the sender against the UserRegistry.  When found, writes the
-        fully-merged ``UserRecord.to_dict()`` under ``envelope.metadata["user_record"]``.
-        Unknown users produce no ``user_record`` key — the caller
-        (``_process_stream``) handles them via the configured policy.
+        fully-merged ``UserRecord.to_dict()`` under ``envelope.metadata["user_record"]``
+        and ``llm_profile`` as a top-level metadata key.
 
-        The ``llm_profile`` field inside ``user_record`` is resolved as:
-        ``channel_profile`` (Aiguilleur) > user/role level > ``"default"``.
+        ``llm_profile`` is resolved as: ``channel_profile`` (Aiguilleur) > ``"default"``.
 
-        Legacy top-level keys (``user_role``, ``display_name``, ``skills_dirs``,
-        ``custom_prompt_path``, ``allowed_mcp_tools``) are NOT written.
+        Unknown users produce no ``user_record`` or ``llm_profile`` key — the
+        caller (``_process_stream``) handles them via the configured policy.
+        Under ``deny`` policy, the envelope is dropped before forwarding, so
+        downstream bricks never see an envelope without ``llm_profile``.
 
         Args:
             envelope: The incoming envelope to enrich in place.
         """
-        record : UserRecord | None = self._user_registry.resolve_user(
+        record: UserRecord | None = self._user_registry.resolve_user(
             sender_id=envelope.sender_id,
             channel=envelope.channel,
         )
         if record is None:
             return
 
-        # llm_profile: channel_profile (Aiguilleur) overrides user/role value
-        channel_profile: str | None = envelope.metadata.get("channel_profile")
-        effective_llm_profile: str = (
-            channel_profile if channel_profile else record.llm_profile
+        envelope.metadata["user_record"] = record.to_dict()
+        envelope.metadata["user_id"] = record.user_id
+        envelope.metadata["llm_profile"] = (
+            envelope.metadata.get("channel_profile") or "default"
         )
-
-        # Build the user_record dict from the resolved record, overriding
-        # llm_profile with the channel_profile when present.
-        user_record_dict = record.to_dict()
-        user_record_dict["llm_profile"] = effective_llm_profile
-
-        envelope.metadata["user_record"] = user_record_dict
-        envelope.metadata["user_id"] = user_record_dict["user_id"]
 
     def _apply_guest_stamps(self, envelope: "Envelope") -> None:
         """Stamp a synthetic guest ``user_record`` dict onto an unknown-user envelope.
@@ -149,10 +141,12 @@ class Portail:
         Args:
             envelope: The incoming envelope to enrich in place.
         """
-        channel_profile: str | None = envelope.metadata.get("channel_profile")
-        guest_record = self._user_registry.build_guest_record(channel_profile=channel_profile)
+        guest_record = self._user_registry.build_guest_record()
         envelope.metadata["user_record"] = guest_record.to_dict()
         envelope.metadata["user_id"] = "guest"
+        envelope.metadata["llm_profile"] = (
+            envelope.metadata.get("channel_profile") or "default"
+        )
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: "Envelope") -> None:
         """Track active sessions per user for the Crieur (push notifications).

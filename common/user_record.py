@@ -36,10 +36,14 @@ class UserRecord:
         actions: List of allowed slash command names; ``["*"]`` grants all.
         skills_dirs: List of allowed skill directory names; ``["*"]`` = all.
         allowed_mcp_tools: List of allowed MCP tool identifiers; ``["*"]`` = all.
-        llm_profile: LLM profile name (e.g. ``"default"``, ``"fast"``).
         prompt_path: Relative path to the per-user prompt overlay, or ``None``.
         role_prompt_path: Relative path to the role-level prompt overlay, or
             ``None``.
+
+    Note:
+        ``llm_profile`` is NOT a UserRecord field.  It is stamped directly
+        into ``envelope.metadata["llm_profile"]`` by Portail, derived from
+        the channel's ``channel_profile`` (or ``"default"``).
     """
 
     user_id: str
@@ -49,7 +53,6 @@ class UserRecord:
     actions: list[str]
     skills_dirs: list[str]
     allowed_mcp_tools: list[str]
-    llm_profile: str
     prompt_path: str | None
     role_prompt_path: str | None = None
 
@@ -57,7 +60,7 @@ class UserRecord:
         """Serialize this record into a plain JSON-safe dict.
 
         Returns:
-            A dict with all 10 fields, suitable for storing in
+            A dict with all fields, suitable for storing in
             ``envelope.metadata["user_record"]``.
         """
         return {
@@ -68,7 +71,6 @@ class UserRecord:
             "actions": list(self.actions),
             "skills_dirs": list(self.skills_dirs),
             "allowed_mcp_tools": list(self.allowed_mcp_tools),
-            "llm_profile": self.llm_profile,
             "prompt_path": self.prompt_path,
             "role_prompt_path": self.role_prompt_path,
         }
@@ -91,7 +93,6 @@ class UserRecord:
             actions=list(data.get("actions") or []),
             skills_dirs=list(data.get("skills_dirs") or []),
             allowed_mcp_tools=list(data.get("allowed_mcp_tools") or []),
-            llm_profile=str(data.get("llm_profile") or "default"),
             prompt_path=data.get("prompt_path") or None,
             role_prompt_path=data.get("role_prompt_path") or None,
         )

@@ -45,7 +45,6 @@ _USERS_YAML_WITH_GUEST_ROLE = dedent("""\
         actions: []
         skills_dirs: []
         allowed_mcp_tools: []
-        llm_profile: fast
 """)
 
 _USERS_YAML_WITHOUT_GUEST_ROLE = dedent("""\
@@ -365,8 +364,11 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_guest_policy_stamps_llm_profile_from_guest_role_config(tmp_path: Path) -> None:
-    """guest policy: llm_profile is resolved from the guest role's llm_profile field.
+async def test_guest_policy_stamps_llm_profile_in_metadata(tmp_path: Path) -> None:
+    """guest policy: llm_profile is stamped directly in envelope.metadata.
+
+    With no channel_profile present, llm_profile defaults to "default".
+    The guest role's llm_profile field in portail.yaml is ignored.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -384,7 +386,8 @@ async def test_guest_policy_stamps_llm_profile_from_guest_role_config(tmp_path: 
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("user_record", {}).get("llm_profile") == "fast"
+    assert forwarded["metadata"].get("llm_profile") == "default"
+    assert "llm_profile" not in forwarded["metadata"].get("user_record", {})
 
 
 @pytest.mark.asyncio

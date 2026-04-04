@@ -4,10 +4,14 @@ Portail is the sole consumer of this module.  Downstream bricks only need
 ``UserRecord`` (from ``common.user_record``) to deserialize the pre-stamped
 ``envelope.metadata["user_record"]`` dict.
 
-Role data (actions, skills_dirs, allowed_mcp_tools, llm_profile) is merged
-into every resolved ``UserRecord`` at load time.  Prompt paths are kept
-separate by origin: ``prompt_path`` comes from the user entry only (no role
-fallback), and ``role_prompt_path`` comes from the role entry only.
+Role data (actions, skills_dirs, allowed_mcp_tools) is merged into every
+resolved ``UserRecord`` at load time.  Prompt paths are kept separate by
+origin: ``prompt_path`` comes from the user entry only (no role fallback),
+and ``role_prompt_path`` comes from the role entry only.
+
+``llm_profile`` is NOT part of UserRecord — it is stamped directly into
+``envelope.metadata["llm_profile"]`` by Portail, derived from the channel's
+``channel_profile`` (or ``"default"``).
 """
 
 from __future__ import annotations
@@ -98,7 +102,7 @@ class UserRegistry:
         # sender_index fallback: works across contexts but within the channel
         return self._sender_index.get(f"{channel}:{raw_id}")
 
-    def build_guest_record(self, channel_profile: str | None = None) -> UserRecord:
+    def build_guest_record(self) -> UserRecord:
         """Build a synthetic guest UserRecord with role data from the configured guest role.
 
         Used by Portail when ``unknown_user_policy=guest``.  The role name is
@@ -106,22 +110,11 @@ class UserRegistry:
         code changes.  Actions, skills_dirs, and allowed_mcp_tools come from the
         matching role config, or fall back to empty lists (fail-closed).
 
-        LLM profile resolution: ``channel_profile`` > role-level ``llm_profile``
-        > ``"default"``.
-
-        Args:
-            channel_profile: Channel-level LLM profile stamped by Aiguilleur
-                (highest priority).  Pass ``None`` when absent.
-
         Returns:
             A valid, non-blocked ``UserRecord`` with the configured guest role.
         """
         role_name: str = self._guest_role
         role_def: dict[str, Any] = self._roles_raw.get(role_name) or {}
-        llm_profile: str = (
-            channel_profile
-            or (str(role_def["llm_profile"]) if role_def.get("llm_profile") else "default")
-        )
         return UserRecord(
             user_id="guest",
             display_name="Guest",
@@ -130,7 +123,6 @@ class UserRegistry:
             actions=list(role_def.get("actions") or []),
             skills_dirs=list(role_def.get("skills_dirs") or []),
             allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
-            llm_profile=llm_profile,
             prompt_path=None,
             role_prompt_path=role_def.get("prompt_path") or None,
         )
@@ -173,13 +165,15 @@ class UserRegistry:
         """Parse portail.yaml and populate the lookup indexes.
 
         Merges role-level fields (actions, skills_dirs, allowed_mcp_tools,
-        llm_profile, prompt_path) into every ``UserRecord`` at load time.
+        prompt_path) into every ``UserRecord`` at load time.
 
         Resolution priority:
-        - ``llm_profile``: user-level > role-level > ``"default"``
         - ``prompt_path``: user-level only (no role fallback) — ``None`` when absent
         - ``role_prompt_path``: role-level only — ``None`` when absent
         - ``actions``, ``skills_dirs``, ``allowed_mcp_tools``: role-level only
+
+        ``llm_profile`` is NOT loaded here — Portail stamps it directly into
+        ``envelope.metadata`` from the channel's ``channel_profile``.
 
         Enters permissive mode (empty indexes) when the file cannot be found
         or parsed.
@@ -234,17 +228,6 @@ class UserRegistry:
             if raw_role_prompt_path is not None:
                 raw_role_prompt_path = self._validate_path(raw_role_prompt_path)
 
-            # llm_profile: user-level > role-level > "default"
-            llm_profile = (
-                str(user["llm_profile"])
-                if user.get("llm_profile")
-                else (
-                    str(role_def["llm_profile"])
-                    if role_def.get("llm_profile")
-                    else "default"
-                )
-            )
-
             record = UserRecord(
                 user_id=user_id,
                 display_name=str(user.get("display_name") or ""),
@@ -253,7 +236,6 @@ class UserRegistry:
                 actions=list(role_def.get("actions") or []),
                 skills_dirs=list(role_def.get("skills_dirs") or []),
                 allowed_mcp_tools=list(role_def.get("allowed_mcp_tools") or []),
-                llm_profile=llm_profile,
                 prompt_path=raw_prompt_path,
                 role_prompt_path=raw_role_prompt_path,
             )

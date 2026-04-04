@@ -53,19 +53,19 @@ _PORTAIL_YAML = dedent("""\
         actions: ["*"]
         skills_dirs: ["*"]
         allowed_mcp_tools: ["*"]
-        llm_profile: null
+
         prompt_path: null
       user:
         actions: []
         skills_dirs: []
         allowed_mcp_tools: []
-        llm_profile: null
+
         prompt_path: null
       guest:
         actions: []
         skills_dirs: []
         allowed_mcp_tools: []
-        llm_profile: null
+
         prompt_path: null
 """)
 
@@ -150,7 +150,6 @@ def test_user_record_has_user_id_field() -> None:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
-        llm_profile="default",
         prompt_path=None,
     )
 
@@ -168,7 +167,6 @@ def test_user_record_to_dict_includes_user_id() -> None:
         actions=[],
         skills_dirs=[],
         allowed_mcp_tools=[],
-        llm_profile="default",
         prompt_path=None,
     )
 
@@ -189,7 +187,6 @@ def test_user_record_from_dict_round_trips_user_id() -> None:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
-        llm_profile="default",
         prompt_path=None,
     )
 
@@ -209,7 +206,7 @@ def test_user_record_from_dict_missing_user_id_falls_back_to_empty() -> None:
         "actions": [],
         "skills_dirs": [],
         "allowed_mcp_tools": [],
-        "llm_profile": "default",
+
         "prompt_path": None,
     }
 

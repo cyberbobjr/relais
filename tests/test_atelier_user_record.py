@@ -1,25 +1,12 @@
-"""TDD RED tests — Atelier reads user context from user_record dict in envelope.metadata.
+"""Tests — Atelier reads user context from user_record dict and top-level metadata.
 
-Previously Atelier read individual top-level metadata keys:
-  - user_role  → envelope.metadata.get("user_role")
-  - llm_profile → envelope.metadata.get("llm_profile")
-  - skills_dirs → envelope.metadata.get("skills_dirs")
-  - allowed_mcp_tools → envelope.metadata.get("allowed_mcp_tools")
-  - custom_prompt_path → envelope.metadata.get("custom_prompt_path")
+User identity fields (role, skills_dirs, allowed_mcp_tools, prompt_path) are
+inside ``envelope.metadata["user_record"]``.
 
-After the Portail refactor, all user identity is consolidated under:
-  envelope.metadata["user_record"] = {
-      "role": ...,
-      "llm_profile": ...,
-      "skills_dirs": [...],
-      "allowed_mcp_tools": [...],
-      "prompt_path": ...,
-      ...
-  }
+``llm_profile`` is stamped directly into ``envelope.metadata["llm_profile"]``
+by Portail (not inside user_record).
 
-These tests verify that Atelier reads from user_record exclusively.
-
-RED phase: written BEFORE the implementation change. They MUST FAIL initially.
+These tests verify that Atelier reads each field from the correct location.
 """
 
 from __future__ import annotations
@@ -147,17 +134,17 @@ def _run_stream_once(atelier, envelope, extra_patches=None):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_atelier_reads_llm_profile_from_user_record() -> None:
-    """Atelier reads llm_profile from user_record dict, not top-level metadata.
+async def test_atelier_reads_llm_profile_from_top_level_metadata() -> None:
+    """Atelier reads llm_profile from envelope.metadata['llm_profile'], not user_record.
 
-    The envelope has no top-level 'llm_profile' key, only user_record.llm_profile.
+    The envelope has llm_profile at the top level of metadata (stamped by Portail).
     Atelier must forward the correct profile name to resolve_profile().
     """
     atelier = _make_atelier()
     envelope = _make_envelope(metadata={
+        "llm_profile": "fast",
         "user_record": {
             "role": "user",
-            "llm_profile": "fast",
             "prompt_path": None,
             "skills_dirs": [],
             "allowed_mcp_tools": [],
@@ -208,16 +195,18 @@ async def test_atelier_reads_llm_profile_from_user_record() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_atelier_reads_role_from_user_record_for_soul_assembly() -> None:
-    """Atelier reads role from user_record and passes it as user_role to assemble_system_prompt.
+async def test_atelier_reads_role_prompt_path_from_user_record_for_soul_assembly() -> None:
+    """Atelier reads role_prompt_path from user_record and forwards it to assemble_system_prompt.
 
-    The envelope has no top-level 'user_role' key; role is inside user_record.
+    The role_prompt_path is passed as a keyword argument so the role overlay
+    is included in the assembled system prompt.
     """
     atelier = _make_atelier()
     envelope = _make_envelope(metadata={
+        "llm_profile": "default",
         "user_record": {
             "role": "admin",
-            "llm_profile": "default",
+            "role_prompt_path": "roles/admin.md",
             "prompt_path": None,
             "skills_dirs": [],
             "allowed_mcp_tools": [],
@@ -253,8 +242,8 @@ async def test_atelier_reads_role_from_user_record_for_soul_assembly() -> None:
 
     mock_sp.assert_called_once()
     call_kwargs = mock_sp.call_args.kwargs
-    assert call_kwargs.get("user_role") == "admin", (
-        f"Expected user_role='admin' from user_record.role, got {call_kwargs.get('user_role')!r}"
+    assert call_kwargs.get("role_prompt_path") == "roles/admin.md", (
+        f"Expected role_prompt_path='roles/admin.md' from user_record, got {call_kwargs.get('role_prompt_path')!r}"
     )
 
 
@@ -272,9 +261,9 @@ async def test_atelier_reads_prompt_path_from_user_record() -> None:
     """
     atelier = _make_atelier()
     envelope = _make_envelope(metadata={
+        "llm_profile": "default",
         "user_record": {
             "role": "user",
-            "llm_profile": "default",
             "prompt_path": "users/discord_123.md",
             "skills_dirs": [],
             "allowed_mcp_tools": [],
@@ -332,9 +321,9 @@ async def test_atelier_reads_skills_dirs_from_user_record(tmp_path: Path) -> Non
     atelier._skills_base_dir = tmp_path
 
     envelope = _make_envelope(metadata={
+        "llm_profile": "default",
         "user_record": {
             "role": "user",
-            "llm_profile": "default",
             "prompt_path": None,
             "skills_dirs": ["coding"],
             "allowed_mcp_tools": [],
@@ -381,14 +370,14 @@ async def test_atelier_reads_skills_dirs_from_user_record(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# T5 — role=None when user_record absent
+# T5 — role_prompt_path=None when user_record absent
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_atelier_user_role_none_when_user_record_absent() -> None:
-    """Atelier passes user_role=None when envelope has no user_record.
+async def test_atelier_role_prompt_path_none_when_user_record_absent() -> None:
+    """Atelier passes role_prompt_path=None when envelope has no user_record.
 
     Should not raise KeyError — just degrade gracefully.
     """
@@ -421,6 +410,6 @@ async def test_atelier_user_role_none_when_user_record_absent() -> None:
 
     mock_sp.assert_called_once()
     call_kwargs = mock_sp.call_args.kwargs
-    assert call_kwargs.get("user_role") is None, (
-        f"Expected user_role=None when user_record absent, got {call_kwargs.get('user_role')!r}"
+    assert call_kwargs.get("role_prompt_path") is None, (
+        f"Expected role_prompt_path=None when user_record absent, got {call_kwargs.get('role_prompt_path')!r}"
     )

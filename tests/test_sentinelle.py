@@ -75,7 +75,6 @@ def _make_user_record(
         actions=actions if actions is not None else ["send"],
         skills_dirs=[],
         allowed_mcp_tools=[],
-        llm_profile="default",
         prompt_path=None,
     )
 

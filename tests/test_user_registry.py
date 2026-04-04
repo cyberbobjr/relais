@@ -106,7 +106,6 @@ def test_user_record_is_frozen() -> None:
         actions=["send"],
         skills_dirs=[],
         allowed_mcp_tools=[],
-        llm_profile="default",
         prompt_path=None,
     )
     with pytest.raises((AttributeError, TypeError)):
@@ -118,7 +117,8 @@ def test_user_record_has_all_required_fields() -> None:
     """UserRecord must expose all required fields including role_prompt_path.
 
     Fields: display_name, role, blocked, actions, skills_dirs,
-    allowed_mcp_tools, llm_profile, prompt_path, role_prompt_path.
+    allowed_mcp_tools, prompt_path, role_prompt_path.
+    llm_profile is NOT a UserRecord field — it lives in envelope.metadata.
     """
     record = UserRecord(
         user_id="usr_bob",
@@ -128,7 +128,6 @@ def test_user_record_has_all_required_fields() -> None:
         actions=["*"],
         skills_dirs=["*"],
         allowed_mcp_tools=["*"],
-        llm_profile="fast",
         prompt_path="users/bob.md",
         role_prompt_path="roles/admin.md",
     )
@@ -138,9 +137,9 @@ def test_user_record_has_all_required_fields() -> None:
     assert record.actions == ["*"]
     assert record.skills_dirs == ["*"]
     assert record.allowed_mcp_tools == ["*"]
-    assert record.llm_profile == "fast"
     assert record.prompt_path == "users/bob.md"
     assert record.role_prompt_path == "roles/admin.md"
+    assert not hasattr(record, "llm_profile")
 
 
 @pytest.mark.unit
@@ -154,7 +153,6 @@ def test_user_record_prompt_path_default_is_none() -> None:
         actions=[],
         skills_dirs=[],
         allowed_mcp_tools=[],
-        llm_profile="default",
         prompt_path=None,
     )
     assert record.prompt_path is None
@@ -176,7 +174,6 @@ def test_user_record_to_dict_contains_all_fields() -> None:
         actions=["*"],
         skills_dirs=["code"],
         allowed_mcp_tools=["search__*"],
-        llm_profile="precise",
         prompt_path="users/alice.md",
         role_prompt_path="roles/admin.md",
     )
@@ -188,7 +185,7 @@ def test_user_record_to_dict_contains_all_fields() -> None:
     assert d["actions"] == ["*"]
     assert d["skills_dirs"] == ["code"]
     assert d["allowed_mcp_tools"] == ["search__*"]
-    assert d["llm_profile"] == "precise"
+    assert "llm_profile" not in d
     assert d["prompt_path"] == "users/alice.md"
     assert d["role_prompt_path"] == "roles/admin.md"
 
@@ -204,7 +201,6 @@ def test_user_record_from_dict_round_trip() -> None:
         actions=["send"],
         skills_dirs=[],
         allowed_mcp_tools=[],
-        llm_profile="default",
         prompt_path=None,
     )
     restored = UserRecord.from_dict(original.to_dict())
@@ -222,11 +218,11 @@ def test_user_record_from_dict_handles_none_prompt_path() -> None:
         "actions": [],
         "skills_dirs": [],
         "allowed_mcp_tools": [],
-        "llm_profile": "default",
         "prompt_path": None,
     }
     record = UserRecord.from_dict(d)
     assert record.prompt_path is None
+    assert not hasattr(record, "llm_profile")
 
 
 # ---------------------------------------------------------------------------
@@ -299,79 +295,11 @@ def test_resolve_user_merges_allowed_mcp_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_resolve_user_llm_profile_from_user_overrides_role(tmp_path: Path) -> None:
-    """resolve_user uses user-level llm_profile if set; falls back to role/default.
+def test_resolve_user_record_has_no_llm_profile_field(tmp_path: Path) -> None:
+    """UserRecord returned by resolve_user must NOT contain llm_profile.
 
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    content = dedent("""\
-        unknown_user_policy: deny
-        guest_role: guest
-        users:
-          usr_custom_profile:
-            display_name: "Custom Profile User"
-            role: user
-            blocked: false
-            llm_profile: "precise"
-            identifiers:
-              discord:
-                dm: "user_profile001"
-        roles:
-          user:
-            actions: ["send"]
-            skills_dirs: []
-            allowed_mcp_tools: []
-            llm_profile: "fast"
-            prompt_path: null
-    """)
-    path = _write_portail_yaml(tmp_path, content)
-    registry = UserRegistry(config_path=path)
-
-    result = registry.resolve_user("discord:user_profile001", "discord")
-
-    assert result is not None
-    assert result.llm_profile == "precise"
-
-
-@pytest.mark.unit
-def test_resolve_user_llm_profile_falls_back_to_role(tmp_path: Path) -> None:
-    """resolve_user uses role-level llm_profile when user doesn't specify one.
-
-    Args:
-        tmp_path: pytest built-in temporary directory.
-    """
-    content = dedent("""\
-        unknown_user_policy: deny
-        guest_role: guest
-        users:
-          usr_no_profile:
-            display_name: "No Profile User"
-            role: user
-            blocked: false
-            identifiers:
-              discord:
-                dm: "user_noprofile"
-        roles:
-          user:
-            actions: ["send"]
-            skills_dirs: []
-            allowed_mcp_tools: []
-            llm_profile: "coder"
-            prompt_path: null
-    """)
-    path = _write_portail_yaml(tmp_path, content)
-    registry = UserRegistry(config_path=path)
-
-    result = registry.resolve_user("discord:user_noprofile", "discord")
-
-    assert result is not None
-    assert result.llm_profile == "coder"
-
-
-@pytest.mark.unit
-def test_resolve_user_llm_profile_defaults_to_default_string(tmp_path: Path) -> None:
-    """resolve_user uses 'default' when neither user nor role specifies llm_profile.
+    llm_profile is now stamped directly into envelope.metadata by Portail,
+    not carried inside UserRecord.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -379,11 +307,10 @@ def test_resolve_user_llm_profile_defaults_to_default_string(tmp_path: Path) -> 
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    # admin role in fixture has no llm_profile key → should default to "default"
     result = registry.resolve_user("discord:admin001", "discord")
 
     assert result is not None
-    assert result.llm_profile == "default"
+    assert not hasattr(result, "llm_profile")
 
 
 @pytest.mark.unit
@@ -599,7 +526,7 @@ def test_build_guest_record_returns_user_record(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(channel_profile="fast")
+    result = registry.build_guest_record()
 
     assert isinstance(result, UserRecord)
 
@@ -614,14 +541,16 @@ def test_build_guest_record_has_guest_role(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(channel_profile="fast")
+    result = registry.build_guest_record()
 
     assert result.role == "guest"
 
 
 @pytest.mark.unit
-def test_build_guest_record_uses_given_llm_profile(tmp_path: Path) -> None:
-    """build_guest_record stamps the given llm_profile.
+def test_build_guest_record_has_no_llm_profile(tmp_path: Path) -> None:
+    """build_guest_record returns a record without llm_profile field.
+
+    llm_profile is now stamped directly into envelope.metadata by Portail.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -629,9 +558,9 @@ def test_build_guest_record_uses_given_llm_profile(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(channel_profile="coder")
+    result = registry.build_guest_record()
 
-    assert result.llm_profile == "coder"
+    assert not hasattr(result, "llm_profile")
 
 
 @pytest.mark.unit
@@ -644,7 +573,7 @@ def test_build_guest_record_empty_actions(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(channel_profile="fast")
+    result = registry.build_guest_record()
 
     assert result.actions == []
 
@@ -659,7 +588,7 @@ def test_build_guest_record_not_blocked(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(channel_profile="fast")
+    result = registry.build_guest_record()
 
     assert result.blocked is False
 
@@ -676,7 +605,7 @@ def test_build_guest_record_inherits_guest_role_skills(tmp_path: Path) -> None:
     path = _write_portail_yaml(tmp_path)
     registry = UserRegistry(config_path=path)
 
-    result = registry.build_guest_record(channel_profile="fast")
+    result = registry.build_guest_record()
 
     # guest role in fixture has skills_dirs: []
     assert result.skills_dirs == []
@@ -690,11 +619,11 @@ def test_build_guest_record_without_config_returns_minimal_record() -> None:
     """
     registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
-    result = registry.build_guest_record(channel_profile="fast")
+    result = registry.build_guest_record()
 
     assert isinstance(result, UserRecord)
     assert result.role == "guest"
-    assert result.llm_profile == "fast"
+    assert not hasattr(result, "llm_profile")
     assert result.blocked is False
 
 

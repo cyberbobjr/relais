@@ -214,7 +214,6 @@ Points importants :
 - `guest_role` : rôle utilisé si `unknown_user_policy=guest`
 - `users.*.prompt_path`
 - `roles.*.prompt_path`
-- `roles.*.llm_profile`
 - `roles.*.skills_dirs`
 - `roles.*.allowed_mcp_tools`
 
@@ -240,13 +239,11 @@ roles:
     actions: ["*"]
     skills_dirs: ["*"]
     allowed_mcp_tools: ["*"]
-    llm_profile: null
     prompt_path: null
   guest:
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
-    llm_profile: null
     prompt_path: null
 ```
 

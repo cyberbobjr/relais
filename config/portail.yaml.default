@@ -74,9 +74,6 @@ users:
 #   ["*"]         → tous les outils (accès illimité)
 #   ["server__tool", "server__*", …] → liste ou glob
 #
-# llm_profile : profil LLM pour ce rôle (fallback si pas de llm_profile
-#   sur l'utilisateur). null = fallback sur "default".
-#
 # prompt_path : chemin relatif (depuis prompts/) vers l'overlay de prompt du rôle
 #   (role_prompt_path). Chargé explicitement par Atelier en tant que couche rôle.
 #   N'est PAS un fallback pour prompt_path utilisateur — les deux champs sont
@@ -87,13 +84,11 @@ roles:
     actions: ["*"]
     skills_dirs: ["*"]
     allowed_mcp_tools: ["*"]
-    llm_profile: null
     prompt_path: null
   user:
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
-    llm_profile: null
     prompt_path: null
   guest:
     # Rôle attribué aux utilisateurs inconnus si unknown_user_policy=guest
@@ -101,5 +96,4 @@ roles:
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
-    llm_profile: null
     prompt_path: null

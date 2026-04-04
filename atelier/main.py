@@ -208,9 +208,9 @@ class Atelier:
                 envelope.sender_id,
             )
 
-            # 1. Resolve LLM profile — read from user_record dict stamped by Portail
+            # 1. Resolve LLM profile — read from top-level metadata stamped by Portail
             ur: dict = envelope.metadata.get("user_record") or {}
-            profile_name = ur.get("llm_profile") or "default"
+            profile_name = envelope.metadata.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)
 
             # Resolve unique user_id for SouvenirBackend (shortcut in metadata)

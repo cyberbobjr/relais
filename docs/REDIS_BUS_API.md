@@ -84,7 +84,8 @@ XADD relais:messages:incoming * payload <Envelope JSON>
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `channel_profile` | `string` (optional) | LLM profile name, resolved in order: `channels.yaml:profile` → `config.yaml:llm.default_profile` → `"default"`. Stamped by the Aiguilleur adapter at envelope creation time. Read by Portail and then passed downstream as `llm_profile`. |
+| `channel_profile` | `string` (optional) | LLM profile name, resolved in order: `channels.yaml:profile` → `config.yaml:llm.default_profile` → `"default"`. Stamped by the Aiguilleur adapter at envelope creation time. Read by Portail to derive `llm_profile`. |
+| `channel_prompt_path` | `string` \| `null` | Relative path (relative to `prompts/`) to the channel formatting overlay, taken from `channels.yaml:channels[*].prompt_path`. `null` when not configured — no channel overlay is loaded by Atelier. Stamped by the adapter so Atelier can load the prompt layer explicitly. |
 
 **Metadata keys set by Aiguilleur (Discord only)**:
 
@@ -111,11 +112,8 @@ XADD relais:security * payload <Envelope JSON>
 | Key | Type | Description |
 |-----|------|-------------|
 | `user_id` | `string` | Stable cross-channel user identifier, equal to the YAML key in portail.yaml (e.g. `"usr_admin"`). `"guest"` for unknown users under guest policy. Use this to resume conversations across channels. |
-| `user_record` | `dict` | Serialized `UserRecord` with all fields: `user_id`, `display_name`, `role`, `blocked`, `actions`, `skills_dirs`, `allowed_mcp_tools`, `llm_profile`, `prompt_path`. |
-| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (Aiguilleur) → `user.llm_profile` (portail.yaml) → `role.llm_profile` (portail.yaml) → `"default"`. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
-| `user_role` | `string` | User role resolved from `UserRegistry` (portail.yaml) — used by Atelier for role-based prompt layer selection. |
-| `display_name` | `string` | User display name from `UserRegistry` (portail.yaml). |
-| `custom_prompt_path` | `string` (optional) | Custom prompt override path if defined in user profile (portail.yaml). |
+| `user_record` | `dict` | Serialized `UserRecord` with fields: `user_id`, `display_name`, `role`, `blocked`, `actions`, `skills_dirs`, `allowed_mcp_tools`, `prompt_path`, `role_prompt_path`. `prompt_path` = per-user overlay path (user entry only, no role fallback). `role_prompt_path` = role-level overlay path (role entry only). Both are independent and both can be `null`. Does **not** contain `llm_profile`. |
+| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (Aiguilleur) → `"default"`. Stamped as top-level metadata by Portail. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
 | `session_start` | `float` (optional) | Epoch timestamp if this is a new session |
 
 ---
@@ -150,7 +148,7 @@ XADD relais:commands * payload <Envelope JSON>
 ```
 
 The envelope content is the raw slash command (e.g. `/clear`).  All metadata
-stamped by Portail (user_role, display_name, llm_profile, …) is preserved.
+stamped by Portail (user_record, llm_profile, …) is preserved.
 
 **XACK contract**: Commandant ACKs every message it dequeues, regardless of whether a
 handler exists for the command name.  Post-ACL unknown-command filtering at this layer
@@ -196,6 +194,7 @@ XADD relais:messages:outgoing_pending * payload <Envelope JSON>
 | Key | Type | Description |
 |-----|------|-------------|
 | `user_message` | `string` | Original user message content (copied from incoming envelope) |
+| `messages_raw` | `array` | Full serialized LangChain message list for the turn (via `atelier.message_serializer.serialize_messages()`). Read by Souvenir to archive the complete turn history. |
 | `traces` | `array` | Pipeline trace list appended with `{"brick": "atelier", "action": "Generated via {model}"}` |
 
 ---
@@ -256,10 +255,10 @@ while True:
 
 ### `relais:memory:request`
 
-**Direction**: Atelier → Souvenir
+**Direction**: Commandant → Souvenir
 **Consumer group**: `souvenir_group`
 
-Carries memory retrieval requests from Atelier before each LLM call.
+Carries memory action requests (session clear, file operations) from Commandant.
 
 ```
 XADD relais:memory:request * payload <MemoryRequest JSON>
@@ -269,49 +268,23 @@ XADD relais:memory:request * payload <MemoryRequest JSON>
 
 ```json
 {
-  "action": "get",
+  "action": "clear",
   "session_id": "sess-abc",
-  "correlation_id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `action` | `string` | Always `"get"` (future: `"set"`, `"delete"`) |
-| `session_id` | `string` | Session identifier to retrieve context for |
-| `correlation_id` | `string` | UUID for matching the response |
-
----
-
-### `relais:memory:response`
-
-**Direction**: Souvenir → Atelier
-**Consumer group**: none (direct XREAD by Atelier with correlation_id matching)
-
-Carries the conversation history returned by Souvenir.
-
-```
-XADD relais:memory:response * payload <MemoryResponse JSON>
-```
-
-**MemoryResponse schema**:
-
-```json
-{
+  "user_id": "usr_admin",
   "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
-  "history": [
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hi there!"}
-  ]
+  "envelope_json": "..."
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `correlation_id` | `string` | Must match the `correlation_id` from the corresponding request |
-| `history` | `array` | Ordered list of `{role, content}` dicts (role: `"user"` or `"assistant"`) |
+| `action` | `string` | One of `"clear"`, `"file_write"`, `"file_read"`, `"file_list"` |
+| `session_id` | `string` | Session identifier (used by `clear`) |
+| `user_id` | `string` | Stable user identifier — used by `clear` to erase the LangGraph checkpointer thread |
+| `correlation_id` | `string` | UUID for tracing |
+| `envelope_json` | `string` (optional) | Serialized original envelope; used by `clear` to send a confirmation reply |
 
-**Timeout**: Atelier waits at most **3 seconds** for the matching response before falling back to an empty context.
+> **Note**: Atelier no longer uses this stream. Conversation history is managed by the LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`) owned by Atelier itself.
 
 ---
 
@@ -383,24 +356,6 @@ EXPIRE relais:active_sessions:discord:123456789 3600
 Hash fields: `{channel_name}` → `{Unix epoch float as string}`
 
 ---
-
-### `relais:context:{session_id}` (List, not Stream)
-
-**Type**: Redis List
-**TTL**: 86400 seconds (24 hours)
-**Max entries**: 20 (LPUSH + LTRIM)
-**Direction**: Souvenir writes, Souvenir reads
-
-Short-term conversation context cache (role/content pairs as JSON strings).
-
-```
-LPUSH relais:context:sess-abc '{"role": "user", "content": "Hello"}'
-```
-
-Each list element is a JSON string:
-```json
-{"role": "user", "content": "Hello"}
-```
 
 ---
 

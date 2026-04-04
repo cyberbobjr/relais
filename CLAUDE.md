@@ -19,14 +19,14 @@ The main pipeline flows through these bricks in order:
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
    - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
-   - **Profile stamping**: each adapter stamps `envelope.metadata["channel_profile"]` from `ChannelConfig.profile` (channels.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"` (resolved by Portail)
+   - **Profile stamping**: each adapter stamps `envelope.metadata["channel_profile"]` from `ChannelConfig.profile` (channels.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
 
 2. **Portail** (`portail/`) - Consumer enriching message context
    - Consumes: `relais:messages:incoming`
    - Validates Envelope format, resolves user from `UserRegistry` (portail.yaml), applies reply_policy (vacation/in_meeting)
-   - Stamps contextual metadata: `user_id` (YAML key, e.g. `"usr_admin"` — stable cross-channel), `user_record` (full dict), `llm_profile` (resolved from `channel_profile`), plus legacy keys `user_role`, `display_name`, `custom_prompt_path`
+   - Stamps contextual metadata: `user_id` (YAML key, e.g. `"usr_admin"` — stable cross-channel), `user_record` (full dict), `llm_profile` (top-level, from `channel_profile` or `"default"`)
    - Produces: `relais:security`
 
 3. **Sentinelle** (`sentinelle/`) - Bidirectional security checkpoint
@@ -78,7 +78,7 @@ The main pipeline flows through these bricks in order:
   - `litellm.yaml`: Model definitions, router settings, master key
   - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
   - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)
-  - `portail.yaml.default`: User registry with display_name, role, channels, llm_profile
+  - `portail.yaml.default`: User registry with display_name, role, channels
   - `sentinelle.yaml.default`: ACL for sentinelle brick
   - `redis.conf`: Redis ACL definitions per brick, stream permissions
 

@@ -367,9 +367,10 @@ def test_enrich_envelope_no_legacy_custom_prompt_path_key(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_enrich_envelope_llm_profile_uses_channel_profile(tmp_path: Path) -> None:
-    """user_record['llm_profile'] uses channel_profile when present.
+    """envelope.metadata['llm_profile'] uses channel_profile when present.
 
-    The channel_profile stamped by Aiguilleur overrides user/role defaults.
+    The channel_profile stamped by Aiguilleur is resolved to llm_profile
+    directly in envelope.metadata (not inside user_record).
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -384,12 +385,13 @@ def test_enrich_envelope_llm_profile_uses_channel_profile(tmp_path: Path) -> Non
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["llm_profile"] == "coder"
+    assert envelope.metadata["llm_profile"] == "coder"
+    assert "llm_profile" not in envelope.metadata["user_record"]
 
 
 @pytest.mark.unit
 def test_enrich_envelope_llm_profile_defaults_to_default(tmp_path: Path) -> None:
-    """user_record['llm_profile'] defaults to 'default' when channel_profile absent.
+    """envelope.metadata['llm_profile'] defaults to 'default' when channel_profile absent.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -400,7 +402,8 @@ def test_enrich_envelope_llm_profile_defaults_to_default(tmp_path: Path) -> None
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["llm_profile"] == "default"
+    assert envelope.metadata["llm_profile"] == "default"
+    assert "llm_profile" not in envelope.metadata["user_record"]
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +465,8 @@ def test_apply_guest_stamps_uses_guest_role(tmp_path: Path) -> None:
     portail._apply_guest_stamps(envelope)
 
     assert envelope.metadata["user_record"]["role"] == "guest"
-    assert envelope.metadata["user_record"]["llm_profile"] == "default"
+    assert envelope.metadata["llm_profile"] == "default"
+    assert "llm_profile" not in envelope.metadata["user_record"]
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +526,8 @@ async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
     ur = forwarded["metadata"].get("user_record")
     assert ur is not None
     assert ur["role"] == "admin"
-    assert ur["llm_profile"] == "default"
+    assert "llm_profile" not in ur
+    assert forwarded["metadata"]["llm_profile"] == "default"
 
 
 @pytest.mark.asyncio
