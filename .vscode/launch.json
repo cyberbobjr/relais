@@ -2,19 +2,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Atelier — Launch",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/atelier/main.py",
-            "python": "${workspaceFolder}/.venv/bin/python3",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            },
-            "envFile": "${workspaceFolder}/.env",
-            "console": "integratedTerminal"
-        },
-        {
             "name": "Atelier — Attach (port 5678)",
             "type": "debugpy",
             "request": "attach",

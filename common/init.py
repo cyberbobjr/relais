@@ -12,6 +12,7 @@ DEFAULT_FILES = [
     ("config/sentinelle.yaml",                "config/sentinelle.yaml.default"),
     ("config/atelier/mcp_servers.yaml",       "config/atelier/mcp_servers.yaml.default"),
     ("config/atelier.yaml",                   "config/atelier.yaml.default"),
+    ("config/atelier/subagents/relais-config.yaml", "config/atelier/subagents/relais-config.yaml.default"),
     ("config/HEARTBEAT.md",                   "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
     ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),
@@ -43,6 +44,7 @@ def initialize_user_dir(system_install_path: Path | None = None):
     dirs = [
         "config",
         "config/atelier",
+        "config/atelier/subagents",
         "prompts/soul/variants",
         "prompts/channels",
         "prompts/policies",

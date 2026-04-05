@@ -181,6 +181,40 @@ La résolution suit :
 
 `initialize_user_dir()` ne copie pas `channels.yaml` actuellement.
 
+### Rechargement à chaud de la configuration
+
+Toutes les briques supportent le rechargement à chaud de leur configuration sans redémarrage :
+
+**Mécanisme de base** (implémenté dans chaque brique) :
+- `_config_watch_paths()` — retourne la liste des fichiers YAML à surveiller
+- `_start_file_watcher()` — crée une tâche asyncio via `watch_and_reload()` pour détecter les changements fichier système
+- `reload_config()` — recharge et valide la configuration (retourne True/False)
+- `_config_reload_listener()` — souscrit au canal Pub/Sub `relais:config:reload:{brick}` pour les déclenchements externes (operator)
+
+**Fichiers surveillés par brique** :
+- **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
+- **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
+- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/channels.yaml`
+- **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
+- **Aiguilleur**: `config/channels.yaml` (définitions canaux)
+
+**Flux de rechargement** :
+1. Surveillance fichier système via `watchfiles` (inotify sur Linux, FSEvents sur macOS, ReadDirectoryChangesW sur Windows)
+2. Changement détecté → appel atomique `safe_reload()` qui : parse le nouveau YAML → acquiert `_config_lock` → swap en place
+3. Validation YAML échouée → configuration précédente préservée (fallback sûr)
+4. Déclenchement externe : opérateur envoie `"reload"` sur `relais:config:reload:{brick}` (Pub/Sub) → déclenchement manuel sans changement fichier
+
+**Sauvegarde des configurations** :
+- À chaque rechargement réussi, la configuration précédente est archivée dans `~/.relais/config/backups/{brick}_{timestamp}.yaml`
+- Rétention : max 5 versions par brique
+- Permet audit et rollback manuel si nécessaire
+
+**Cas d'usage** :
+- Modification des ACL (Sentinelle) sans redémarrage
+- Ajout/suppression de profils LLM (Atelier) en direct
+- Changement de politique utilisateur (Portail)
+- Activation/désactivation de canaux (Aiguilleur)
+
 ---
 
 ## Prompts

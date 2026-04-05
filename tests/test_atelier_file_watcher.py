@@ -37,11 +37,13 @@ def _make_atelier_minimal():
         patch("atelier.main.load_channels_config", return_value={"telegram": MagicMock(streaming=True)}),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
+        patch("atelier.main.ToolRegistry") as mock_tool_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
         patch("atelier.main.resolve_storage_dir", return_value=Path("/tmp")),
         patch("atelier.main.RedisClient"),
     ):
-        mock_registry_cls.discover.return_value = MagicMock()
+        mock_registry_cls.load.return_value = MagicMock()
+        mock_tool_registry_cls.discover.return_value = MagicMock()
         atelier = Atelier()
 
     return atelier
@@ -76,11 +78,15 @@ def test_atelier_config_watch_paths_returns_list() -> None:
 
 @pytest.mark.unit
 def test_atelier_watch_paths_contains_four_paths() -> None:
-    """_config_watch_paths() returns exactly 4 config paths."""
+    """_config_watch_paths() returns exactly 4 paths when no subagents dirs exist."""
     atelier = _make_atelier_minimal()
 
     fake_path = Path("/fake/config.yaml")
-    with patch("atelier.main.resolve_config_path", return_value=fake_path):
+    # Use a nonexistent base so no config/atelier/subagents/ dir is found, giving exactly 4 paths
+    with (
+        patch("atelier.main.resolve_config_path", return_value=fake_path),
+        patch("common.config_loader.CONFIG_SEARCH_PATH", [Path("/nonexistent-base-xyz")]),
+    ):
         paths = atelier._config_watch_paths()
 
     assert len(paths) == 4, (

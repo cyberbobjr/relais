@@ -1,10 +1,10 @@
-"""Unit tests for the config-admin subagent and subagent registry.
+"""Unit tests for the relais-config subagent (YAML-based) and subagent registry.
 
 Tests validate:
 - AgentExecutor accepts and forwards subagents= and delegation_prompt=
-- The config-admin module exposes the subagent protocol (SPEC_NAME, build_spec, delegation_snippet)
+- The relais-config YAML file exists and contains all required fields
 - The system prompt contains all required config file paths, security rules, and skill management
-- SubagentRegistry discovers config-admin and filters by user_record
+- SubagentRegistry loads relais-config from YAML and filters by user_record
 - _enrich_system_prompt appends delegation text when provided
 - Atelier._handle_message uses the registry for subagent resolution
 """
@@ -12,9 +12,11 @@ Tests validate:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from common.envelope import Envelope
 from atelier.agent_executor import AgentResult
@@ -23,6 +25,20 @@ from atelier.agent_executor import AgentResult
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Path to the shipped default YAML for relais-config
+_CONFIG_ADMIN_YAML = (
+    Path(__file__).parent.parent / "config" / "atelier" / "subagents" / "relais-config.yaml.default"
+)
+
+
+def _load_config_admin_yaml() -> dict:
+    """Load and return the relais-config YAML as a dict.
+
+    Returns:
+        Parsed YAML dict.
+    """
+    return yaml.safe_load(_CONFIG_ADMIN_YAML.read_text())
 
 
 def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> MagicMock:
@@ -185,93 +201,85 @@ def test_enrich_system_prompt_no_duplicate_memory_prompt() -> None:
 
 
 # ---------------------------------------------------------------------------
-# config-admin module — subagent protocol
+# config-admin YAML — schema validation
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_config_admin_has_spec_name() -> None:
-    """The config-admin module must expose SPEC_NAME = 'config-admin'."""
-    from atelier.agents.config_admin import SPEC_NAME
-
-    assert SPEC_NAME == "config-admin"
-
-
-@pytest.mark.unit
-def test_config_admin_build_spec_returns_dict() -> None:
-    """build_spec() must return a dict with name, description, system_prompt."""
-    from atelier.agents.config_admin import build_spec
-
-    spec = build_spec()
-    assert isinstance(spec, dict)
-    assert spec["name"] == "config-admin"
-    assert "description" in spec
-    assert "system_prompt" in spec
+def test_config_admin_yaml_file_exists() -> None:
+    """The relais-config YAML default file must exist on disk."""
+    assert _CONFIG_ADMIN_YAML.exists(), (
+        f"Missing file: {_CONFIG_ADMIN_YAML}"
+    )
 
 
 @pytest.mark.unit
-def test_config_admin_build_spec_no_model_key() -> None:
-    """build_spec() must NOT include a model key (inherits from parent)."""
-    from atelier.agents.config_admin import build_spec
-
-    spec = build_spec()
-    assert "model" not in spec
+def test_config_admin_yaml_has_required_fields() -> None:
+    """The YAML must contain name, description, and system_prompt."""
+    data = _load_config_admin_yaml()
+    assert data["name"] == "relais-config"
+    assert "description" in data and data["description"]
+    assert "system_prompt" in data and data["system_prompt"]
 
 
 @pytest.mark.unit
-def test_config_admin_delegation_snippet() -> None:
-    """delegation_snippet() must return a non-empty string mentioning config-admin."""
-    from atelier.agents.config_admin import delegation_snippet
+def test_config_admin_yaml_name_field_is_config_admin() -> None:
+    """The name field must equal 'relais-config' (matching the deployed filename stem)."""
+    data = _load_config_admin_yaml()
+    # When deployed, relais-config.yaml.default → relais-config.yaml, stem = relais-config
+    assert data["name"] == "relais-config"
 
-    snippet = delegation_snippet()
-    assert isinstance(snippet, str)
-    assert "config-admin" in snippet
-    assert len(snippet) > 20
+
+@pytest.mark.unit
+def test_config_admin_yaml_has_delegation_snippet() -> None:
+    """The YAML must include a delegation_snippet field."""
+    data = _load_config_admin_yaml()
+    assert "delegation_snippet" in data
+    assert "relais-config" in data["delegation_snippet"]
 
 
 # ---------------------------------------------------------------------------
-# System prompt content
+# System prompt content — read from YAML
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_all_config_paths() -> None:
     """System prompt must reference all config file paths."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt = data["system_prompt"]
 
     for path in ["portail.yaml", "sentinelle.yaml", "channels.yaml",
                   "profiles.yaml", "mcp_servers.yaml", "prompts/"]:
-        assert path in CONFIG_ADMIN_SYSTEM_PROMPT, (
-            f"Missing config path: {path}"
-        )
+        assert path in prompt, f"Missing config path: {path}"
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_security_rules() -> None:
     """System prompt must include non-negotiable security constraints."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt = data["system_prompt"]
 
-    assert "usr_system" in CONFIG_ADMIN_SYSTEM_PROMPT
-    assert "admin" in CONFIG_ADMIN_SYSTEM_PROMPT
+    assert "usr_system" in prompt
+    assert "admin" in prompt
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_prompt_layers() -> None:
     """System prompt must document the 4 prompt overlay layers."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt = data["system_prompt"]
 
     for layer in ["soul/SOUL.md", "roles/", "users/", "channels/", "policies/"]:
-        assert layer in CONFIG_ADMIN_SYSTEM_PROMPT, (
-            f"Missing prompt layer: {layer}"
-        )
+        assert layer in prompt, f"Missing prompt layer: {layer}"
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_confirmation_protocol() -> None:
     """System prompt must enforce the read-diff-confirm-write protocol."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt_lower = data["system_prompt"].lower()
 
-    prompt_lower = CONFIG_ADMIN_SYSTEM_PROMPT.lower()
     assert "confirm" in prompt_lower
     assert "diff" in prompt_lower or "before" in prompt_lower
 
@@ -279,9 +287,9 @@ def test_config_admin_prompt_contains_confirmation_protocol() -> None:
 @pytest.mark.unit
 def test_config_admin_prompt_contains_skill_management() -> None:
     """System prompt must cover skill CRUD operations."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt_lower = data["system_prompt"].lower()
 
-    prompt_lower = CONFIG_ADMIN_SYSTEM_PROMPT.lower()
     for action in ["create", "modify", "delete"]:
         assert action in prompt_lower, f"Missing skill action: {action}"
 
@@ -289,145 +297,152 @@ def test_config_admin_prompt_contains_skill_management() -> None:
 @pytest.mark.unit
 def test_config_admin_prompt_contains_skill_md_format() -> None:
     """System prompt must document SKILL.md frontmatter fields."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt = data["system_prompt"]
 
     for field in ["name:", "description:", "allowed-tools:"]:
-        assert field in CONFIG_ADMIN_SYSTEM_PROMPT, (
-            f"Missing SKILL.md field: {field}"
-        )
+        assert field in prompt, f"Missing SKILL.md field: {field}"
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_skill_name_constraints() -> None:
     """System prompt must document skill naming rules."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt_lower = data["system_prompt"].lower()
 
-    prompt_lower = CONFIG_ADMIN_SYSTEM_PROMPT.lower()
     assert "lowercase" in prompt_lower or "a-z" in prompt_lower
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_skills_dir_and_registry() -> None:
     """System prompt must reference skills/ and CLAUDE.md registry."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    prompt = data["system_prompt"]
 
-    assert "skills/" in CONFIG_ADMIN_SYSTEM_PROMPT
-    assert "CLAUDE.md" in CONFIG_ADMIN_SYSTEM_PROMPT
+    assert "skills/" in prompt
+    assert "CLAUDE.md" in prompt
 
 
 @pytest.mark.unit
 def test_config_admin_prompt_contains_skills_dirs_reference() -> None:
     """System prompt must mention skills_dirs for role access control."""
-    from atelier.agents.config_admin import CONFIG_ADMIN_SYSTEM_PROMPT
-
-    assert "skills_dirs" in CONFIG_ADMIN_SYSTEM_PROMPT
+    data = _load_config_admin_yaml()
+    assert "skills_dirs" in data["system_prompt"]
 
 
 # ---------------------------------------------------------------------------
-# SubagentRegistry
+# SubagentRegistry — YAML-based (loaded from tmp copy of shipped default)
 # ---------------------------------------------------------------------------
 
 
+def _make_registry_with_config_admin(tmp_path: Path) -> "SubagentRegistry":
+    """Build a SubagentRegistry with relais-config loaded from a tmp dir.
+
+    Copies relais-config.yaml.default → tmp/config/atelier/subagents/relais-config.yaml
+    so that SubagentRegistry.load() can find it via CONFIG_SEARCH_PATH=[tmp].
+
+    Args:
+        tmp_path: pytest tmp_path fixture value.
+
+    Returns:
+        A loaded SubagentRegistry containing relais-config.
+    """
+    import shutil
+    from atelier.subagents import SubagentRegistry
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_CONFIG_ADMIN_YAML, subagents_dir / "relais-config.yaml")
+
+    mock_tool_registry = MagicMock()
+    mock_tool_registry.get = lambda name: None
+
+    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+        return SubagentRegistry.load(mock_tool_registry)
+
+
 @pytest.mark.unit
-def test_registry_discovers_config_admin() -> None:
-    """SubagentRegistry.discover() must find the config-admin module."""
-    from atelier.agents import SubagentRegistry
-
-    registry = SubagentRegistry.discover()
-    assert "config-admin" in registry.all_names
+def test_registry_discovers_config_admin(tmp_path: Path) -> None:
+    """SubagentRegistry.load() must find relais-config from the default YAML."""
+    registry = _make_registry_with_config_admin(tmp_path)
+    assert "relais-config" in registry.all_names
 
 
 @pytest.mark.unit
-def test_registry_specs_for_user_with_wildcard() -> None:
+def test_registry_specs_for_user_with_wildcard(tmp_path: Path) -> None:
     """User with allowed_subagents=["*"] gets all subagents."""
-    from atelier.agents import SubagentRegistry
+    registry = _make_registry_with_config_admin(tmp_path)
 
-    registry = SubagentRegistry.discover()
     ur = {"allowed_subagents": ["*"]}
     specs = registry.specs_for_user(ur)
     assert len(specs) >= 1
-    assert specs[0]["name"] == "config-admin"
+    names = [s["name"] for s in specs]
+    assert "relais-config" in names
 
 
 @pytest.mark.unit
-def test_registry_specs_for_user_with_explicit_name() -> None:
-    """User with allowed_subagents=["config-admin"] gets config-admin."""
-    from atelier.agents import SubagentRegistry
+def test_registry_specs_for_user_with_explicit_name(tmp_path: Path) -> None:
+    """User with allowed_subagents=["relais-config"] gets relais-config."""
+    registry = _make_registry_with_config_admin(tmp_path)
 
-    registry = SubagentRegistry.discover()
-    ur = {"allowed_subagents": ["config-admin"]}
+    ur = {"allowed_subagents": ["relais-config"]}
     specs = registry.specs_for_user(ur)
     assert len(specs) == 1
-    assert specs[0]["name"] == "config-admin"
+    assert specs[0]["name"] == "relais-config"
 
 
 @pytest.mark.unit
-def test_registry_specs_for_user_with_glob_pattern() -> None:
-    """User with allowed_subagents=["config-*"] gets config-admin."""
-    from atelier.agents import SubagentRegistry
+def test_registry_specs_for_user_with_glob_pattern(tmp_path: Path) -> None:
+    """User with allowed_subagents=["relais-*"] gets relais-config."""
+    registry = _make_registry_with_config_admin(tmp_path)
 
-    registry = SubagentRegistry.discover()
-    ur = {"allowed_subagents": ["config-*"]}
+    ur = {"allowed_subagents": ["relais-*"]}
     specs = registry.specs_for_user(ur)
     assert len(specs) == 1
 
 
 @pytest.mark.unit
-def test_registry_specs_for_user_with_empty_list() -> None:
+def test_registry_specs_for_user_with_empty_list(tmp_path: Path) -> None:
     """User with allowed_subagents=[] gets no subagents."""
-    from atelier.agents import SubagentRegistry
+    registry = _make_registry_with_config_admin(tmp_path)
 
-    registry = SubagentRegistry.discover()
     ur = {"allowed_subagents": []}
     specs = registry.specs_for_user(ur)
     assert specs == []
 
 
 @pytest.mark.unit
-def test_registry_specs_for_user_with_no_field() -> None:
+def test_registry_specs_for_user_with_no_field(tmp_path: Path) -> None:
     """User record without allowed_subagents gets no subagents."""
-    from atelier.agents import SubagentRegistry
-
-    registry = SubagentRegistry.discover()
+    registry = _make_registry_with_config_admin(tmp_path)
     specs = registry.specs_for_user({})
     assert specs == []
 
 
 @pytest.mark.unit
-def test_registry_delegation_prompt_for_allowed_user() -> None:
-    """Delegation prompt for user with ["*"] contains config-admin snippet."""
-    from atelier.agents import SubagentRegistry
+def test_registry_delegation_prompt_for_allowed_user(tmp_path: Path) -> None:
+    """Delegation prompt for user with ["*"] contains relais-config snippet."""
+    registry = _make_registry_with_config_admin(tmp_path)
 
-    registry = SubagentRegistry.discover()
     ur = {"allowed_subagents": ["*"]}
     prompt = registry.delegation_prompt_for_user(ur)
-    assert "config-admin" in prompt
+    assert "relais-config" in prompt
     assert "task()" in prompt
 
 
 @pytest.mark.unit
-def test_registry_delegation_prompt_empty_for_denied_user() -> None:
+def test_registry_delegation_prompt_empty_for_denied_user(tmp_path: Path) -> None:
     """Delegation prompt for user with [] is empty string."""
-    from atelier.agents import SubagentRegistry
+    registry = _make_registry_with_config_admin(tmp_path)
 
-    registry = SubagentRegistry.discover()
     prompt = registry.delegation_prompt_for_user({"allowed_subagents": []})
     assert prompt == ""
 
 
 @pytest.mark.unit
-def test_registry_skips_invalid_module() -> None:
-    """Registry skips modules missing required attributes."""
-    from atelier.agents._registry import _is_valid_subagent_module
-
-    incomplete = MagicMock(spec=[])  # no attributes
-    assert not _is_valid_subagent_module(incomplete)
-
-
-@pytest.mark.unit
 def test_registry_parse_patterns_boundary() -> None:
     """_parse_subagent_patterns handles non-list inputs safely."""
-    from atelier.agents._registry import _parse_subagent_patterns
+    from atelier.subagents import _parse_subagent_patterns
 
     assert _parse_subagent_patterns(None) == ()
     assert _parse_subagent_patterns("*") == ()
@@ -491,10 +506,22 @@ def _make_atelier_for_gating():
     the Atelier instance survives with its attributes set but no
     lingering mocks interfere with subsequent patches in test bodies.
 
+    The subagent registry is seeded with config-admin by pointing
+    CONFIG_SEARCH_PATH at a temporary directory that contains a copy of
+    the shipped default YAML.
+
     Returns:
-        An Atelier instance safe for unit testing.
+        An Atelier instance safe for unit testing, with config-admin loaded.
     """
+    import shutil
+    import tempfile
     from atelier.main import Atelier
+
+    # Prepare a tmp dir with relais-config.yaml so the registry picks it up
+    tmpdir = Path(tempfile.mkdtemp())
+    subagents_dir = tmpdir / "config" / "atelier" / "subagents"
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_CONFIG_ADMIN_YAML, subagents_dir / "relais-config.yaml")
 
     profile_mock = MagicMock()
     profile_mock.model = "test:model"
@@ -504,28 +531,29 @@ def _make_atelier_for_gating():
     mock_saver_cls = MagicMock()
     mock_saver_cls.from_conn_string.return_value = mock_saver
 
-    patches = {
-        "atelier.main.load_profiles": {"default": profile_mock},
-        "atelier.main.load_for_sdk": {},
-        "atelier.main.resolve_profile": profile_mock,
-    }
-    active = {}
-    for target, retval in patches.items():
-        p = patch(target, return_value=retval)
-        active[target] = p.start()
-    p = patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls)
-    active["saver"] = p.start()
+    patchers = [
+        patch("atelier.main.load_profiles", return_value={"default": profile_mock}),
+        patch("atelier.main.load_for_sdk", return_value={}),
+        patch("atelier.main.resolve_profile", return_value=profile_mock),
+        patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmpdir]),
+    ]
+    for p in patchers:
+        p.start()
 
     try:
         atelier = Atelier()
     except Exception:
-        for v in active.values():
-            v.stop()
+        for p in patchers:
+            try:
+                p.stop()
+            except RuntimeError:
+                pass
         raise
 
-    for v in active.values():
+    for p in patchers:
         try:
-            v.stop()
+            p.stop()
         except RuntimeError:
             pass
 
@@ -568,7 +596,7 @@ async def _run_handle_message(allowed_subagents: list[str] | None) -> dict:
 @pytest.mark.unit
 @pytest.mark.parametrize("allowed,expected_count,has_delegation", [
     (["*"], 1, True),
-    (["config-admin"], 1, True),
+    (["relais-config"], 1, True),
     ([], 0, False),
     (None, 0, False),
 ])
@@ -589,5 +617,5 @@ async def test_handle_message_subagent_gating(
     delegation = kwargs.get("delegation_prompt", "")
     assert len(subagents) == expected_count
     if expected_count > 0:
-        assert subagents[0]["name"] == "config-admin"
+        assert subagents[0]["name"] == "relais-config"
     assert bool(delegation) == has_delegation

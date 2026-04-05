@@ -44,7 +44,7 @@ The main pipeline flows through these bricks in order:
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
    - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
-   - **Subagent registry**: `atelier/agents/` package with auto-discovery via `SubagentRegistry.discover()`; each subagent is a Python module exposing `SPEC_NAME`, `build_spec()`, `delegation_snippet()`; user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `config-admin` (configuration CRUD)
+   - **Subagent registry**: YAML files in `config/atelier/subagents/*.yaml` loaded by `SubagentRegistry.load()` from the config cascade (user > system > project); user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `relais-config` (configuration CRUD); tool tokens support `mcp:<glob>` (MCP pool filter), `inherit` (all request_tools), or `<static_name>` (ToolRegistry lookup); hot-reload swaps the registry atomically when the `config/atelier/subagents/` directory changes
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
@@ -315,10 +315,17 @@ Per-profile MCP constraints (fields in `ProfileConfig`):
 
 ### Adding a New Subagent
 
-1. Create `atelier/agents/{name}.py` implementing the protocol: `SPEC_NAME`, `build_spec()`, `delegation_snippet()`
-2. Add the subagent name to relevant roles' `allowed_subagents` in portail.yaml
-3. No changes needed to `agent_executor.py` or `main.py` (auto-discovery via `SubagentRegistry.discover()`)
-4. Add tests in `tests/test_{name}_subagent.py`
+1. Create `config/atelier/subagents/{name}.yaml` with required fields: `name`, `description`, `system_prompt` (and optionally `tools`, `delegation_snippet`)
+2. The file stem must exactly match the `name` field (e.g., `my-agent.yaml` → `name: my-agent`)
+3. Add the subagent name to relevant roles' `allowed_subagents` in portail.yaml (fnmatch patterns, e.g. `["my-agent"]` or `["my-*"]`)
+4. No changes needed to `agent_executor.py` or `main.py` — Atelier picks up new files automatically on hot-reload (or restart)
+5. If the subagent should be available by default, also create `config/atelier/subagents/{name}.yaml.default` and register it in `common/init.py` `DEFAULT_FILES`
+6. Add tests in `tests/test_{name}_subagent.py` loading the YAML via `SubagentRegistry.load()`
+
+Tool token reference for the `tools:` field:
+- `mcp:<glob>` — fnmatch filter on per-request MCP tools (e.g. `mcp:git_*`)
+- `inherit` — pass all MCP tools the parent agent received (stays within ToolPolicy scope)
+- `<name>` — static tool from ToolRegistry (`atelier/tools/*.py` modules)
 
 ### Handling Message Errors
 

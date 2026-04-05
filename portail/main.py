@@ -26,6 +26,7 @@ Redis channels
 --------------
 Consumed:
   - relais:messages:incoming  (consumer group: portail_group)
+  - relais:config:reload:portail  (Pub/Sub channel for hot-reload trigger)
 
 Produced:
   - relais:security           — enriched envelopes forwarded to Sentinelle
@@ -33,6 +34,19 @@ Produced:
 
 Redis keys written:
   - relais:active_sessions:{sender_id}  (Hash, TTL 1 h)
+
+Configuration hot-reload
+------------------------
+Portail watches portail.yaml for changes and reloads user registry without
+restarting:
+
+* Watched files: portail.yaml
+* Reload trigger: File system change detected via watchfiles library
+* Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
+  if new config is invalid YAML, previous config is preserved
+* Redis Pub/Sub channel: relais:config:reload:portail (listens for external
+  reload triggers from operator)
+* Config backups: up to 5 versions stored in ~/.relais/config/backups/
 
 Processing flow
 ---------------

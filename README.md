@@ -183,7 +183,31 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 
 ---
 
-## Configuration
+## Configuration et rechargement à chaud
+
+### Rechargement à chaud (hot-reload)
+
+Toutes les briques supportent le rechargement de leur configuration sans redémarrage de la brique.
+
+**Mécanisme:**
+- Chaque brique surveille ses fichiers YAML de configuration via `watchfiles` (détection système de changements fichier)
+- À chaque changement détecté, la configuration est rechargée et validée atomiquement
+- En cas d'erreur YAML, la configuration précédente est préservée (fallback sûr)
+- Les configurations rechargées sont archivées dans `~/.relais/config/backups/{brick}_{timestamp}.yaml` (max 5 versions par brique)
+- Les opérateurs peuvent aussi déclencher le rechargement manuellement via Redis Pub/Sub en envoyant `"reload"` sur `relais:config:reload:{brick_name}`
+
+**Fichiers surveillés par brique:**
+- **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
+- **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
+- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/channels.yaml`
+- **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
+- **Aiguilleur**: `config/channels.yaml` (définitions canaux)
+
+**Cas d'usage:**
+- Modification des ACL (Sentinelle) sans redémarrage
+- Ajout/suppression de profils LLM (Atelier) en direct
+- Changement de politique utilisateur (Portail)
+- Activation/désactivation de canaux (Aiguilleur)
 
 ### `config/config.yaml`
 

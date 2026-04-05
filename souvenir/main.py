@@ -30,10 +30,24 @@ Redis channels
 --------------
 Consumed:
   - relais:memory:request   (consumer group: souvenir_group)
+  - relais:config:reload:souvenir  (Pub/Sub channel for hot-reload trigger)
 
 Produced:
   - relais:memory:response  — responses to file_read / file_list / clear
   - relais:logs             — operational log entries
+
+Configuration hot-reload
+------------------------
+Souvenir watches souvenir configuration for changes and reloads without
+restarting:
+
+* Watched files: souvenir/profiles.yaml (memory extractor model config)
+* Reload trigger: File system change detected via watchfiles library
+* Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
+  if new config is invalid YAML, previous config is preserved
+* Redis Pub/Sub channel: relais:config:reload:souvenir (listens for external
+  reload triggers from operator)
+* Config backups: up to 5 versions stored in ~/.relais/config/backups/
 
 Processing flow
 ---------------

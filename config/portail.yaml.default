@@ -74,10 +74,10 @@ users:
 #   ["*"]         → tous les outils (accès illimité)
 #   ["server__tool", "server__*", …] → liste ou glob
 #
-# allowed_subagents : sous-agents autorisés (découverts dans atelier/agents/)
+# allowed_subagents : sous-agents autorisés (découverts dans config/atelier/subagents/)
 #   null ou []    → aucun sous-agent
 #   ["*"]         → tous les sous-agents (accès illimité)
-#   ["config-admin", "monitor-*", …] → liste ou glob (fnmatch)
+#   ["relais-config", "monitor-*", …] → liste ou glob (fnmatch)
 #
 # prompt_path : chemin relatif (depuis prompts/) vers l'overlay de prompt du rôle
 #   (role_prompt_path). Chargé explicitement par Atelier en tant que couche rôle.

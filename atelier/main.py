@@ -38,6 +38,7 @@ Redis channels
 --------------
 Consumed:
   - relais:tasks               (consumer group: atelier_group)
+  - relais:config:reload:atelier  (Pub/Sub channel for hot-reload trigger)
 
 Produced:
   - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw)
@@ -45,6 +46,21 @@ Produced:
   - relais:memory:request      — archive action with full messages_raw for Souvenir
   - relais:tasks:failed        — DLQ for exhausted retry attempts
   - relais:logs                — operational log entries
+
+Configuration hot-reload
+------------------------
+Atelier watches configuration files for changes and reloads them without
+restarting the service:
+
+* Watched files: atelier/profiles.yaml, atelier/mcp_servers.yaml, atelier.yaml,
+  channels.yaml
+* Reload trigger: File system change detected via watchfiles library
+  (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows)
+* Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
+  if new config is invalid YAML, previous config is preserved (no corruption)
+* Redis Pub/Sub channel: relais:config:reload:atelier (listens for external
+  reload triggers from operator)
+* Config backups: up to 5 versions stored in ~/.relais/config/backups/
 
 Message flow (one task at a time):
 
@@ -112,7 +128,8 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from aiguilleur.channel_config import load_channels_config
 from atelier.tool_policy import ToolPolicy
-from atelier.agents import SubagentRegistry
+from atelier.subagents import SubagentRegistry
+from atelier.tools._registry import ToolRegistry
 
 logger = logging.getLogger("atelier")
 
@@ -160,8 +177,11 @@ class Atelier:
         # is automatically picked up.
         self._skills_base_dir: Path = resolve_skills_dir()
 
-        # Subagent registry — auto-discovers modules in atelier/agents/.
-        self._subagent_registry: SubagentRegistry = SubagentRegistry.discover()
+        # Static tool registry — discovers @tool-decorated functions in atelier/tools/.
+        self._tool_registry: ToolRegistry = ToolRegistry.discover()
+
+        # Subagent registry — loads specs from config/atelier/subagents/*.yaml cascade.
+        self._subagent_registry: SubagentRegistry = SubagentRegistry.load(self._tool_registry)
 
         # Config reload lock — guards _profiles, _mcp_servers_default,
         # _progress_config, and _streaming_capable_channels.
@@ -210,7 +230,7 @@ class Atelier:
 
         Returns:
             A dict with keys ``profiles``, ``mcp_servers``, ``progress``,
-            ``streaming_channels``.
+            ``streaming_channels``, ``subagent_registry``.
 
         Raises:
             Any exception from the underlying loaders.
@@ -221,11 +241,13 @@ class Atelier:
         new_streaming = frozenset(
             name for name, cfg in load_channels_config().items() if cfg.streaming
         )
+        new_subagent_registry = SubagentRegistry.load(self._tool_registry)
         return {
             "profiles": new_profiles,
             "mcp_servers": new_mcp_servers,
             "progress": new_progress,
             "streaming_channels": new_streaming,
+            "subagent_registry": new_subagent_registry,
         }
 
     def _apply_config(self, cfg: dict) -> None:
@@ -238,6 +260,8 @@ class Atelier:
         self._mcp_servers_default = cfg["mcp_servers"]
         self._progress_config = cfg["progress"]
         self._streaming_capable_channels = cfg["streaming_channels"]
+        if "subagent_registry" in cfg:
+            self._subagent_registry = cfg["subagent_registry"]
         logger.info("Atelier: configuration applied")
 
     async def reload_config(self) -> bool:
@@ -284,20 +308,29 @@ class Atelier:
                 await self.reload_config()
 
     def _config_watch_paths(self) -> list[Path]:
-        """Return the list of config file paths to watch for changes.
+        """Return the list of config file paths and directories to watch.
 
-        Resolves all four Atelier config files via the config cascade:
-        profiles.yaml, mcp_servers.yaml, atelier.yaml, and channels.yaml.
+        Returns all four Atelier config files plus any existing
+        ``config/atelier/subagents/`` directories found across the config cascade,
+        so changes to subagent YAML files trigger a hot-reload.
 
         Returns:
-            A list of four resolved Path instances.
+            A list of resolved Path instances.
         """
-        return [
+        from common.config_loader import CONFIG_SEARCH_PATH
+
+        paths = [
             resolve_config_path("atelier/profiles.yaml"),
             resolve_config_path("atelier/mcp_servers.yaml"),
             resolve_config_path("atelier.yaml"),
             resolve_config_path("channels.yaml"),
         ]
+        # Add existing subagents directories from all cascade roots
+        for base in CONFIG_SEARCH_PATH:
+            subagents_dir = base / "config" / "atelier" / "subagents"
+            if subagents_dir.is_dir():
+                paths.append(subagents_dir)
+        return paths
 
     def _start_file_watcher(self) -> "asyncio.Task | None":
         """Create and return an asyncio.Task that watches config files for changes.
@@ -416,7 +449,9 @@ class Atelier:
 
                 # Resolve subagents and delegation prompt from the registry,
                 # filtered by the user's allowed_subagents patterns.
-                subagents = self._subagent_registry.specs_for_user(ur)
+                # Pass mcp_tools as request_tools so mcp:<glob> and inherit
+                # tokens resolve against the per-request ToolPolicy-filtered pool.
+                subagents = self._subagent_registry.specs_for_user(ur, request_tools=mcp_tools)
                 delegation_prompt = self._subagent_registry.delegation_prompt_for_user(ur)
 
                 agent_executor = AgentExecutor(

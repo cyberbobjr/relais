@@ -31,12 +31,26 @@ Redis channels
 Consumed:
   - relais:security                   (consumer group: sentinelle_group)
   - relais:messages:outgoing_pending  (consumer group: sentinelle_outgoing_group)
+  - relais:config:reload:sentinelle   (Pub/Sub channel for hot-reload trigger)
 
 Produced:
   - relais:tasks                      — authorized normal messages → Atelier
   - relais:commands                   — authorized slash commands → Commandant
   - relais:messages:outgoing:{channel}— inline rejection replies + outgoing fwd
   - relais:logs                       — operational log entries
+
+Configuration hot-reload
+------------------------
+Sentinelle watches sentinelle.yaml for ACL changes and reloads without
+restarting:
+
+* Watched files: sentinelle.yaml
+* Reload trigger: File system change detected via watchfiles library
+* Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
+  if new config is invalid YAML, previous ACL rules are preserved
+* Redis Pub/Sub channel: relais:config:reload:sentinelle (listens for external
+  reload triggers from operator)
+* Config backups: up to 5 versions stored in ~/.relais/config/backups/
 
 Processing flow — incoming
 --------------------------
