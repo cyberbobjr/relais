@@ -165,7 +165,7 @@ class StreamPublisher:
         """Publish a progress event envelope to the channel's outgoing stream.
 
         Creates a child ``Envelope`` from the source envelope with
-        ``metadata["message_type"]="progress"`` so that non-streaming adapters
+        ``action="progress"`` so that non-streaming adapters
         (e.g. Discord) can identify and display it appropriately.
 
         Args:

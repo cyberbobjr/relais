@@ -32,13 +32,14 @@ class ChannelConfig:
                       Defaults to aiguilleur.channels.{name}.adapter.*Aiguilleur.
         max_restarts: Max automatic restart attempts on crash. Default 5.
         profile:      Optional LLM profile name (e.g. 'fast', 'precise').
-                      When set, the Aiguilleur stamps envelope.metadata["llm_profile"]
+                      When set, the Aiguilleur stamps
+                      envelope.context["aiguilleur"]["channel_profile"]
                       with this value, overriding config.yaml:llm.default_profile.
                       None means fall back to the system default profile.
         prompt_path:  Optional relative path (relative to prompts_dir) to the
                       channel formatting overlay.  When set, the Aiguilleur stamps
-                      envelope.metadata["channel_prompt_path"] with this value so
-                      that Atelier can load it explicitly via soul_assembler.
+                      envelope.context["aiguilleur"]["channel_prompt_path"] with
+                      this value so that Atelier can load it via soul_assembler.
                       None means no channel overlay is loaded.
     """
 

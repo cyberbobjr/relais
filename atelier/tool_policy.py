@@ -46,7 +46,7 @@ class ToolPolicy:
         decisions.
 
         Args:
-            metadata_value: The raw value from ``envelope.metadata`` (list,
+            metadata_value: The raw value from ``envelope.context[namespace]`` (list,
                 tuple, None, …).
 
         Returns:
@@ -63,7 +63,7 @@ class ToolPolicy:
         Non-existent paths and path-traversal attempts are silently dropped.
 
         Args:
-            metadata_value: The raw value from ``envelope.metadata``
+            metadata_value: The raw value from ``envelope.context[namespace]``
                 (list of directory names, ``["*"]``, None, …).
 
         Returns:
@@ -80,7 +80,7 @@ class ToolPolicy:
 
         Args:
             tools: List of LangChain ``BaseTool`` instances.
-            metadata_value: The raw value from ``envelope.metadata``
+            metadata_value: The raw value from ``envelope.context[namespace]``
                 (list of glob patterns, ``["*"]``, None, …).
 
         Returns:
@@ -98,7 +98,7 @@ class ToolPolicy:
         """Normalise a raw metadata value into a tuple of strings.
 
         Args:
-            raw: Any value from ``envelope.metadata``.
+            raw: Any value from ``envelope.context[namespace]``.
 
         Returns:
             Tuple of strings; empty tuple on any unexpected type.

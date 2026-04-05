@@ -66,7 +66,7 @@ class SouvenirBackend(BackendProtocol):
 
     Args:
         user_id: Identifiant unique de l'utilisateur (issu de
-            ``envelope.metadata["user_id"]``).
+            ``envelope.context["portail"]["user_id"]``).
     """
 
     def __init__(self, user_id: str) -> None:

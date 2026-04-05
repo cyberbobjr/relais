@@ -397,14 +397,14 @@ async def test_consume_outgoing_xreadgroup_exception_does_not_crash():
             await client._consume_outgoing_stream()
 
 # ---------------------------------------------------------------------------
-# LLM profile stamping in envelope.metadata (Phase 7)
+# LLM profile stamping in envelope.context["aiguilleur"] (Phase 7)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_on_message_stamps_channel_profile_from_channel_config():
-    """When the channel has profile='fast', envelope.metadata['channel_profile'] == 'fast'.
+    """When the channel has profile='fast', envelope.context["aiguilleur"]["channel_profile"] == 'fast'.
 
     The DiscordAiguilleur must stamp the resolved channel profile under the
     'channel_profile' key (not 'llm_profile') on every incoming envelope it
@@ -450,7 +450,7 @@ async def test_on_message_stamps_channel_profile_from_channel_config():
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_on_message_stamps_default_channel_profile_when_no_channel_profile():
-    """When the channel has no profile, envelope.metadata['channel_profile'] falls back to 'default'.
+    """When the channel has no profile, envelope.context["aiguilleur"]["channel_profile"] falls back to 'default'.
 
     The DiscordAiguilleur uses get_default_llm_profile() when
     ChannelConfig.profile is None.  The result is stamped as 'channel_profile',

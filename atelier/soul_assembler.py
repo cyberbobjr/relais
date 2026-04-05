@@ -48,7 +48,7 @@ def assemble_system_prompt(
             relative to *prompts_dir*.  ``None`` = no user overlay loaded.
         channel_prompt_path: Relative path to the channel formatting overlay,
             as configured in ``channels.yaml`` (``prompt_path`` field per channel),
-            stamped into ``envelope.metadata["channel_prompt_path"]`` by
+            stamped into ``envelope.context["aiguilleur"]["channel_prompt_path"]`` by
             Aiguilleur.  ``None`` = no channel overlay loaded.
 
     Returns:

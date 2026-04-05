@@ -54,7 +54,7 @@ Processing flow
 ---------------
   (1) Consume from relais:memory:request (souvenir_group).
   (2) Parse Envelope from payload field.
-  (3) Extract action and parameters from envelope.metadata.
+  (3) Extract action from envelope.action and parameters from envelope.context[CTX_SOUVENIR_REQUEST].
   (4) Dispatch to registered handler (archive / clear / file_write / file_read / file_list).
   (5) XACK (ack_mode="always").
 """
@@ -161,13 +161,13 @@ class Souvenir(BrickBase):
     async def _handle(self, envelope: Envelope, redis_conn: Any) -> bool:
         """Dispatch one memory request to the appropriate action handler.
 
-        Extracts action parameters from ``envelope.metadata`` and builds a
-        flat :class:`~souvenir.handlers.HandlerContext` dict (``ctx.req``)
-        for backward-compatible handler access.
+        Extracts action parameters from ``envelope.context["souvenir_request"]``
+        and builds a flat :class:`~souvenir.handlers.HandlerContext` dict
+        (``ctx.req``) for backward-compatible handler access.
 
         Args:
-            envelope: Incoming memory request; action and parameters are in
-                ``envelope.metadata``.
+            envelope: Incoming memory request; action is in ``envelope.action``
+                and parameters are in ``envelope.context["souvenir_request"]``.
             redis_conn: Active async Redis connection passed to handlers for
                 publishing responses.
 

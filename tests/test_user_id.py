@@ -1,4 +1,4 @@
-"""Tests for user_id field in UserRecord and envelope.metadata stamping.
+"""Tests for user_id field in UserRecord and envelope.context["portail"] stamping.
 
 TDD — RED phase tests written before implementation.
 
@@ -7,9 +7,9 @@ Covers:
 - to_dict() includes ``user_id``
 - from_dict() round-trips ``user_id`` correctly
 - from_dict() with missing ``user_id`` falls back to ``""``
-- _enrich_envelope() stamps ``envelope.metadata["user_id"]`` from YAML key
-- _enrich_envelope() stamps ``envelope.metadata["user_record"]["user_id"]``
-- Guest policy stamps ``envelope.metadata["user_id"] == "guest"``
+- _enrich_envelope() stamps ``envelope.context["portail"]["user_id"]`` from YAML key
+- _enrich_envelope() stamps ``envelope.context["portail"]["user_record"]["user_id"]``
+- Guest policy stamps ``envelope.context["portail"]["user_id"] == "guest"``
 - Guest user_record dict contains ``user_id == "guest"``
 """
 
@@ -223,7 +223,7 @@ def test_user_record_from_dict_missing_user_id_falls_back_to_empty() -> None:
 
 @pytest.mark.unit
 def test_enrich_envelope_stamps_user_id_from_yaml_key(tmp_path: Path) -> None:
-    """_enrich_envelope must stamp envelope.metadata["user_id"] with the YAML key.
+    """_enrich_envelope must stamp envelope.context["portail"]["user_id"] with the YAML key.
 
     The YAML key (e.g. ``usr_admin``) is the stable cross-channel user_id.
 
@@ -240,7 +240,7 @@ def test_enrich_envelope_stamps_user_id_from_yaml_key(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_enrich_envelope_user_record_dict_contains_user_id(tmp_path: Path) -> None:
-    """user_record dict in envelope.metadata must contain ``user_id``.
+    """user_record dict in envelope.context["portail"] must contain ``user_id``.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -293,7 +293,7 @@ def test_enrich_envelope_unknown_user_does_not_stamp_user_id(tmp_path: Path) -> 
 
 @pytest.mark.unit
 def test_guest_stamps_user_id_is_guest(tmp_path: Path) -> None:
-    """_apply_guest_stamps must stamp envelope.metadata["user_id"] == "guest".
+    """_apply_guest_stamps must stamp envelope.context["portail"]["user_id"] == "guest".
 
     Args:
         tmp_path: pytest built-in temporary directory.

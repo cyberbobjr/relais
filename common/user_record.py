@@ -1,8 +1,8 @@
 """UserRecord — immutable user profile shared across all bricks.
 
 Downstream bricks (Sentinelle, Atelier) import this dataclass to deserialize
-``envelope.metadata["user_record"]``.  Portail is the sole writer; all other
-bricks are read-only consumers.
+``envelope.context["portail"]["user_record"]``.  Portail is the sole writer; all
+other bricks are read-only consumers.
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ class UserRecord:
 
     Note:
         ``llm_profile`` is NOT a UserRecord field.  It is stamped directly
-        into ``envelope.metadata["llm_profile"]`` by Portail, derived from
-        the channel's ``channel_profile`` (or ``"default"``).
+        into ``envelope.context["portail"]["llm_profile"]`` by Portail, derived
+        from the channel's ``channel_profile`` (or ``"default"``).
     """
 
     user_id: str
@@ -64,7 +64,7 @@ class UserRecord:
 
         Returns:
             A dict with all fields, suitable for storing in
-            ``envelope.metadata["user_record"]``.
+            ``envelope.context["portail"]["user_record"]``.
         """
         return {
             "user_id": self.user_id,

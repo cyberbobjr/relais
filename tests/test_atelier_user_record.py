@@ -136,9 +136,9 @@ def _run_stream_once(atelier, envelope, extra_patches=None):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_atelier_reads_llm_profile_from_top_level_metadata() -> None:
-    """Atelier reads llm_profile from envelope.metadata['llm_profile'], not user_record.
+    """Atelier reads llm_profile from envelope.context["portail"]["llm_profile"], not user_record.
 
-    The envelope has llm_profile at the top level of metadata (stamped by Portail).
+    The envelope has llm_profile in context["portail"] (stamped by Portail).
     Atelier must forward the correct profile name to resolve_profile().
     """
     atelier = _make_atelier()

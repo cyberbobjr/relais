@@ -599,11 +599,11 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
-    """_handle_message() sets metadata["streamed"]=True for streaming-capable channels.
+    """_handle_message() sets context["atelier"]["streamed"]=True for streaming-capable channels.
 
     When the envelope channel is "telegram" (a STREAMING_CAPABLE_CHANNEL), the
     response envelope published to relais:messages:outgoing:telegram must carry
-    metadata["streamed"] == True so the Aiguilleur can edit instead of re-send.
+    context["atelier"]["streamed"] == True so the Aiguilleur can edit instead of re-send.
     """
     atelier = _make_atelier_with_patches()
     envelope = _make_envelope(channel="telegram")
@@ -652,7 +652,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_no_streamed_flag_for_non_streaming_channel() -> None:
-    """_handle_message() must NOT set metadata["streamed"] for non-streaming channels.
+    """_handle_message() must NOT set context["atelier"]["streamed"] for non-streaming channels.
 
     When the envelope channel is "whatsapp" (not in STREAMING_CAPABLE_CHANNELS),
     the response envelope must not carry a streamed flag.

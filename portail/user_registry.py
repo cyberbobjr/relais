@@ -2,7 +2,7 @@
 
 Portail is the sole consumer of this module.  Downstream bricks only need
 ``UserRecord`` (from ``common.user_record``) to deserialize the pre-stamped
-``envelope.metadata["user_record"]`` dict.
+``envelope.context["portail"]["user_record"]`` dict.
 
 Role data (actions, skills_dirs, allowed_mcp_tools) is merged into every
 resolved ``UserRecord`` at load time.  Prompt paths are kept separate by
@@ -10,8 +10,8 @@ origin: ``prompt_path`` comes from the user entry only (no role fallback),
 and ``role_prompt_path`` comes from the role entry only.
 
 ``llm_profile`` is NOT part of UserRecord — it is stamped directly into
-``envelope.metadata["llm_profile"]`` by Portail, derived from the channel's
-``channel_profile`` (or ``"default"``).
+``envelope.context["portail"]["llm_profile"]`` by Portail, derived from the
+channel's ``channel_profile`` (or ``"default"``).
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ class UserRegistry:
         - ``actions``, ``skills_dirs``, ``allowed_mcp_tools``: role-level only
 
         ``llm_profile`` is NOT loaded here — Portail stamps it directly into
-        ``envelope.metadata`` from the channel's ``channel_profile``.
+        ``envelope.context["portail"]`` from the channel's ``channel_profile``.
 
         Enters permissive mode (empty indexes) when the file cannot be found
         or parsed.

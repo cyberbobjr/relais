@@ -371,7 +371,7 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_guest_policy_stamps_llm_profile_in_metadata(tmp_path: Path) -> None:
-    """guest policy: llm_profile is stamped directly in envelope.metadata.
+    """guest policy: llm_profile is stamped in envelope.context["portail"].
 
     With no channel_profile present, llm_profile defaults to "default".
     The guest role's llm_profile field in portail.yaml is ignored.

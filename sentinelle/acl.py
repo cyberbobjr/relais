@@ -2,7 +2,7 @@
 
 The ACLManager no longer resolves user identity internally. Instead, callers
 (Sentinelle._process_stream) pass a ``user_record`` hydrated from
-``envelope.metadata["user_record"]`` — populated upstream by Le Portail.
+``envelope.context["portail"]["user_record"]`` — populated upstream by Le Portail.
 
 This enforces single-responsibility:
 - Le Portail: user identity, role merging, guest policy → stamps ``user_record``
@@ -81,7 +81,7 @@ class ACLManager:
         """Check whether sender_id may send a message or execute a command.
 
         The ``user_record`` parameter carries the pre-hydrated user identity
-        stamped by Le Portail into ``envelope.metadata["user_record"]``.
+        stamped by Le Portail into ``envelope.context["portail"]["user_record"]``.
         When ``user_record`` is ``None`` and the mode is ``"allowlist"``,
         the call returns ``False`` (fail-closed).
 
@@ -104,7 +104,7 @@ class ACLManager:
             scope_id: Group identifier when ``context`` is ``"group"``.
             action: Slash command name to authorize (e.g. ``"clear"``), or
                 ``None`` for normal message sending.
-            user_record: Pre-hydrated user record from ``envelope.metadata``.
+            user_record: Pre-hydrated user record from ``envelope.context["portail"]``.
                 When ``None`` in allowlist mode, the call returns ``False``.
 
         Returns:

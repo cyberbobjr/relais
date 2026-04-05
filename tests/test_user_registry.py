@@ -119,7 +119,7 @@ def test_user_record_has_all_required_fields() -> None:
 
     Fields: display_name, role, blocked, actions, skills_dirs,
     allowed_mcp_tools, prompt_path, role_prompt_path.
-    llm_profile is NOT a UserRecord field — it lives in envelope.metadata.
+    llm_profile is NOT a UserRecord field — it lives in envelope.context["portail"].
     """
     record = UserRecord(
         user_id="usr_bob",
@@ -303,7 +303,7 @@ def test_resolve_user_merges_allowed_mcp_tools(tmp_path: Path) -> None:
 def test_resolve_user_record_has_no_llm_profile_field(tmp_path: Path) -> None:
     """UserRecord returned by resolve_user must NOT contain llm_profile.
 
-    llm_profile is now stamped directly into envelope.metadata by Portail,
+    llm_profile is now stamped directly into envelope.context["portail"] by Portail,
     not carried inside UserRecord.
 
     Args:
@@ -555,7 +555,7 @@ def test_build_guest_record_has_guest_role(tmp_path: Path) -> None:
 def test_build_guest_record_has_no_llm_profile(tmp_path: Path) -> None:
     """build_guest_record returns a record without llm_profile field.
 
-    llm_profile is now stamped directly into envelope.metadata by Portail.
+    llm_profile is now stamped directly into envelope.context["portail"] by Portail.
 
     Args:
         tmp_path: pytest built-in temporary directory.
