@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from atelier.stream_publisher import StreamPublisher
+from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +187,7 @@ async def test_push_progress_with_source_envelope_calls_outgoing_xadd() -> None:
         channel="discord",
         session_id="sess-1",
         correlation_id="corr-src",
-        metadata={"reply_to": "999"},
+        context={CTX_AIGUILLEUR: {"reply_to": "999"}},
     )
     pub = StreamPublisher(
         redis, channel="discord", correlation_id="corr-src", source_envelope=src
@@ -214,7 +215,7 @@ async def test_push_progress_outgoing_envelope_metadata() -> None:
         channel="discord",
         session_id="sess-2",
         correlation_id="corr-meta",
-        metadata={"reply_to": "888"},
+        context={CTX_AIGUILLEUR: {"reply_to": "888"}},
     )
     pub = StreamPublisher(
         redis, channel="discord", correlation_id="corr-meta", source_envelope=src
@@ -229,9 +230,9 @@ async def test_push_progress_outgoing_envelope_metadata() -> None:
     )
     payload = json.loads(outgoing_call.args[1]["payload"])
 
-    assert payload["metadata"]["message_type"] == "progress"
-    assert payload["metadata"]["progress_event"] == "tool_call"
-    assert payload["metadata"]["progress_detail"] == "my_tool"
+    assert payload["context"]["atelier"]["message_type"] == "progress"
+    assert payload["context"]["atelier"]["progress_event"] == "tool_call"
+    assert payload["context"]["atelier"]["progress_detail"] == "my_tool"
     assert payload["channel"] == "discord"
     assert payload["correlation_id"] == "corr-meta"
 
@@ -250,7 +251,6 @@ async def test_push_progress_outgoing_key_uses_channel_name() -> None:
         channel="telegram",
         session_id="sess-3",
         correlation_id="corr-tg",
-        metadata={},
     )
     pub = StreamPublisher(
         redis, channel="telegram", correlation_id="corr-tg", source_envelope=src

@@ -1,8 +1,8 @@
 """Tests for portail.main.Portail — enrichment stamps user_record dict.
 
 TDD — tests verify the new _enrich_envelope behaviour: a single
-``user_record`` dict is stamped into envelope.metadata instead of
-individual keys.  Config format is portail.yaml (users + roles).
+``user_record`` dict is stamped into envelope.context[CTX_PORTAIL] instead
+of individual keys.  Config format is portail.yaml (users + roles).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL
 from common.envelope import Envelope
 
 
@@ -26,7 +27,7 @@ def _make_envelope(
     content: str = "hello world",
     sender_id: str = "discord:admin001",
     channel: str = "discord",
-    metadata: dict | None = None,
+    context: dict | None = None,
 ) -> Envelope:
     """Build a minimal Envelope for Portail enrichment tests.
 
@@ -34,7 +35,7 @@ def _make_envelope(
         content: Message body.
         sender_id: Originating user identifier.
         channel: Originating channel.
-        metadata: Optional extra metadata fields.
+        context: Optional context dict (namespaced by brick).
 
     Returns:
         A valid Envelope instance.
@@ -45,7 +46,7 @@ def _make_envelope(
         channel=channel,
         session_id="sess-001",
         correlation_id="corr-001",
-        metadata=metadata or {},
+        context=context or {},
     )
 
 
@@ -142,7 +143,7 @@ def _make_portail(portail_yaml_path: Path | None = None):
 
 @pytest.mark.unit
 def test_enrich_envelope_stamps_user_record_key(tmp_path: Path) -> None:
-    """_enrich_envelope stamps a 'user_record' key into envelope.metadata.
+    """_enrich_envelope stamps a 'user_record' key into envelope.context[CTX_PORTAIL].
 
     The value must be a dict (JSON-serialisable).
 
@@ -155,8 +156,9 @@ def test_enrich_envelope_stamps_user_record_key(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert "user_record" in envelope.metadata
-    assert isinstance(envelope.metadata["user_record"], dict)
+    assert CTX_PORTAIL in envelope.context
+    assert "user_record" in envelope.context[CTX_PORTAIL]
+    assert isinstance(envelope.context[CTX_PORTAIL]["user_record"], dict)
 
 
 @pytest.mark.unit
@@ -172,7 +174,7 @@ def test_enrich_envelope_user_record_role(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["role"] == "admin"
+    assert envelope.context[CTX_PORTAIL]["user_record"]["role"] == "admin"
 
 
 @pytest.mark.unit
@@ -188,7 +190,7 @@ def test_enrich_envelope_user_record_display_name(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["display_name"] == "Admin User"
+    assert envelope.context[CTX_PORTAIL]["user_record"]["display_name"] == "Admin User"
 
 
 @pytest.mark.unit
@@ -204,7 +206,7 @@ def test_enrich_envelope_user_record_actions_wildcard_for_admin(tmp_path: Path) 
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["actions"] == ["*"]
+    assert envelope.context[CTX_PORTAIL]["user_record"]["actions"] == ["*"]
 
 
 @pytest.mark.unit
@@ -220,7 +222,7 @@ def test_enrich_envelope_user_record_skills_dirs_for_admin(tmp_path: Path) -> No
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["skills_dirs"] == ["*"]
+    assert envelope.context[CTX_PORTAIL]["user_record"]["skills_dirs"] == ["*"]
 
 
 @pytest.mark.unit
@@ -236,7 +238,7 @@ def test_enrich_envelope_user_record_mcp_tools_for_admin(tmp_path: Path) -> None
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["allowed_mcp_tools"] == ["*"]
+    assert envelope.context[CTX_PORTAIL]["user_record"]["allowed_mcp_tools"] == ["*"]
 
 
 @pytest.mark.unit
@@ -253,7 +255,7 @@ def test_enrich_envelope_user_record_prompt_path_when_set(tmp_path: Path) -> Non
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["prompt_path"] == "users/discord_user001.md"
+    assert envelope.context[CTX_PORTAIL]["user_record"]["prompt_path"] == "users/discord_user001.md"
 
 
 @pytest.mark.unit
@@ -269,7 +271,7 @@ def test_enrich_envelope_user_record_prompt_path_none_for_admin(tmp_path: Path) 
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["prompt_path"] is None
+    assert envelope.context[CTX_PORTAIL]["user_record"]["prompt_path"] is None
 
 
 @pytest.mark.unit
@@ -285,8 +287,8 @@ def test_enrich_envelope_user_record_empty_skills_for_user_role(tmp_path: Path) 
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["user_record"]["skills_dirs"] == []
-    assert envelope.metadata["user_record"]["allowed_mcp_tools"] == []
+    assert envelope.context[CTX_PORTAIL]["user_record"]["skills_dirs"] == []
+    assert envelope.context[CTX_PORTAIL]["user_record"]["allowed_mcp_tools"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +311,7 @@ def test_enrich_envelope_no_legacy_user_role_key(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert "user_role" not in envelope.metadata
+    assert "user_role" not in envelope.context.get(CTX_PORTAIL, {})
 
 
 @pytest.mark.unit
@@ -325,7 +327,7 @@ def test_enrich_envelope_no_legacy_display_name_key(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert "display_name" not in envelope.metadata
+    assert "display_name" not in envelope.context.get(CTX_PORTAIL, {})
 
 
 @pytest.mark.unit
@@ -341,7 +343,7 @@ def test_enrich_envelope_no_legacy_skills_dirs_key(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert "skills_dirs" not in envelope.metadata
+    assert "skills_dirs" not in envelope.context.get(CTX_PORTAIL, {})
 
 
 @pytest.mark.unit
@@ -357,7 +359,7 @@ def test_enrich_envelope_no_legacy_custom_prompt_path_key(tmp_path: Path) -> Non
 
     portail._enrich_envelope(envelope)
 
-    assert "custom_prompt_path" not in envelope.metadata
+    assert "custom_prompt_path" not in envelope.context.get(CTX_PORTAIL, {})
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +369,10 @@ def test_enrich_envelope_no_legacy_custom_prompt_path_key(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_enrich_envelope_llm_profile_uses_channel_profile(tmp_path: Path) -> None:
-    """envelope.metadata['llm_profile'] uses channel_profile when present.
+    """envelope.context[CTX_PORTAIL]['llm_profile'] uses channel_profile when present.
 
-    The channel_profile stamped by Aiguilleur is resolved to llm_profile
-    directly in envelope.metadata (not inside user_record).
+    The channel_profile stamped by Aiguilleur in CTX_AIGUILLEUR is resolved to llm_profile
+    in CTX_PORTAIL (not inside user_record).
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -380,18 +382,18 @@ def test_enrich_envelope_llm_profile_uses_channel_profile(tmp_path: Path) -> Non
     envelope = _make_envelope(
         sender_id="discord:admin001",
         channel="discord",
-        metadata={"channel_profile": "coder"},
+        context={CTX_AIGUILLEUR: {"channel_profile": "coder"}},
     )
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["llm_profile"] == "coder"
-    assert "llm_profile" not in envelope.metadata["user_record"]
+    assert envelope.context[CTX_PORTAIL]["llm_profile"] == "coder"
+    assert "llm_profile" not in envelope.context[CTX_PORTAIL].get("user_record", {})
 
 
 @pytest.mark.unit
 def test_enrich_envelope_llm_profile_defaults_to_default(tmp_path: Path) -> None:
-    """envelope.metadata['llm_profile'] defaults to 'default' when channel_profile absent.
+    """envelope.context[CTX_PORTAIL]['llm_profile'] defaults to 'default' when channel_profile absent.
 
     Args:
         tmp_path: pytest built-in temporary directory.
@@ -402,8 +404,8 @@ def test_enrich_envelope_llm_profile_defaults_to_default(tmp_path: Path) -> None
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata["llm_profile"] == "default"
-    assert "llm_profile" not in envelope.metadata["user_record"]
+    assert envelope.context[CTX_PORTAIL]["llm_profile"] == "default"
+    assert "llm_profile" not in envelope.context[CTX_PORTAIL].get("user_record", {})
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +428,7 @@ def test_enrich_envelope_unknown_user_no_user_record(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert "user_record" not in envelope.metadata
+    assert CTX_PORTAIL not in envelope.context
 
 
 # ---------------------------------------------------------------------------
@@ -447,8 +449,8 @@ def test_apply_guest_stamps_sets_user_record(tmp_path: Path) -> None:
 
     portail._apply_guest_stamps(envelope)
 
-    assert "user_record" in envelope.metadata
-    assert envelope.metadata["user_record"]["role"] == "guest"
+    assert CTX_PORTAIL in envelope.context
+    assert envelope.context[CTX_PORTAIL]["user_record"]["role"] == "guest"
 
 
 @pytest.mark.unit
@@ -464,9 +466,9 @@ def test_apply_guest_stamps_uses_guest_role(tmp_path: Path) -> None:
 
     portail._apply_guest_stamps(envelope)
 
-    assert envelope.metadata["user_record"]["role"] == "guest"
-    assert envelope.metadata["llm_profile"] == "default"
-    assert "llm_profile" not in envelope.metadata["user_record"]
+    assert envelope.context[CTX_PORTAIL]["user_record"]["role"] == "guest"
+    assert envelope.context[CTX_PORTAIL]["llm_profile"] == "default"
+    assert "llm_profile" not in envelope.context[CTX_PORTAIL].get("user_record", {})
 
 
 # ---------------------------------------------------------------------------
@@ -525,11 +527,12 @@ async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
     ]
     assert len(security_calls) == 1
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    ur = forwarded["metadata"].get("user_record")
+    portail_ctx = forwarded["context"].get("portail", {})
+    ur = portail_ctx.get("user_record")
     assert ur is not None
     assert ur["role"] == "admin"
     assert "llm_profile" not in ur
-    assert forwarded["metadata"]["llm_profile"] == "default"
+    assert portail_ctx["llm_profile"] == "default"
 
 
 @pytest.mark.asyncio

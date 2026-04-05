@@ -13,6 +13,8 @@ from aiguilleur.channel_config import ChannelConfig
 import pytest
 
 from common.envelope import Envelope
+from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
+from common.envelope_actions import ACTION_MESSAGE_PROGRESS
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +48,7 @@ def _make_envelope(
 
     Args:
         correlation_id: Unique request identifier.
-        channel_id: Discord channel ID stored in metadata.
+        channel_id: Discord channel ID stored in context[CTX_AIGUILLEUR].
         sender_id: The originating user identifier.
 
     Returns:
@@ -58,8 +60,8 @@ def _make_envelope(
         channel="discord",
         session_id="sess-001",
         correlation_id=correlation_id,
-        metadata={
-            "reply_to": str(channel_id),
+        context={
+            CTX_AIGUILLEUR: {"reply_to": str(channel_id)},
         },
     )
 
@@ -441,8 +443,8 @@ async def test_on_message_stamps_channel_profile_from_channel_config():
     mock_redis.xadd.assert_called_once()
     payload_json = mock_redis.xadd.call_args[0][1]["payload"]
     data = json.loads(payload_json)
-    assert data["metadata"]["channel_profile"] == "fast"
-    assert "llm_profile" not in data["metadata"]
+    assert data["context"]["aiguilleur"]["channel_profile"] == "fast"
+    assert "llm_profile" not in data["context"]["aiguilleur"]
 
 
 @pytest.mark.asyncio
@@ -487,8 +489,8 @@ async def test_on_message_stamps_default_channel_profile_when_no_channel_profile
     mock_redis.xadd.assert_called_once()
     payload_json = mock_redis.xadd.call_args[0][1]["payload"]
     data = json.loads(payload_json)
-    assert data["metadata"]["channel_profile"] == "default"
-    assert "llm_profile" not in data["metadata"]
+    assert data["context"]["aiguilleur"]["channel_profile"] == "default"
+    assert "llm_profile" not in data["context"]["aiguilleur"]
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +778,7 @@ async def test_deliver_outgoing_sends_multiple_parts_for_long_message():
         channel="discord",
         session_id="sess-1",
         correlation_id="corr-long",
-        metadata={"reply_to": "999"},
+        context={CTX_AIGUILLEUR: {"reply_to": "999"}},
     )
 
     mock_channel = AsyncMock()
@@ -811,11 +813,10 @@ async def test_deliver_outgoing_progress_tool_call_sends_notification():
         channel="discord",
         session_id="sess-p",
         correlation_id="corr-p",
-        metadata={
-            "reply_to": "999",
-            "message_type": "progress",
-            "progress_event": "tool_call",
-            "progress_detail": "web_search",
+        action=ACTION_MESSAGE_PROGRESS,
+        context={
+            CTX_AIGUILLEUR: {"reply_to": "999"},
+            CTX_ATELIER: {"progress_event": "tool_call", "progress_detail": "web_search"},
         },
     )
 
@@ -847,11 +848,10 @@ async def test_deliver_outgoing_progress_tool_result_sends_notification():
         channel="discord",
         session_id="sess-tr",
         correlation_id="corr-tr",
-        metadata={
-            "reply_to": "999",
-            "message_type": "progress",
-            "progress_event": "tool_result",
-            "progress_detail": "some result",
+        action=ACTION_MESSAGE_PROGRESS,
+        context={
+            CTX_AIGUILLEUR: {"reply_to": "999"},
+            CTX_ATELIER: {"progress_event": "tool_result", "progress_detail": "some result"},
         },
     )
 
@@ -884,11 +884,10 @@ async def test_deliver_outgoing_progress_does_not_cancel_typing():
         channel="discord",
         session_id="sess-nc",
         correlation_id="corr-nc",
-        metadata={
-            "reply_to": "999",
-            "message_type": "progress",
-            "progress_event": "tool_call",
-            "progress_detail": "some_tool",
+        action=ACTION_MESSAGE_PROGRESS,
+        context={
+            CTX_AIGUILLEUR: {"reply_to": "999"},
+            CTX_ATELIER: {"progress_event": "tool_call", "progress_detail": "some_tool"},
         },
     )
 

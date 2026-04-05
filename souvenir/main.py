@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
+from common.contexts import CTX_SOUVENIR_REQUEST
 from common.envelope import Envelope
 from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
@@ -174,9 +175,9 @@ class Souvenir(BrickBase):
             ``True`` always — every memory action is idempotent and the
             message is unconditionally ACKed (``ack_mode="always"``).
         """
-        req: dict[str, Any] = dict(envelope.metadata)
+        req: dict[str, Any] = dict(envelope.context.get(CTX_SOUVENIR_REQUEST, {}))
         req.setdefault("correlation_id", envelope.correlation_id)
-        action = req.get("action")
+        action = envelope.action or req.get("action")
 
         if action not in _ALLOWED_ACTIONS:
             logger.error(

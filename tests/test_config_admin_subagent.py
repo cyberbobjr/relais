@@ -19,6 +19,7 @@ import pytest
 import yaml
 
 from common.envelope import Envelope
+from common.contexts import CTX_PORTAIL
 from atelier.agent_executor import AgentResult
 
 
@@ -477,11 +478,11 @@ def _make_test_envelope(allowed_subagents: list[str] | None = None) -> Envelope:
         channel="discord",
         session_id="sess-test",
         correlation_id="corr-test",
-        metadata={
+        context={CTX_PORTAIL: {
             "user_record": ur,
             "llm_profile": "default",
             "user_id": "usr_test",
-        },
+        }},
     )
 
 

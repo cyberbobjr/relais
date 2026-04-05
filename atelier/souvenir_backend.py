@@ -36,6 +36,7 @@ import os
 import redis as redis_sync
 
 from common.config_loader import get_relais_home
+from common.contexts import CTX_SOUVENIR_REQUEST
 from common.envelope import Envelope
 from deepagents.backends import BackendProtocol
 from deepagents.backends.protocol import (
@@ -124,15 +125,15 @@ class SouvenirBackend(BackendProtocol):
         last_id: str = last_msgs[0][0].decode() if last_msgs else "0-0"
 
         # Publish an Envelope so Souvenir can consume via BrickBase._run_stream_loop.
-        # All action parameters are encoded in metadata; the Envelope fields carry
-        # standard routing information (correlation_id, sender_id, channel).
+        # The action is set as first-class field; parameters go in CTX_SOUVENIR_REQUEST.
         envelope = Envelope(
             content="",
             sender_id=f"atelier:{self._user_id}",
             channel="internal",
             session_id="",
             correlation_id=corr,
-            metadata={"action": action, "user_id": self._user_id, **kwargs},
+            action=action,
+            context={CTX_SOUVENIR_REQUEST: {"user_id": self._user_id, **kwargs}},
         )
         r.xadd(_STREAM_REQ, {"payload": envelope.to_json()})
 

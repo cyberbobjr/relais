@@ -173,12 +173,14 @@ class StreamPublisher:
             detail: Human-readable detail string.
         """
         from common.envelope import Envelope
+        from common.contexts import CTX_ATELIER, ensure_ctx
 
         assert self._source_envelope is not None  # guarded by caller
         progress_env = Envelope.from_parent(self._source_envelope, content="")
-        progress_env.metadata["message_type"] = "progress"
-        progress_env.metadata["progress_event"] = event
-        progress_env.metadata["progress_detail"] = detail
+        atelier_ctx = ensure_ctx(progress_env, CTX_ATELIER)
+        atelier_ctx["message_type"] = "progress"
+        atelier_ctx["progress_event"] = event
+        atelier_ctx["progress_detail"] = detail
         await self._redis.xadd(self._outgoing_key, {"payload": progress_env.to_json()})
 
     async def finalize(self) -> None:

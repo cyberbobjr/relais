@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from common.contexts import CTX_PORTAIL
 from common.envelope import Envelope
 
 
@@ -21,7 +22,7 @@ def _make_envelope(
     sender_id: str = "discord:123456",
     channel: str = "discord",
     session_id: str = "sess-abc",
-    metadata: dict | None = None,
+    context: dict | None = None,
 ) -> Envelope:
     """Return a minimal Envelope for portail session tests.
 
@@ -29,7 +30,7 @@ def _make_envelope(
         sender_id: Simulated sender identifier.
         channel: The originating channel.
         session_id: The session identifier.
-        metadata: Optional metadata dict (defaults to empty).
+        context: Optional context dict (defaults to empty).
 
     Returns:
         An Envelope instance suitable for unit testing.
@@ -40,7 +41,7 @@ def _make_envelope(
         channel=channel,
         session_id=session_id,
         correlation_id="corr-001",
-        metadata=metadata or {},
+        context=context or {},
     )
 
 
@@ -158,7 +159,7 @@ async def test_update_active_sessions_stores_required_fields() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_update_active_sessions_stores_display_name_from_metadata() -> None:
-    """When metadata contains display_name inside user_record, it is persisted in the hash.
+    """When context[CTX_PORTAIL] contains display_name inside user_record, it is persisted in the hash.
 
     This allows the Crieur to personalise push notifications without an
     extra lookup.
@@ -166,7 +167,7 @@ async def test_update_active_sessions_stores_display_name_from_metadata() -> Non
     portail = _make_portail()
     envelope = _make_envelope(
         sender_id="discord:777",
-        metadata={"user_record": {"display_name": "Alice"}},
+        context={CTX_PORTAIL: {"user_record": {"display_name": "Alice"}}},
     )
     redis_conn = AsyncMock()
     redis_conn.hset = AsyncMock()
@@ -194,7 +195,7 @@ async def test_update_active_sessions_omits_display_name_when_absent() -> None:
     data; the field should only be written when the value is non-empty.
     """
     portail = _make_portail()
-    envelope = _make_envelope(sender_id="discord:888", metadata={})
+    envelope = _make_envelope(sender_id="discord:888")
     redis_conn = AsyncMock()
     redis_conn.hset = AsyncMock()
     redis_conn.expire = AsyncMock()

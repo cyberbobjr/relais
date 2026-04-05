@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from common.envelope import Envelope
+from common.contexts import CTX_PORTAIL
 from common.user_record import UserRecord
 from sentinelle.acl import ACLManager
 
@@ -89,7 +90,7 @@ def _make_envelope(
     channel: str = "discord",
     user_record: UserRecord | None = None,
 ) -> Envelope:
-    """Build a test Envelope with user_record pre-stamped in metadata.
+    """Build a test Envelope with user_record pre-stamped in CTX_PORTAIL context.
 
     Args:
         content: Message content (may start with '/' for commands).
@@ -98,7 +99,7 @@ def _make_envelope(
         user_record: Pre-stamped UserRecord. Defaults to admin record.
 
     Returns:
-        A valid Envelope with user_record in metadata.
+        A valid Envelope with user_record in context[CTX_PORTAIL].
     """
     if user_record is None:
         user_record = _make_admin_record()
@@ -109,7 +110,7 @@ def _make_envelope(
         session_id="sess-001",
         correlation_id="corr-001",
         timestamp=0.0,
-        metadata={"user_record": user_record.to_dict()},
+        context={CTX_PORTAIL: {"user_record": user_record.to_dict()}},
         media_refs=[],
     )
 
@@ -550,7 +551,7 @@ class TestSentinelleFailClosed:
         """
         from sentinelle.main import Sentinelle
 
-        # Envelope with NO user_record in metadata
+        # Envelope with NO user_record in context
         env = Envelope(
             content="bonjour",
             sender_id="discord:admin001",
@@ -558,7 +559,6 @@ class TestSentinelleFailClosed:
             session_id="sess-001",
             correlation_id="corr-001",
             timestamp=0.0,
-            metadata={},
             media_refs=[],
         )
         redis = _make_redis(env)
@@ -597,7 +597,6 @@ class TestSentinelleFailClosed:
             session_id="sess-001",
             correlation_id="corr-001",
             timestamp=0.0,
-            metadata={},
             media_refs=[],
         )
         redis = _make_redis(env)

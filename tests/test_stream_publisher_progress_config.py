@@ -146,7 +146,6 @@ async def test_push_progress_no_outgoing_when_publish_to_outgoing_false() -> Non
         channel="discord",
         session_id="sess",
         correlation_id="corr-nout",
-        metadata={},
     )
     pub = StreamPublisher(
         redis,
@@ -205,7 +204,6 @@ async def test_push_progress_without_progress_config_outgoing_still_published() 
         channel="discord",
         session_id="s1",
         correlation_id="corr-bck",
-        metadata={},
     )
     pub = StreamPublisher(
         redis, channel="discord", correlation_id="corr-bck", source_envelope=src

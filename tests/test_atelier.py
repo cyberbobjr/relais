@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.envelope import Envelope
+from common.contexts import CTX_PORTAIL, CTX_ATELIER
 from atelier.agent_executor import AgentExecutionError, AgentResult
 
 
@@ -18,14 +19,14 @@ from atelier.agent_executor import AgentExecutionError, AgentResult
 def _make_envelope(
     content: str = "Hello world",
     channel: str = "discord",
-    metadata: dict | None = None,
+    context: dict | None = None,
 ) -> Envelope:
     """Create a minimal Envelope for testing.
 
     Args:
         content: The message text.
         channel: The originating channel.
-        metadata: Optional metadata dict (defaults to empty).
+        context: Optional context dict (defaults to empty).
 
     Returns:
         A test Envelope instance.
@@ -36,7 +37,7 @@ def _make_envelope(
         channel=channel,
         session_id="sess-abc",
         correlation_id="corr-test-001",
-        metadata=metadata or {},
+        context=context or {},
     )
 
 
@@ -283,7 +284,7 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
     # Override the stored _profiles to match what the test expects
     atelier._profiles = profiles
 
-    envelope = _make_envelope(metadata={"llm_profile": "fast", "user_record": {}})
+    envelope = _make_envelope(context={CTX_PORTAIL: {"llm_profile": "fast", "user_record": {}}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -354,7 +355,7 @@ async def test_handle_message_injects_user_message_in_response_metadata() -> Non
 
     payload_json = outgoing_calls[0].args[1]["payload"]
     response_data = json.loads(payload_json)
-    assert response_data["metadata"]["user_message"] == "What is the weather?"
+    assert response_data["context"]["atelier"]["user_message"] == "What is the weather?"
 
 
 @pytest.mark.asyncio
@@ -645,7 +646,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
     assert len(outgoing_calls) == 1
     payload_json = outgoing_calls[0].args[1]["payload"]
     response_data = json.loads(payload_json)
-    assert response_data["metadata"].get("streamed") is True
+    assert response_data["context"]["atelier"].get("streamed") is True
 
 
 @pytest.mark.asyncio
@@ -691,7 +692,7 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
     assert len(outgoing_calls) == 1
     payload_json = outgoing_calls[0].args[1]["payload"]
     response_data = json.loads(payload_json)
-    assert "streamed" not in response_data["metadata"]
+    assert "streamed" not in response_data.get("context", {}).get("atelier", {})
 
 
 # ---------------------------------------------------------------------------
@@ -708,10 +709,10 @@ async def test_process_stream_passes_role_prompt_path_to_assemble_system_prompt(
     overlay is included in the assembled system prompt.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(metadata={
+    envelope = _make_envelope(context={CTX_PORTAIL: {
         "llm_profile": "default",
         "user_record": {"role_prompt_path": "roles/admin.md"},
-    })
+    }})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -753,7 +754,7 @@ async def test_process_stream_role_prompt_path_none_when_absent_in_user_record()
     must still succeed with role_prompt_path=None rather than raising KeyError.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(metadata={"llm_profile": "default"})  # no user_record
+    envelope = _make_envelope(context={CTX_PORTAIL: {"llm_profile": "default"}})  # no user_record
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -797,10 +798,10 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
     # Override the skills base dir set at init to point to tmp_path.
     atelier._skills_base_dir = tmp_path
 
-    envelope = _make_envelope(metadata={"user_record": {
+    envelope = _make_envelope(context={CTX_PORTAIL: {"user_record": {
         "skills_dirs": ["coding"],
         "allowed_mcp_tools": [],
-    }})
+    }}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[

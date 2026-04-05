@@ -101,6 +101,8 @@ from pathlib import Path
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
+from common.contexts import CTX_ATELIER, CTX_PORTAIL, CTX_SOUVENIR_REQUEST, ensure_ctx
+from common.envelope_actions import ACTION_MEMORY_ARCHIVE
 from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
 from common.config_reload import watch_and_reload
@@ -474,20 +476,21 @@ class Atelier(BrickBase):
                 envelope.sender_id,
             )
 
-            # 1. Resolve LLM profile — read from top-level metadata stamped by Portail
-            ur: dict = envelope.metadata.get("user_record") or {}
-            profile_name = envelope.metadata.get("llm_profile") or "default"
+            # 1. Resolve LLM profile — read from CTX_PORTAIL stamped by Portail
+            portail_ctx = envelope.context.get(CTX_PORTAIL, {})
+            ur: dict = portail_ctx.get("user_record") or {}
+            profile_name = portail_ctx.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)
 
-            # Resolve unique user_id for SouvenirBackend (shortcut in metadata)
-            user_id: str = envelope.metadata.get("user_id") or envelope.sender_id
+            # Resolve unique user_id for SouvenirBackend
+            user_id: str = portail_ctx.get("user_id") or envelope.sender_id
 
             # 2. Assemble soul system prompt
             soul_prompt = assemble_system_prompt(
                 prompts_dir=_PROMPTS_DIR,
                 role_prompt_path=ur.get("role_prompt_path"),
                 user_prompt_path=ur.get("prompt_path"),
-                channel_prompt_path=envelope.metadata.get("channel_prompt_path"),
+                channel_prompt_path=portail_ctx.get("channel_prompt_path"),
             )
 
             # 3. Select MCP servers for this profile.
@@ -567,10 +570,11 @@ class Atelier(BrickBase):
 
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
-            response_env.metadata["user_message"] = envelope.content
+            atelier_ctx = ensure_ctx(response_env, CTX_ATELIER)
+            atelier_ctx["user_message"] = envelope.content
             if streaming:
                 await stream_pub.finalize()
-                response_env.metadata["streamed"] = True
+                atelier_ctx["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
             out_stream = "relais:messages:outgoing_pending"
@@ -588,11 +592,11 @@ class Atelier(BrickBase):
                 channel="internal",
                 session_id=envelope.session_id,
                 correlation_id=envelope.correlation_id,
-                metadata={
-                    "action": "archive",
+                action=ACTION_MEMORY_ARCHIVE,
+                context={CTX_SOUVENIR_REQUEST: {
                     "envelope_json": response_env.to_json(),
                     "messages_raw": agent_result.messages_raw,
-                },
+                }},
             )
             await redis_conn.xadd(
                 "relais:memory:request",

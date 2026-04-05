@@ -5,9 +5,9 @@ Bridges the Discord API and the RELAIS Redis bus:
 - Consumes:   relais:messages:outgoing:discord (bot replies + progress events)
 
 Two envelope types are consumed from relais:messages:outgoing:discord:
-- Normal reply (metadata["message_type"] absent or "reply"): sent as a single
-  Discord message once the full LLM response is ready.
-- Progress event (metadata["message_type"] == "progress"): sent as an inline
+- Normal reply (action != ACTION_MESSAGE_PROGRESS): sent as a single Discord
+  message once the full LLM response is ready.
+- Progress event (action == ACTION_MESSAGE_PROGRESS): sent as an inline
   notification while Atelier is still running (tool calls, tool results, …).
   Format: ``{event} : [{detail}]``.  The typing indicator is NOT cancelled on
   progress events — it continues until the final reply arrives.
@@ -34,6 +34,8 @@ import discord
 
 from common.redis_client import RedisClient
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_INCOMING, ACTION_MESSAGE_PROGRESS
+from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
 from common.config_loader import get_default_llm_profile
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
@@ -273,12 +275,15 @@ class _RelaisDiscordClient(discord.Client):
             sender_id=f"discord:{message.author.id}",
             content=content,
             session_id=str(message.channel.id),
-            metadata={
-                "content_type": "text",
-                "reply_to": str(message.channel.id),
-                "access_context": "dm" if is_dm else "server",
-                "channel_profile": self._llm_profile,
-                "channel_prompt_path": self._channel_prompt_path,
+            action=ACTION_MESSAGE_INCOMING,
+            context={
+                CTX_AIGUILLEUR: {
+                    "content_type": "text",
+                    "reply_to": str(message.channel.id),
+                    "access_context": "dm" if is_dm else "server",
+                    "channel_profile": self._llm_profile,
+                    "channel_prompt_path": self._channel_prompt_path,
+                }
             },
         )
 
@@ -325,15 +330,15 @@ class _RelaisDiscordClient(discord.Client):
 
         Args:
             envelope: The outgoing message envelope. Must contain ``reply_to``
-                (channel ID) in ``metadata`` and a ``sender_id`` of the form
-                ``discord:{user_id}``.
+                (channel ID) in ``context[CTX_AIGUILLEUR]`` and a ``sender_id``
+                of the form ``discord:{user_id}``.
 
         Returns:
             A Discord messageable (``TextChannel``, ``DMChannel``) or ``None``
             if resolution fails.
         """
         try:
-            channel_id = int(envelope.metadata.get("reply_to", 0))
+            channel_id = int(envelope.context.get(CTX_AIGUILLEUR, {}).get("reply_to", 0))
             channel = self.get_channel(channel_id)
             if channel:
                 return channel
@@ -360,14 +365,15 @@ class _RelaisDiscordClient(discord.Client):
         (too verbose or too implementation-specific for end users).
 
         Args:
-            envelope: Progress envelope; ``metadata["progress_event"]`` and
-                ``metadata["progress_detail"]`` carry the event data.
+            envelope: Progress envelope; ``context[CTX_ATELIER]["progress_event"]``
+                and ``context[CTX_ATELIER]["progress_detail"]`` carry the event data.
             channel: Discord channel or DM to send the notification to.
         """
-        event = envelope.metadata.get("progress_event", "")
+        atelier_ctx = envelope.context.get(CTX_ATELIER, {})
+        event = atelier_ctx.get("progress_event", "")
         if not event:
             return
-        detail = envelope.metadata.get("progress_detail", "")
+        detail = atelier_ctx.get("progress_detail", "")
         try:
             await channel.send(f"{event} : [{detail}]")
         except Exception as exc:
@@ -377,7 +383,7 @@ class _RelaisDiscordClient(discord.Client):
         """Parse and deliver a single outgoing envelope to Discord.
 
         Deserialises the ``payload`` field. If the envelope is a progress event
-        (``metadata["message_type"] == "progress"``), delegates to
+        (``envelope.action == ACTION_MESSAGE_PROGRESS``), delegates to
         ``_deliver_progress_event`` and returns without cancelling the typing
         indicator. For final replies, cancels typing, guards against empty
         content, and splits long messages to respect the 2000-character limit.
@@ -392,8 +398,7 @@ class _RelaisDiscordClient(discord.Client):
             logger.error("Malformed envelope payload, skipping: %s", exc)
             return
 
-        message_type = envelope.metadata.get("message_type")
-        if message_type == "progress":
+        if envelope.action == ACTION_MESSAGE_PROGRESS:
             channel = await self._resolve_discord_channel(envelope)
             if channel:
                 await self._deliver_progress_event(envelope, channel)

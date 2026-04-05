@@ -237,7 +237,7 @@ class Archiviste:
                                     raw_payload if isinstance(raw_payload, str)
                                     else raw_payload.decode()
                                 )
-                                traces_list = envelope.metadata.get("traces", [])
+                                traces_list = envelope.traces
                                 trace_str = ">".join(
                                     t.get("brick", "") for t in traces_list
                                 ) if traces_list else ""

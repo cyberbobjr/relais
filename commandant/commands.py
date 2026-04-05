@@ -8,11 +8,11 @@ Ajouter une commande = une seule modification ici :
 KNOWN_COMMANDS et parse_command() se mettent à jour automatiquement.
 """
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST
 from common.envelope import Envelope
 from common.text_utils import strip_outer_quotes
 
@@ -65,17 +65,20 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
         envelope: L'enveloppe du message /clear reçu.
         redis_conn: Connexion Redis async active.
     """
-    clear_request = {
-        "action": "clear",
-        "session_id": envelope.session_id,
-        "user_id": envelope.metadata.get("user_id", envelope.sender_id),
-        "correlation_id": envelope.correlation_id,
-        "envelope_json": envelope.to_json(),
-    }
+    user_id = envelope.context.get(CTX_PORTAIL, {}).get("user_id", envelope.sender_id)
+    clear_env = Envelope(
+        content="",
+        sender_id=envelope.sender_id,
+        channel=envelope.channel,
+        session_id=envelope.session_id,
+        correlation_id=envelope.correlation_id,
+        action="clear",
+        context={CTX_SOUVENIR_REQUEST: {"session_id": envelope.session_id, "user_id": user_id}},
+    )
 
     await redis_conn.xadd(
         "relais:memory:request",
-        {"payload": json.dumps(clear_request)},
+        {"payload": clear_env.to_json()},
     )
     logger.info("Clear request sent for session=%s", envelope.session_id)
 

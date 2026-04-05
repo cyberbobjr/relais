@@ -8,6 +8,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.envelope import Envelope
+from common.contexts import CTX_SOUVENIR_REQUEST
 from souvenir.main import Souvenir
 
 
@@ -32,16 +33,17 @@ def _make_clear_request(
     Builds an Envelope-format payload so tests match the Envelope-based parsing
     in souvenir.main._process_request_stream.
     """
-    metadata: dict = {"action": "clear", "session_id": session_id}
+    souvenir_ctx: dict = {"session_id": session_id}
     if user_id is not None:
-        metadata["user_id"] = user_id
+        souvenir_ctx["user_id"] = user_id
     envelope = Envelope(
         content="",
         sender_id="atelier:test",
         channel="internal",
         session_id=session_id,
         correlation_id=correlation_id,
-        metadata=metadata,
+        action="clear",
+        context={CTX_SOUVENIR_REQUEST: souvenir_ctx},
     )
     return [(b"relais:memory:request", [(b"1-1", {b"payload": envelope.to_json().encode()})])]
 

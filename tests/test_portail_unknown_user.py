@@ -106,7 +106,6 @@ def _make_envelope(
         channel=channel,
         session_id="sess-001",
         correlation_id="corr-001",
-        metadata={},
     )
 
 
@@ -339,7 +338,7 @@ async def test_guest_policy_stamps_user_role_guest(tmp_path: Path) -> None:
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("user_record", {}).get("role") == "guest"
+    assert forwarded["context"].get("portail", {}).get("user_record", {}).get("role") == "guest"
 
 
 @pytest.mark.asyncio
@@ -366,7 +365,7 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("user_record", {}).get("display_name") == "Guest"
+    assert forwarded["context"].get("portail", {}).get("user_record", {}).get("display_name") == "Guest"
 
 
 @pytest.mark.asyncio
@@ -396,8 +395,9 @@ async def test_guest_policy_stamps_llm_profile_in_metadata(tmp_path: Path) -> No
         if c.args[0] == "relais:security"
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    assert forwarded["metadata"].get("llm_profile") == "default"
-    assert "llm_profile" not in forwarded["metadata"].get("user_record", {})
+    portail_ctx = forwarded["context"].get("portail", {})
+    assert portail_ctx.get("llm_profile") == "default"
+    assert "llm_profile" not in portail_ctx.get("user_record", {})
 
 
 @pytest.mark.asyncio
@@ -427,7 +427,7 @@ async def test_guest_policy_stamps_skills_from_guest_role(tmp_path: Path) -> Non
     ]
     forwarded = json.loads(security_calls[0].args[1]["payload"])
     # 'guest' role in _USERS_YAML_WITH_GUEST_ROLE has empty skills_dirs/allowed_mcp_tools
-    user_record = forwarded["metadata"].get("user_record", {})
+    user_record = forwarded["context"].get("portail", {}).get("user_record", {})
     assert user_record.get("skills_dirs") == []
     assert user_record.get("allowed_mcp_tools") == []
 
@@ -460,7 +460,7 @@ async def test_guest_policy_fail_closed_when_guest_role_absent(tmp_path: Path) -
     ]
     assert len(security_calls) == 1, "guest policy must still forward even without guest role"
     forwarded = json.loads(security_calls[0].args[1]["payload"])
-    user_record = forwarded["metadata"].get("user_record", {})
+    user_record = forwarded["context"].get("portail", {}).get("user_record", {})
     assert user_record.get("skills_dirs") == [], (
         "fail-closed: skills_dirs must be [] when guest role is absent"
     )

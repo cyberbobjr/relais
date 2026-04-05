@@ -1,9 +1,9 @@
-"""Tests — Atelier reads user context from user_record dict and top-level metadata.
+"""Tests — Atelier reads user context from user_record dict inside CTX_PORTAIL.
 
 User identity fields (role, skills_dirs, allowed_mcp_tools, prompt_path) are
-inside ``envelope.metadata["user_record"]``.
+inside ``envelope.context["portail"]["user_record"]``.
 
-``llm_profile`` is stamped directly into ``envelope.metadata["llm_profile"]``
+``llm_profile`` is stamped into ``envelope.context["portail"]["llm_profile"]``
 by Portail (not inside user_record).
 
 These tests verify that Atelier reads each field from the correct location.
@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.envelope import Envelope
+from common.contexts import CTX_PORTAIL
 from atelier.agent_executor import AgentExecutionError
 
 
@@ -29,14 +30,14 @@ from atelier.agent_executor import AgentExecutionError
 def _make_envelope(
     content: str = "Hello",
     channel: str = "discord",
-    metadata: dict | None = None,
+    context: dict | None = None,
 ) -> Envelope:
     """Build a minimal Envelope for atelier user_record tests.
 
     Args:
         content: Message text.
         channel: Originating channel.
-        metadata: Optional metadata dict.
+        context: Optional context dict.
 
     Returns:
         A test Envelope instance.
@@ -47,7 +48,7 @@ def _make_envelope(
         channel=channel,
         session_id="sess-abc",
         correlation_id="corr-ur-001",
-        metadata=metadata or {},
+        context=context or {},
     )
 
 
@@ -141,7 +142,7 @@ async def test_atelier_reads_llm_profile_from_top_level_metadata() -> None:
     Atelier must forward the correct profile name to resolve_profile().
     """
     atelier = _make_atelier()
-    envelope = _make_envelope(metadata={
+    envelope = _make_envelope(context={CTX_PORTAIL: {
         "llm_profile": "fast",
         "user_record": {
             "role": "user",
@@ -152,7 +153,7 @@ async def test_atelier_reads_llm_profile_from_top_level_metadata() -> None:
             "blocked": False,
             "actions": ["send"],
         }
-    })
+    }})
     redis_conn = _make_redis_mock()
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         _make_xreadgroup_result(envelope),
@@ -202,7 +203,7 @@ async def test_atelier_reads_role_prompt_path_from_user_record_for_soul_assembly
     is included in the assembled system prompt.
     """
     atelier = _make_atelier()
-    envelope = _make_envelope(metadata={
+    envelope = _make_envelope(context={CTX_PORTAIL: {
         "llm_profile": "default",
         "user_record": {
             "role": "admin",
@@ -214,7 +215,7 @@ async def test_atelier_reads_role_prompt_path_from_user_record_for_soul_assembly
             "blocked": False,
             "actions": ["*"],
         }
-    })
+    }})
     redis_conn = _make_redis_mock()
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         _make_xreadgroup_result(envelope),
@@ -260,7 +261,7 @@ async def test_atelier_reads_prompt_path_from_user_record() -> None:
     The field was renamed from custom_prompt_path to prompt_path inside user_record.
     """
     atelier = _make_atelier()
-    envelope = _make_envelope(metadata={
+    envelope = _make_envelope(context={CTX_PORTAIL: {
         "llm_profile": "default",
         "user_record": {
             "role": "user",
@@ -271,7 +272,7 @@ async def test_atelier_reads_prompt_path_from_user_record() -> None:
             "blocked": False,
             "actions": ["send"],
         }
-    })
+    }})
     redis_conn = _make_redis_mock()
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         _make_xreadgroup_result(envelope),
@@ -320,7 +321,7 @@ async def test_atelier_reads_skills_dirs_from_user_record(tmp_path: Path) -> Non
     atelier = _make_atelier()
     atelier._skills_base_dir = tmp_path
 
-    envelope = _make_envelope(metadata={
+    envelope = _make_envelope(context={CTX_PORTAIL: {
         "llm_profile": "default",
         "user_record": {
             "role": "user",
@@ -331,7 +332,7 @@ async def test_atelier_reads_skills_dirs_from_user_record(tmp_path: Path) -> Non
             "blocked": False,
             "actions": ["send"],
         }
-    })
+    }})
     redis_conn = _make_redis_mock()
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         _make_xreadgroup_result(envelope),
@@ -382,7 +383,7 @@ async def test_atelier_role_prompt_path_none_when_user_record_absent() -> None:
     Should not raise KeyError — just degrade gracefully.
     """
     atelier = _make_atelier()
-    envelope = _make_envelope(metadata={})  # no user_record at all
+    envelope = _make_envelope(context={})  # no user_record at all
     redis_conn = _make_redis_mock()
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         _make_xreadgroup_result(envelope),

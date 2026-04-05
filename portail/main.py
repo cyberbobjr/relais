@@ -17,8 +17,8 @@ asyncio consumer loop.  Key helpers:
   resolves ``sender_id`` → ``UserRecord``.
 * ``_enrich_envelope`` — writes the canonical ``user_record`` dict and
   ``llm_profile`` (from ``channel_profile`` or ``"default"``) into
-  ``envelope.metadata``.
-* ``_apply_guest_stamps`` — stamps minimal guest metadata when the sender
+  ``envelope.context[CTX_PORTAIL]``.
+* ``_apply_guest_stamps`` — stamps minimal guest context when the sender
   is unknown and the guest policy is "allow".
 * ``_update_active_sessions`` — maintains a Redis Hash used by Crieur to
   push proactive notifications to active users.
@@ -55,8 +55,8 @@ Processing flow
   (2) Deserialize Envelope from JSON payload.
   (3) Resolve sender via UserRegistry.
   (4) Apply unknown_user_policy: drop silently or stamp guest metadata.
-  (5) Enrich envelope.metadata with user_record, user_id, and llm_profile
-      (from channel_profile or "default").
+  (5) Enrich envelope.context[CTX_PORTAIL] with user_record, user_id, and
+      llm_profile (from channel_profile or "default").
   (6) Update relais:active_sessions:{sender_id} hash.
   (7) Forward enriched envelope to relais:security.
   (8) XACK the message (unconditional — validation errors are logged and
@@ -73,7 +73,9 @@ import yaml
 
 from common.brick_base import BrickBase, StreamSpec
 from common.config_reload import safe_reload
+from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, ensure_ctx
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_VALIDATED
 from common.redis_client import RedisClient
 from common.user_record import UserRecord
 from portail.user_registry import UserRegistry
@@ -88,8 +90,8 @@ class Portail(BrickBase):
     envelopes with a single ``user_record`` dict (resolved from portail.yaml),
     and forwarding them to La Sentinelle for security validation.
 
-    The ``user_record`` dict in ``envelope.metadata`` is the sole carrier of
-    user identity and role data for all downstream bricks.
+    The ``user_record`` dict in ``envelope.context[CTX_PORTAIL]`` is the sole
+    carrier of user identity and role data for all downstream bricks.
 
     Inherits the full lifecycle plumbing (connection, shutdown, hot-reload,
     logging) from :class:`~common.brick_base.BrickBase`.
@@ -238,18 +240,18 @@ class Portail(BrickBase):
     # ------------------------------------------------------------------
 
     def _enrich_envelope(self, envelope: Envelope) -> None:
-        """Stamp ``user_record`` dict and ``llm_profile`` into envelope.metadata.
+        """Stamp ``user_record`` dict and ``llm_profile`` into context[CTX_PORTAIL].
 
         Resolves the sender against the UserRegistry.  When found, writes the
-        fully-merged ``UserRecord.to_dict()`` under ``envelope.metadata["user_record"]``
-        and ``llm_profile`` as a top-level metadata key.
+        fully-merged ``UserRecord.to_dict()`` under ``context[CTX_PORTAIL]["user_record"]``
+        and ``llm_profile`` as a sibling key in the same namespace.
 
-        ``llm_profile`` is resolved as: ``channel_profile`` (Aiguilleur) > ``"default"``.
+        ``llm_profile`` is resolved as: ``context[CTX_AIGUILLEUR]["channel_profile"]`` > ``"default"``.
 
-        Unknown users produce no ``user_record`` or ``llm_profile`` key — the
-        caller (``_process_stream``) handles them via the configured policy.
+        Unknown users produce no ``CTX_PORTAIL`` namespace — the caller
+        (``_handle_envelope``) handles them via the configured policy.
         Under ``deny`` policy, the envelope is dropped before forwarding, so
-        downstream bricks never see an envelope without ``llm_profile``.
+        downstream bricks never see an envelope without ``context[CTX_PORTAIL]``.
 
         Args:
             envelope: The incoming envelope to enrich in place.
@@ -261,14 +263,15 @@ class Portail(BrickBase):
         if record is None:
             return
 
-        envelope.metadata["user_record"] = record.to_dict()
-        envelope.metadata["user_id"] = record.user_id
-        envelope.metadata["llm_profile"] = (
-            envelope.metadata.get("channel_profile") or "default"
+        ctx = ensure_ctx(envelope, CTX_PORTAIL)
+        ctx["user_record"] = record.to_dict()
+        ctx["user_id"] = record.user_id
+        ctx["llm_profile"] = (
+            envelope.context.get(CTX_AIGUILLEUR, {}).get("channel_profile") or "default"
         )
 
     def _apply_guest_stamps(self, envelope: Envelope) -> None:
-        """Stamp a synthetic guest ``user_record`` dict onto an unknown-user envelope.
+        """Stamp a synthetic guest ``user_record`` dict into context[CTX_PORTAIL].
 
         Applied when ``unknown_user_policy=guest`` and ``resolve_user()``
         returned ``None``.  Uses ``UserRegistry.build_guest_record()`` so that
@@ -279,10 +282,11 @@ class Portail(BrickBase):
             envelope: The incoming envelope to enrich in place.
         """
         guest_record = self._user_registry.build_guest_record()
-        envelope.metadata["user_record"] = guest_record.to_dict()
-        envelope.metadata["user_id"] = "guest"
-        envelope.metadata["llm_profile"] = (
-            envelope.metadata.get("channel_profile") or "default"
+        ctx = ensure_ctx(envelope, CTX_PORTAIL)
+        ctx["user_record"] = guest_record.to_dict()
+        ctx["user_id"] = "guest"
+        ctx["llm_profile"] = (
+            envelope.context.get(CTX_AIGUILLEUR, {}).get("channel_profile") or "default"
         )
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: Envelope) -> None:
@@ -311,7 +315,7 @@ class Portail(BrickBase):
             "session_id": envelope.session_id,
         }
 
-        user_record_dict: dict[str, Any] = envelope.metadata.get("user_record") or {}
+        user_record_dict: dict[str, Any] = envelope.context.get(CTX_PORTAIL, {}).get("user_record") or {}
         display_name: str = str(user_record_dict.get("display_name") or "")
         if display_name:
             mapping["display_name"] = display_name
@@ -354,7 +358,7 @@ class Portail(BrickBase):
         self._enrich_envelope(envelope)
 
         # Apply unknown-user policy when user_record is absent
-        if "user_record" not in envelope.metadata:
+        if CTX_PORTAIL not in envelope.context:
             policy = self._unknown_user_policy
             if policy == "guest":
                 self._apply_guest_stamps(envelope)
@@ -384,8 +388,9 @@ class Portail(BrickBase):
         # Update active session tracking
         await self._update_active_sessions(redis_conn, envelope)
 
-        # Add trace
+        # Add trace and stamp action
         envelope.add_trace("portail", "received and session updated")
+        envelope.action = ACTION_MESSAGE_VALIDATED
 
         # Forward to La Sentinelle
         await redis_conn.xadd(

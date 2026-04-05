@@ -12,6 +12,7 @@ from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from common.config_loader import resolve_storage_dir
+from common.contexts import CTX_ATELIER
 from souvenir.models import ArchivedMessage
 
 if TYPE_CHECKING:
@@ -72,7 +73,7 @@ class LongTermStore:
                 ``atelier.message_serializer.serialize_messages()``.
         """
         now = time.time()
-        user_content = envelope.metadata.get("user_message", "")
+        user_content = envelope.context.get(CTX_ATELIER, {}).get("user_message", "")
         assistant_content = envelope.content
         messages_raw_json = json.dumps(messages_raw)
 

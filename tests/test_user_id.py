@@ -21,6 +21,7 @@ from textwrap import dedent
 import pytest
 
 from common.envelope import Envelope
+from common.contexts import CTX_PORTAIL
 from common.user_record import UserRecord
 
 
@@ -88,14 +89,12 @@ def _write_yaml(tmp_path: Path, content: str = _PORTAIL_YAML) -> Path:
 def _make_envelope(
     sender_id: str = "discord:admin001",
     channel: str = "discord",
-    metadata: dict | None = None,
 ) -> Envelope:
     """Build a minimal Envelope for testing.
 
     Args:
         sender_id: Originating user identifier.
         channel: Originating channel.
-        metadata: Optional extra metadata.
 
     Returns:
         A valid Envelope instance.
@@ -106,7 +105,6 @@ def _make_envelope(
         channel=channel,
         session_id="sess-test",
         correlation_id="corr-test",
-        metadata=metadata or {},
     )
 
 
@@ -237,7 +235,7 @@ def test_enrich_envelope_stamps_user_id_from_yaml_key(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata.get("user_id") == "usr_admin"
+    assert envelope.context.get(CTX_PORTAIL, {}).get("user_id") == "usr_admin"
 
 
 @pytest.mark.unit
@@ -252,7 +250,7 @@ def test_enrich_envelope_user_record_dict_contains_user_id(tmp_path: Path) -> No
 
     portail._enrich_envelope(envelope)
 
-    user_record = envelope.metadata["user_record"]
+    user_record = envelope.context[CTX_PORTAIL]["user_record"]
     assert user_record["user_id"] == "usr_admin"
 
 
@@ -268,8 +266,8 @@ def test_enrich_envelope_stamps_user_id_for_second_user(tmp_path: Path) -> None:
 
     portail._enrich_envelope(envelope)
 
-    assert envelope.metadata.get("user_id") == "usr_alice"
-    assert envelope.metadata["user_record"]["user_id"] == "usr_alice"
+    assert envelope.context.get(CTX_PORTAIL, {}).get("user_id") == "usr_alice"
+    assert envelope.context[CTX_PORTAIL]["user_record"]["user_id"] == "usr_alice"
 
 
 @pytest.mark.unit
@@ -285,7 +283,7 @@ def test_enrich_envelope_unknown_user_does_not_stamp_user_id(tmp_path: Path) -> 
 
     portail._enrich_envelope(envelope)
 
-    assert "user_id" not in envelope.metadata
+    assert CTX_PORTAIL not in envelope.context
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +303,7 @@ def test_guest_stamps_user_id_is_guest(tmp_path: Path) -> None:
 
     portail._apply_guest_stamps(envelope)
 
-    assert envelope.metadata.get("user_id") == "guest"
+    assert envelope.context.get(CTX_PORTAIL, {}).get("user_id") == "guest"
 
 
 @pytest.mark.unit
@@ -320,7 +318,7 @@ def test_guest_stamps_user_record_contains_user_id_guest(tmp_path: Path) -> None
 
     portail._apply_guest_stamps(envelope)
 
-    user_record = envelope.metadata["user_record"]
+    user_record = envelope.context[CTX_PORTAIL]["user_record"]
     assert user_record.get("user_id") == "guest"
 
 

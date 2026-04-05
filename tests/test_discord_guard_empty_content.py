@@ -25,12 +25,13 @@ def _make_envelope(content: str = "Hello") -> MagicMock:
         content: The message content string.
 
     Returns:
-        MagicMock simulating an Envelope with content, correlation_id, metadata.
+        MagicMock simulating an Envelope with content, correlation_id, context, action.
     """
     env = MagicMock()
     env.content = content
     env.correlation_id = "test-corr-id"
-    env.metadata = {"reply_to": "12345"}
+    env.action = "message.outgoing"
+    env.context = {"aiguilleur": {"reply_to": "12345"}}
     env.sender_id = "discord:9999"
     return env
 

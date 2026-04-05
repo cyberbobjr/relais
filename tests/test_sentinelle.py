@@ -244,7 +244,6 @@ def _make_outgoing_envelope(channel: str = "discord") -> Envelope:
         session_id="sess-001",
         correlation_id="corr-001",
         timestamp=0.0,
-        metadata={},
         media_refs=[],
     )
 
@@ -341,7 +340,7 @@ class TestSentinelleOutgoingPassthrough:
         ]
         assert len(outgoing_calls) == 1
         forwarded = json.loads(outgoing_calls[0].args[1]["payload"])
-        traces = forwarded.get("metadata", {}).get("traces", [])
+        traces = forwarded.get("traces", [])
         assert any("sentinelle" in str(t) for t in traces)
 
     async def test_passthrough_acks_message(self, tmp_path: Path) -> None:
