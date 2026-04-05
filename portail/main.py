@@ -4,7 +4,7 @@ Functional role
 ---------------
 First processing stage after channel ingestion.  Validates each incoming
 Envelope, resolves the sender's identity from portail.yaml via ``UserRegistry``,
-and enriches the envelope's metadata before forwarding it to Sentinelle for
+and enriches the envelope's context before forwarding it to Sentinelle for
 ACL enforcement.  Unknown senders are handled according to the configured
 ``unknown_user_policy`` (reject or allow as guest).
 
@@ -54,7 +54,7 @@ Processing flow
   (1) Consume from relais:messages:incoming (portail_group).
   (2) Deserialize Envelope from JSON payload.
   (3) Resolve sender via UserRegistry.
-  (4) Apply unknown_user_policy: drop silently or stamp guest metadata.
+  (4) Apply unknown_user_policy: drop silently or stamp guest context.
   (5) Enrich envelope.context[CTX_PORTAIL] with user_record, user_id, and
       llm_profile (from channel_profile or "default").
   (6) Update relais:active_sessions:{sender_id} hash.

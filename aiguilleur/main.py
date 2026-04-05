@@ -19,12 +19,12 @@ Technical overview
 Automatic restart uses exponential backoff: ``min(2 ** restart_count, 30)``
 seconds, up to 5 restarts per channel before the adapter is marked as failed.
 
-Each adapter stamps two metadata keys on every outbound envelope:
+Each adapter stamps context keys under ``CTX_AIGUILLEUR`` on every outbound envelope:
 
-* ``envelope.metadata["channel_profile"]`` — from ``ChannelConfig.profile``
+* ``envelope.context[CTX_AIGUILLEUR]["channel_profile"]`` — from ``ChannelConfig.profile``
   (channels.yaml) → ``get_default_llm_profile()`` (config.yaml:
   llm.default_profile) → ``"default"`` (resolved by Portail).
-* ``envelope.metadata["channel_prompt_path"]`` — from
+* ``envelope.context[CTX_AIGUILLEUR]["channel_prompt_path"]`` — from
   ``ChannelConfig.prompt_path`` (channels.yaml).  ``None`` when the channel
   has no ``prompt_path`` configured; in that case no channel formatting
   overlay is loaded by Atelier.

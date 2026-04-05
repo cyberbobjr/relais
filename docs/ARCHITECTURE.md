@@ -112,15 +112,15 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Démarre un adaptateur par canal activé.
 - L'implémentation complète présente dans le dépôt est surtout l'adaptateur Discord.
 - Côté Discord, l'entrée est `relais:messages:incoming` et la sortie `relais:messages:outgoing:discord`.
-- Chaque adaptateur estampille `envelope.metadata["channel_profile"]` depuis `ChannelConfig.profile` (channels.yaml).
-- Chaque adaptateur estampille `envelope.metadata["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (channels.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
+- Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (channels.yaml).
+- Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (channels.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 
 ### Portail
 
 - Consomme `relais:messages:incoming`.
 - Valide l'enveloppe.
 - Résout l'utilisateur avec `UserRegistry`.
-- Écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`).
+- Écrit dans `context.portail`: `user_record`, `user_id` et `llm_profile` (depuis `context.aiguilleur["channel_profile"]` ou `"default"`).
 - Applique `unknown_user_policy` :
   - `deny` : drop silencieux
   - `guest` : stamp guest puis forward
@@ -242,7 +242,7 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 1. `prompts/soul/SOUL.md` — personnalité de base (toujours chargée)
 2. `role_prompt_path` — chemin relatif configuré dans `portail.yaml` (`roles[*].prompt_path`), estampillé dans `UserRecord.role_prompt_path` par Portail
 3. `user_prompt_path` — chemin relatif configuré dans `portail.yaml` (`users[*].prompt_path`), estampillé dans `UserRecord.prompt_path` par Portail. Indépendant de `role_prompt_path` — aucun fallback entre les deux.
-4. `channel_prompt_path` — chemin relatif configuré dans `channels.yaml` (`channels[*].prompt_path`), estampillé dans `envelope.metadata["channel_prompt_path"]` par l'Aiguilleur
+4. `channel_prompt_path` — chemin relatif configuré dans `channels.yaml` (`channels[*].prompt_path`), estampillé dans `context.aiguilleur["channel_prompt_path"]` par l'Aiguilleur
 
 Les fichiers `prompts/policies/*.md` existent dans les templates, mais ils ne sont pas injectés automatiquement dans le prompt principal par le code actuel.
 

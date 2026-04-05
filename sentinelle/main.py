@@ -54,7 +54,7 @@ restarting:
 Processing flow — incoming
 --------------------------
   (1) Consume from relais:security (sentinelle_group).
-  (2) Deserialize Envelope; extract user_record from metadata.
+  (2) Deserialize Envelope; extract user_record from context.portail.
   (3) ACL identity check via ACLManager.
   (4a) Authorized + is_command: validate against KNOWN_COMMANDS, check
        command-level ACL; route to relais:commands or send inline rejection.
@@ -403,7 +403,7 @@ class Sentinelle(BrickBase):
 
         Args:
             redis_conn: Active Redis connection.
-            envelope: The originating envelope (used to derive channel and parent metadata).
+            envelope: The originating envelope (used to derive channel and routing context).
             message: Plain-text reply content.
         """
         reply = Envelope.create_response_to(envelope, message)
@@ -429,8 +429,8 @@ class Sentinelle(BrickBase):
             redis_conn: Active Redis connection.
             envelope: The command envelope (content starts with '/').
             acl_context: Already-sanitised access context ("dm" or "group").
-            acl_scope: Optional scope_id from envelope metadata.
-            user_record: Pre-hydrated UserRecord from envelope metadata.
+            acl_scope: Optional scope_id from envelope context.
+            user_record: Pre-hydrated UserRecord from envelope context.portail.
         """
         cmd_name = extract_command_name(envelope.content)
 

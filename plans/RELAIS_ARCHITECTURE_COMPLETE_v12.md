@@ -453,9 +453,9 @@ channels:
 - `type` — `native` (thread Python + asyncio) ou `external` (subprocess)
 - `class_path` — override de la classe adaptateur
 - `max_restarts` — max avant abandon, restart avec backoff exponentiel
-- `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.metadata["channel_profile"]` par l'Aiguilleur au moment de la création de l'enveloppe entrante ; si absent, l'Aiguilleur lit `config.yaml > llm.default_profile` (fallback `"default"`)
+- `profile` — profil LLM appliqué à tous les messages du canal (optionnel) ; stampé dans `envelope.context["aiguilleur"]["channel_profile"]` par l'Aiguilleur au moment de la création de l'enveloppe entrante ; si absent, l'Aiguilleur lit `config.yaml > llm.default_profile` (fallback `"default"`)
 
-> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.metadata["channel_profile"]`. Le Portail stampe ensuite le profil effectif dans `envelope.metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`). La Sentinelle n'écrit jamais ce champ.
+> **Responsabilité du stamping :** c'est l'**Aiguilleur** (adaptateur de canal) qui stampe `envelope.context["aiguilleur"]["channel_profile"]`. Le Portail stampe ensuite le profil effectif dans `envelope.context["portail"]["llm_profile"]` (depuis `channel_profile` ou `"default"`). La Sentinelle n'écrit jamais ce champ.
 - `command`/`args` — requis pour `type: external` uniquement
 
 ### Tableau des canaux
@@ -512,7 +512,7 @@ Le Portail n'écrit pas de clés top-level `user_role`, `display_name`, `custom_
 **Architecture clarifiée :**
 
 1. **Le Portail** effectue l'**enrichissement contextuel** : résout l'utilisateur depuis `portail.yaml`, stampe `envelope.metadata["user_record"]` (dict `UserRecord` fusionné — rôle + utilisateur, incluant `user_id`) et `envelope.metadata["user_id"]` (raccourci stable cross-canal, égal à la clé YAML, ex : `"usr_admin"`). Portail est le **seul écrivain** de l'identité utilisateur. `user_id` permet aux briques aval (Souvenir, Atelier) de reprendre une conversation quelque soit le canal d'origine sans connaître le `sender_id` spécifique au canal.
-2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : lit `user_record` depuis `envelope.metadata` (chargé par Portail), bifurque commandes et messages normaux, puis republie le flux sortant. Config ACL dans `sentinelle.yaml`.
+2. **La Sentinelle** effectue la **sécurité pure et le routage des commandes** : lit `user_record` depuis `envelope.context["portail"]` (chargé par Portail), bifurque commandes et messages normaux, puis republie le flux sortant. Config ACL dans `sentinelle.yaml`.
 
 > **Note architecture :** La Sentinelle n'effectue **pas** d'enrichissement.
 > En flux entrant, elle valide l'ACL et bifurque :
@@ -605,7 +605,7 @@ L'Atelier suit ce flux pour chaque tâche entrante :
 Incoming envelope
   ↓
 Parse + load profile
-  — lit envelope.metadata["llm_profile"] (stampé par le Portail)
+  — lit envelope.context["portail"]["llm_profile"] (stampé par le Portail)
   — si absent : fallback "default"
   — résout le ProfileConfig depuis atelier/profiles.yaml (model, max_turns, max_tokens, resilience)
   ↓
@@ -780,7 +780,7 @@ SouvenirBackend polls relais:memory:response (timeout 3s) → returns WriteResul
 1. relais:messages:outgoing:{channel} published by Sentinelle
 
 2. Souvenir._handle_outgoing():
-   a. Read messages_raw from envelope.metadata["messages_raw"]
+   a. Read messages_raw from envelope.context["atelier"]["messages_raw"]
       (full LangChain message list, serialized by Atelier)
    b. RPUSH relais:context:{session_id} [messages_raw blob]
       LTRIM -20, EXPIRE 24h (one JSON blob per turn, flattened on read)
@@ -955,10 +955,10 @@ La structure réelle parsée par `atelier/profile_loader.py` est volontairement 
 
 Le profil actif pour un message entrant est résolu dans cet ordre strict (le premier trouvé gagne) :
 
-1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.metadata["channel_profile"]`)
+1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.context["aiguilleur"]["channel_profile"]`)
 2. **`"default"`** — valeur de repli ultime
 
-> La résolution est effectuée par le **Portail** et le résultat est stampé dans `envelope.metadata["llm_profile"]` (clé top-level, pas dans `user_record`). L'Atelier relit ensuite cette valeur depuis `envelope.metadata["llm_profile"]`.
+> La résolution est effectuée par le **Portail** et le résultat est stampé dans `envelope.context["portail"]["llm_profile"]` (clé dans le namespace portail). L'Atelier relit ensuite cette valeur depuis `envelope.context["portail"]["llm_profile"]`.
 >
 > Note : les champs `llm_profile` au niveau utilisateur (`portail.yaml:users.<id>.llm_profile`) et rôle (`roles.<role>.llm_profile`) ont été supprimés — la priorité se fait désormais uniquement via le canal ou la valeur par défaut système.
 

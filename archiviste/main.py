@@ -50,7 +50,7 @@ Processing flow — pipeline loop
 --------------------------------
   (1) Consume from each stream in _PIPELINE_STREAMS (archiviste_pipeline_group).
   (2) Attempt Envelope deserialization (log raw data on failure).
-  (3) Log envelope metadata (correlation_id, sender, channel, traces).
+  (3) Log envelope fields (correlation_id, sender_id, channel, action, traces).
   (4) XACK.
 
 XACK contract:
@@ -181,7 +181,7 @@ class Archiviste:
     async def _process_pipeline_streams(
         self, redis_conn, shutdown: GracefulShutdown | None = None
     ):
-        """Consume pipeline streams and log Envelope metadata for diagnostics.
+        """Consume pipeline streams and log Envelope fields for diagnostics.
 
         Observes all streams listed in ``_PIPELINE_STREAMS`` via the consumer
         group ``archiviste_pipeline_group``.  Each message is deserialized as
