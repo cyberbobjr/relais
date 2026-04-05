@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
 from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
-from deepagents.schema import SubAgent
+from deepagents import SubAgent
 from langchain_core.tools import BaseTool
 from langchain_core.runnables import RunnableConfig
 from langchain.chat_models import BaseChatModel, init_chat_model

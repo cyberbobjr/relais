@@ -65,7 +65,7 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
         envelope: L'enveloppe du message /clear reçu.
         redis_conn: Connexion Redis async active.
     """
-    portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+    portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
     user_id = portail_ctx.get("user_id", envelope.sender_id)
     clear_env = Envelope(
         content="",
@@ -74,7 +74,7 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
         session_id=envelope.session_id,
         correlation_id=envelope.correlation_id,
         action="clear",
-        context={CTX_SOUVENIR_REQUEST: {"session_id": envelope.session_id, "user_id": user_id}},
+        context={CTX_SOUVENIR_REQUEST: {"session_id": envelope.session_id, "user_id": user_id, "envelope_json": envelope.to_json()}},
     )
 
     await redis_conn.xadd(

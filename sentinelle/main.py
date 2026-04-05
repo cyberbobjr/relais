@@ -313,7 +313,7 @@ class Sentinelle(BrickBase):
         Returns:
             Always True (ack_mode="always" — errors are logged and dropped).
         """
-        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore[assignment]
         _raw_context = portail_ctx.get("access_context", "dm")
         acl_context: str = _raw_context if _raw_context in {"dm", "group"} else "dm"
         acl_scope: str | None = portail_ctx.get("access_scope")
