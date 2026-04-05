@@ -562,7 +562,7 @@ def _make_atelier_for_gating():
 
 
 async def _run_handle_message(allowed_subagents: list[str] | None) -> dict:
-    """Run Atelier._handle_message and return AgentExecutor kwargs.
+    """Run Atelier._handle_envelope and return AgentExecutor kwargs.
 
     Args:
         allowed_subagents: The allowed_subagents list for the user_record.
@@ -588,7 +588,7 @@ async def _run_handle_message(allowed_subagents: list[str] | None) -> dict:
         )
         MockExecutor.return_value = mock_instance
 
-        await atelier._handle_message(redis_conn, "msg-1", envelope.to_json())
+        await atelier._handle_envelope(envelope, redis_conn)
 
     return MockExecutor.call_args.kwargs
 

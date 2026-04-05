@@ -417,14 +417,14 @@ class Atelier(BrickBase):
         return ToolPolicy(base_dir=self._skills_base_dir)
 
     # ------------------------------------------------------------------
-    # BrickBase handler bridge
+    # Core message handler
     # ------------------------------------------------------------------
 
     async def _handle_envelope(self, envelope: Envelope, redis_conn: Any) -> bool:
-        """Bridge from BrickBase stream loop to _handle_message.
+        """Process a single task envelope from the Redis stream.
 
-        Deserializes the envelope back to JSON so the existing ``_handle_message``
-        implementation (which expects a raw JSON string) can be reused unchanged.
+        Calls the SDK executor and publishes the response.  Routes
+        AgentExecutionError payloads to the DLQ.
 
         Args:
             envelope: Deserialized ``Envelope`` received from the stream loop.
@@ -435,41 +435,8 @@ class Atelier(BrickBase):
             False when a transient error occurred and the message should
             remain in the PEL for re-delivery.
         """
-        return await self._handle_message(
-            redis_conn,
-            envelope.correlation_id,
-            envelope.to_json(),
-        )
-
-    # ------------------------------------------------------------------
-    # Core message handler
-    # ------------------------------------------------------------------
-
-    async def _handle_message(
-        self,
-        redis_conn: Any,
-        message_id: str,
-        payload: str,
-    ) -> bool:
-        """Process a single task message from the Redis stream.
-
-        Calls the SDK executor and publishes the response.  Routes
-        SDKExecutionError payloads to the DLQ.
-
-        Args:
-            redis_conn: Active Redis connection.
-            message_id: Redis stream message ID (used for DLQ logging).
-            payload: Raw JSON string of the task envelope.
-
-        Returns:
-            True when the message should be ACKed (success or DLQ routing).
-            False when a transient error occurred and the message should
-            remain in the PEL for re-delivery.
-        """
-        logger.debug("_handle_message payload: %s", payload)
-        envelope: Envelope | None = None
+        logger.debug("_handle_envelope correlation_id: %s", envelope.correlation_id)
         try:
-            envelope = Envelope.from_json(payload)
             logger.info(
                 "[%s] Processing task for %s",
                 envelope.correlation_id,
@@ -584,8 +551,8 @@ class Atelier(BrickBase):
             # messages_raw stays off the outgoing envelope to avoid serializing
             # the full conversation history through every downstream consumer.
             # The Envelope format is required: Souvenir's BrickBase loop parses
-            # each message via Envelope.from_json(), and action + kwargs are
-            # carried in envelope.metadata.
+            # each message via Envelope.from_json(), and action + parameters are
+            # carried in envelope.action and envelope.context[CTX_SOUVENIR_REQUEST].
             archive_env = Envelope(
                 content="",
                 sender_id=f"atelier:{envelope.sender_id}",
@@ -619,11 +586,9 @@ class Atelier(BrickBase):
 
         except AgentExecutionError as exc:
             # Non-recoverable agent failure — route to DLQ and ACK
-            cid = envelope.correlation_id if envelope else message_id
-            sid = envelope.sender_id if envelope else ""
-            logger.error("[%s] Agent execution error, routing to DLQ: %s", cid, exc)
+            logger.error("[%s] Agent execution error, routing to DLQ: %s", envelope.correlation_id, exc)
             dlq_entry: dict = {
-                "payload": payload,
+                "payload": envelope.to_json(),
                 "reason": str(exc),
                 "failed_at": str(time.time()),
             }
@@ -633,26 +598,24 @@ class Atelier(BrickBase):
             await redis_conn.xadd("relais:logs", {
                 "level": "ERROR",
                 "brick": "atelier",
-                "correlation_id": cid,
-                "sender_id": sid,
-                "message": f"Agent execution error for {cid}: {exc}",
+                "correlation_id": envelope.correlation_id,
+                "sender_id": envelope.sender_id,
+                "message": f"Agent execution error for {envelope.correlation_id}: {exc}",
                 "error": str(exc),
             })
             return True
 
         except Exception as exc:
             # Transient or unknown error — leave in PEL for re-delivery
-            cid = envelope.correlation_id if envelope else message_id
-            sid = envelope.sender_id if envelope else ""
             logger.error(
-                "[%s] Unhandled exception, leaving in PEL: %s", cid, exc, exc_info=True
+                "[%s] Unhandled exception, leaving in PEL: %s", envelope.correlation_id, exc, exc_info=True
             )
             await redis_conn.xadd("relais:logs", {
                 "level": "ERROR",
                 "brick": "atelier",
-                "correlation_id": cid,
-                "sender_id": sid,
-                "message": f"Unhandled exception for {cid}: {exc}",
+                "correlation_id": envelope.correlation_id,
+                "sender_id": envelope.sender_id,
+                "message": f"Unhandled exception for {envelope.correlation_id}: {exc}",
                 "error": str(exc),
             })
             return False
