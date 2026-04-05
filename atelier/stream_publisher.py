@@ -165,7 +165,7 @@ class StreamPublisher:
         """Publish a progress event envelope to the channel's outgoing stream.
 
         Creates a child ``Envelope`` from the source envelope with
-        ``action="progress"`` so that non-streaming adapters
+        ``action=ACTION_MESSAGE_PROGRESS`` ("message.progress") so that non-streaming adapters
         (e.g. Discord) can identify and display it appropriately.
 
         Args:
@@ -174,9 +174,11 @@ class StreamPublisher:
         """
         from common.envelope import Envelope
         from common.contexts import CTX_ATELIER, ensure_ctx
+        from common.envelope_actions import ACTION_MESSAGE_PROGRESS
 
         assert self._source_envelope is not None  # guarded by caller
         progress_env = Envelope.from_parent(self._source_envelope, content="")
+        progress_env.action = ACTION_MESSAGE_PROGRESS
         atelier_ctx = ensure_ctx(progress_env, CTX_ATELIER)
         atelier_ctx["message_type"] = "progress"
         atelier_ctx["progress_event"] = event

@@ -235,6 +235,9 @@ async def test_push_progress_outgoing_envelope_metadata() -> None:
     assert payload["context"]["atelier"]["progress_detail"] == "my_tool"
     assert payload["channel"] == "discord"
     assert payload["correlation_id"] == "corr-meta"
+    # Regression: action must be ACTION_MESSAGE_PROGRESS so the Discord adapter
+    # can discriminate progress envelopes from reply envelopes.
+    assert payload["action"] == "message.progress"
 
 
 @pytest.mark.unit
