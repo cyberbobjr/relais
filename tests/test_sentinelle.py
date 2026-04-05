@@ -260,6 +260,7 @@ class TestSentinelleOutgoingPassthrough:
         Args:
             tmp_path: pytest built-in temporary directory.
         """
+        import asyncio
         from sentinelle.main import Sentinelle
 
         env = _make_outgoing_envelope("discord")
@@ -269,21 +270,26 @@ class TestSentinelleOutgoingPassthrough:
         redis_conn.xgroup_create = AsyncMock(return_value="OK")
         redis_conn.xreadgroup = AsyncMock(side_effect=[
             [("relais:messages:outgoing_pending", [(b"1-0", {"payload": payload})])],
-            [],  # second call returns empty → loop exits via shutdown
+            asyncio.CancelledError(),
         ])
         redis_conn.xadd = AsyncMock(return_value=b"2-0")
         redis_conn.xack = AsyncMock(return_value=1)
 
         sentinel = Sentinelle.__new__(Sentinelle)
+        sentinel.stream_in = "relais:security"
+        sentinel.stream_out = "relais:tasks"
+        sentinel.stream_commands = "relais:commands"
+        sentinel.group_name = "sentinelle_group"
+        sentinel.consumer_name = "sentinelle_1"
         sentinel.outgoing_group_name = "sentinelle_outgoing_group"
         sentinel.outgoing_consumer_name = "sentinelle_outgoing_1"
 
-        from common.shutdown import GracefulShutdown
-        shutdown = MagicMock(spec=GracefulShutdown)
-        # Stop after processing the first batch
-        shutdown.is_stopping.side_effect = [False, False, True]
-
-        await sentinel._process_outgoing_stream(redis_conn, shutdown=shutdown)
+        spec = sentinel.stream_specs()[1]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis_conn, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         # Envelope must have been forwarded to relais:messages:outgoing:discord
         outgoing_calls = [
@@ -298,6 +304,7 @@ class TestSentinelleOutgoingPassthrough:
         Args:
             tmp_path: pytest built-in temporary directory.
         """
+        import asyncio
         from sentinelle.main import Sentinelle
 
         env = _make_outgoing_envelope("discord")
@@ -307,20 +314,26 @@ class TestSentinelleOutgoingPassthrough:
         redis_conn.xgroup_create = AsyncMock(return_value="OK")
         redis_conn.xreadgroup = AsyncMock(side_effect=[
             [("relais:messages:outgoing_pending", [(b"1-0", {"payload": payload})])],
-            [],
+            asyncio.CancelledError(),
         ])
         redis_conn.xadd = AsyncMock(return_value=b"2-0")
         redis_conn.xack = AsyncMock(return_value=1)
 
         sentinel = Sentinelle.__new__(Sentinelle)
+        sentinel.stream_in = "relais:security"
+        sentinel.stream_out = "relais:tasks"
+        sentinel.stream_commands = "relais:commands"
+        sentinel.group_name = "sentinelle_group"
+        sentinel.consumer_name = "sentinelle_1"
         sentinel.outgoing_group_name = "sentinelle_outgoing_group"
         sentinel.outgoing_consumer_name = "sentinelle_outgoing_1"
 
-        from common.shutdown import GracefulShutdown
-        shutdown = MagicMock(spec=GracefulShutdown)
-        shutdown.is_stopping.side_effect = [False, False, True]
-
-        await sentinel._process_outgoing_stream(redis_conn, shutdown=shutdown)
+        spec = sentinel.stream_specs()[1]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis_conn, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         outgoing_calls = [
             c for c in redis_conn.xadd.await_args_list
@@ -337,6 +350,7 @@ class TestSentinelleOutgoingPassthrough:
         Args:
             tmp_path: pytest built-in temporary directory.
         """
+        import asyncio
         from sentinelle.main import Sentinelle
 
         env = _make_outgoing_envelope("discord")
@@ -346,20 +360,26 @@ class TestSentinelleOutgoingPassthrough:
         redis_conn.xgroup_create = AsyncMock(return_value="OK")
         redis_conn.xreadgroup = AsyncMock(side_effect=[
             [("relais:messages:outgoing_pending", [(b"1-0", {"payload": payload})])],
-            [],
+            asyncio.CancelledError(),
         ])
         redis_conn.xadd = AsyncMock(return_value=b"2-0")
         redis_conn.xack = AsyncMock(return_value=1)
 
         sentinel = Sentinelle.__new__(Sentinelle)
+        sentinel.stream_in = "relais:security"
+        sentinel.stream_out = "relais:tasks"
+        sentinel.stream_commands = "relais:commands"
+        sentinel.group_name = "sentinelle_group"
+        sentinel.consumer_name = "sentinelle_1"
         sentinel.outgoing_group_name = "sentinelle_outgoing_group"
         sentinel.outgoing_consumer_name = "sentinelle_outgoing_1"
 
-        from common.shutdown import GracefulShutdown
-        shutdown = MagicMock(spec=GracefulShutdown)
-        shutdown.is_stopping.side_effect = [False, False, True]
-
-        await sentinel._process_outgoing_stream(redis_conn, shutdown=shutdown)
+        spec = sentinel.stream_specs()[1]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis_conn, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         redis_conn.xack.assert_awaited_once_with(
             "relais:messages:outgoing_pending",

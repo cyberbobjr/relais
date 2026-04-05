@@ -30,7 +30,7 @@ def _make_souvenir_minimal():
     from souvenir.main import Souvenir
 
     with (
-        patch("souvenir.main.RedisClient"),
+        patch("common.brick_base.RedisClient"),
         patch("souvenir.main.LongTermStore"),
         patch("souvenir.main.FileStore"),
         patch("souvenir.main.build_registry", return_value={}),
@@ -83,8 +83,11 @@ def test_souvenir_has_start_file_watcher() -> None:
 @pytest.mark.unit
 def test_souvenir_start_file_watcher_returns_none() -> None:
     """_start_file_watcher() returns None when _config_watch_paths() is empty."""
+    import asyncio
+
     souvenir = _make_souvenir_minimal()
-    result = souvenir._start_file_watcher()
+    shutdown_event = asyncio.Event()
+    result = souvenir._start_file_watcher(shutdown_event)
     assert result is None, (
         "_start_file_watcher() must return None when there are no paths to watch"
     )

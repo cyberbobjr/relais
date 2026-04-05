@@ -10,6 +10,7 @@ Covers three policies declared in config.yaml:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
@@ -18,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.envelope import Envelope
-from common.shutdown import GracefulShutdown
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def _make_portail(
 
 
 def _build_redis_conn(payload: str) -> AsyncMock:
-    """Return a Redis AsyncMock that yields one message then stops.
+    """Return a Redis AsyncMock that yields one message then raises CancelledError.
 
     Args:
         payload: JSON-serialised envelope payload to include in the stream.
@@ -159,7 +159,7 @@ def _build_redis_conn(payload: str) -> AsyncMock:
     redis_conn.xreadgroup = AsyncMock(
         side_effect=[
             [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-            [],
+            asyncio.CancelledError(),
         ]
     )
     redis_conn.get = AsyncMock(return_value=None)
@@ -168,20 +168,6 @@ def _build_redis_conn(payload: str) -> AsyncMock:
     redis_conn.hset = AsyncMock(return_value=1)
     redis_conn.expire = AsyncMock(return_value=1)
     return redis_conn
-
-
-def _make_shutdown(*, stop_after: int = 1) -> MagicMock:
-    """Return a GracefulShutdown mock that stops after ``stop_after`` False returns.
-
-    Args:
-        stop_after: Number of False values before returning True.
-
-    Returns:
-        Configured MagicMock for GracefulShutdown.
-    """
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False] * stop_after + [True]
-    return shutdown
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +189,12 @@ async def test_deny_policy_drops_unknown_user_message(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="deny")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -228,9 +217,12 @@ async def test_deny_policy_acks_message(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="deny")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     redis_conn.xack.assert_awaited_once_with(
         "relais:messages:incoming", "portail_group", b"1-0"
@@ -251,9 +243,12 @@ async def test_deny_policy_does_not_publish_to_pending(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="deny")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     pending_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -275,9 +270,12 @@ async def test_deny_policy_does_not_affect_known_users(tmp_path: Path) -> None:
     # admin001 is a known user in the registry
     envelope = _make_envelope(sender_id="discord:admin001")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -303,9 +301,12 @@ async def test_guest_policy_forwards_unknown_user_to_security(tmp_path: Path) ->
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -326,9 +327,12 @@ async def test_guest_policy_stamps_user_role_guest(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -350,9 +354,12 @@ async def test_guest_policy_stamps_display_name_guest(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -377,9 +384,12 @@ async def test_guest_policy_stamps_llm_profile_in_metadata(tmp_path: Path) -> No
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -404,9 +414,12 @@ async def test_guest_policy_stamps_skills_from_guest_role(tmp_path: Path) -> Non
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -434,9 +447,12 @@ async def test_guest_policy_fail_closed_when_guest_role_absent(tmp_path: Path) -
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -465,9 +481,12 @@ async def test_guest_policy_acks_message(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     redis_conn.xack.assert_awaited_once_with(
         "relais:messages:incoming", "portail_group", b"1-0"
@@ -486,9 +505,12 @@ async def test_guest_policy_does_not_publish_to_pending(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="guest", guest_role="guest")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     pending_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -514,9 +536,12 @@ async def test_pending_policy_drops_unknown_user_message(tmp_path: Path) -> None
     portail = _make_portail(path, policy="pending")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -537,9 +562,12 @@ async def test_pending_policy_publishes_to_pending_users_stream(tmp_path: Path) 
     portail = _make_portail(path, policy="pending")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     pending_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -560,9 +588,12 @@ async def test_pending_policy_publishes_correct_fields(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="pending")
     envelope = _make_envelope(sender_id="discord:unknown999", channel="discord")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     pending_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -587,9 +618,12 @@ async def test_pending_policy_acks_message(tmp_path: Path) -> None:
     portail = _make_portail(path, policy="pending")
     envelope = _make_envelope(sender_id="discord:unknown999")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     redis_conn.xack.assert_awaited_once_with(
         "relais:messages:incoming", "portail_group", b"1-0"
@@ -609,9 +643,12 @@ async def test_pending_policy_does_not_affect_known_users(tmp_path: Path) -> Non
     # admin001 is a known user in the registry
     envelope = _make_envelope(sender_id="discord:admin001")
     redis_conn = _build_redis_conn(envelope.to_json())
-    shutdown = _make_shutdown(stop_after=2)
-
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list

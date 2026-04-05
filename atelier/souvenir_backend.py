@@ -7,8 +7,9 @@ de SOUVENIR plutôt que sur le système de fichiers local.
 Protocole Redis
 ---------------
 Requête (stream ``relais:memory:request``) :
-    ``{"action": "file_write"|"file_read"|"file_list",
-       "user_id": str, "path": str, ..., "correlation_id": str}``
+    Envelope sérialisée (``Envelope.to_json()``) dont le champ ``metadata``
+    contient ``action``, ``user_id``, ``correlation_id`` et tous les kwargs
+    propres à chaque action (``path``, ``content``, ``overwrite``, …).
 
 Réponse (stream ``relais:memory:response``) :
     ``{"correlation_id": str, "ok": bool, "error": str|null, ...}``
@@ -35,6 +36,7 @@ import os
 import redis as redis_sync
 
 from common.config_loader import get_relais_home
+from common.envelope import Envelope
 from deepagents.backends import BackendProtocol
 from deepagents.backends.protocol import (
     EditResult,
@@ -121,8 +123,18 @@ class SouvenirBackend(BackendProtocol):
         last_msgs = r.xrevrange(_STREAM_RES, count=1)
         last_id: str = last_msgs[0][0].decode() if last_msgs else "0-0"
 
-        payload = {"action": action, "user_id": self._user_id, "correlation_id": corr, **kwargs}
-        r.xadd(_STREAM_REQ, {"payload": json.dumps(payload)})
+        # Publish an Envelope so Souvenir can consume via BrickBase._run_stream_loop.
+        # All action parameters are encoded in metadata; the Envelope fields carry
+        # standard routing information (correlation_id, sender_id, channel).
+        envelope = Envelope(
+            content="",
+            sender_id=f"atelier:{self._user_id}",
+            channel="internal",
+            session_id="",
+            correlation_id=corr,
+            metadata={"action": action, "user_id": self._user_id, **kwargs},
+        )
+        r.xadd(_STREAM_REQ, {"payload": envelope.to_json()})
 
         deadline = time.monotonic() + _TIMEOUT_S
         while time.monotonic() < deadline:

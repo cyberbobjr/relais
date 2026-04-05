@@ -94,27 +94,16 @@ as ``message_type=progress`` envelopes.  Publishing is governed by
 
 import asyncio
 import contextlib
-import json
 import logging
-import os
-import sys
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
-# Configure logging to standard output.
-# LOG_LEVEL env var controls verbosity (default: INFO).
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout,
-)
-
-from common.redis_client import RedisClient
+from common.brick_base import BrickBase, StreamSpec
+from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
-from common.shutdown import GracefulShutdown
-from common.config_reload import safe_reload, watch_and_reload
+from common.config_reload import watch_and_reload
 from atelier.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
@@ -138,12 +127,15 @@ logger = logging.getLogger("atelier")
 _PROMPTS_DIR: Path = resolve_prompts_dir()
 
 
-class Atelier:
+class Atelier(BrickBase):
     """The Atelier brick — orchestrates DeepAgents-based LLM generation.
 
     Consumes tasks from ``relais:tasks``, calls the LLM via DeepAgents/LangChain
     (AgentExecutor), and publishes response envelopes.  Conversation history is
     managed by the persistent LangGraph checkpointer (AsyncSqliteSaver).
+
+    Inherits from ``BrickBase`` which provides the stream loop, hot-reload,
+    graceful shutdown, and structured logging infrastructure.
     """
 
     def __init__(self) -> None:
@@ -152,23 +144,19 @@ class Atelier:
         Loads LLM profiles, MCP server configs, and skills tools once at
         startup to avoid repeated filesystem I/O on every message.
         """
-        self.client: RedisClient = RedisClient("atelier")
+        super().__init__("atelier")
+
         self.stream_in: str = "relais:tasks"
         self.group_name: str = "atelier_group"
         self.consumer_name: str = "atelier_1"
 
-        # Load static configuration once at startup — avoids 3+ disk reads
-        # per message for resources that do not change during the process lifetime.
-        self._profiles = load_profiles()
-        self._mcp_servers_default = load_for_sdk()
-        self._progress_config = load_progress_config()
-
-        # Channels that support incremental chunk streaming — loaded here
-        # (not at module level) so tests can import atelier.main without
-        # triggering filesystem I/O before any fixture is in place.
-        self._streaming_capable_channels: frozenset[str] = frozenset(
-            name for name, cfg in load_channels_config().items() if cfg.streaming
-        )
+        # Config-dependent state — initialised via _load() so __init__ and
+        # subsequent safe_reload() checkpoints share the same code path.
+        self._profiles: dict = {}
+        self._mcp_servers_default: dict = {}
+        self._progress_config: object = None
+        self._streaming_capable_channels: frozenset[str] = frozenset()
+        self._load()
 
         # Base directory for role-based skill resolution — resolved once at
         # startup so _handle_message does not hit the filesystem on every message.
@@ -183,35 +171,35 @@ class Atelier:
         # Subagent registry — loads specs from config/atelier/subagents/*.yaml cascade.
         self._subagent_registry: SubagentRegistry = SubagentRegistry.load(self._tool_registry)
 
-        # Config reload lock — guards _profiles, _mcp_servers_default,
-        # _progress_config, and _streaming_capable_channels.
-        self._config_lock: asyncio.Lock = asyncio.Lock()
-
         # Persistent LangGraph checkpointer — owned by the Atelier singleton so
         # it survives across per-message AgentExecutor instances.  Uses a
         # dedicated SQLite file (checkpoints.db) separate from Souvenir's
         # memory.db to avoid table-name conflicts between LangGraph and SQLModel.
         # NOTE: from_conn_string() returns an async context manager; the live
-        # saver instance is stored in self._checkpointer once start() enters it.
+        # saver instance is stored in self._checkpointer once start() enters it
+        # via _extra_lifespan().
         checkpoints_db = str(resolve_storage_dir() / "checkpoints.db")
         self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoints_db)
         self._checkpointer: AsyncSqliteSaver | None = None
 
+    # ------------------------------------------------------------------
+    # BrickBase abstract interface implementation
+    # ------------------------------------------------------------------
+
     def _load(self) -> None:
-        """Reload Atelier's runtime configuration from disk.
+        """Load Atelier's runtime configuration from disk.
 
         Refreshes ``_profiles``, ``_mcp_servers_default``, ``_progress_config``,
-        and ``_streaming_capable_channels``.  Called by ``__init__`` is a no-op
-        pattern here — ``__init__`` loads these directly; ``_load()`` is
-        provided so ``reload_config()`` can call it through ``safe_reload``.
+        and ``_streaming_capable_channels``.  Called once by ``__init__`` for the
+        initial load.  Hot-reload goes through ``_build_config_candidate`` →
+        ``_apply_config`` (which holds ``_config_lock``) instead.
 
-        This method is the single authoritative entry point for loading Atelier's
-        mutable configuration.  Does not touch Redis or any async resource.
+        Does not touch Redis or any async resource.
 
         Raises:
             Any exception raised by the underlying loader functions (e.g.
-            ``FileNotFoundError``, ``yaml.YAMLError``) propagates so that
-            ``safe_reload`` can intercept it and preserve the current state.
+            ``FileNotFoundError``, ``yaml.YAMLError``) propagates so that the
+            caller (``__init__`` or ``safe_reload``) can handle it.
         """
         new_profiles = load_profiles()
         new_mcp_servers = load_for_sdk()
@@ -223,7 +211,45 @@ class Atelier:
         self._mcp_servers_default = new_mcp_servers
         self._progress_config = new_progress
         self._streaming_capable_channels = new_streaming
-        logger.info("Atelier: configuration reloaded from disk")
+        logger.info("Atelier: configuration loaded from disk")
+
+    def stream_specs(self) -> list[StreamSpec]:
+        """Return the single StreamSpec for consuming ``relais:tasks``.
+
+        Uses ``ack_mode="on_success"`` so messages stay in the PEL on
+        transient errors (ConnectError, TimeoutException) and are
+        re-delivered automatically.
+
+        Returns:
+            A list containing one ``StreamSpec`` for ``relais:tasks``.
+        """
+        return [
+            StreamSpec(
+                stream=self.stream_in,
+                group=self.group_name,
+                consumer=self.consumer_name,
+                handler=self._handle_envelope,
+                ack_mode="on_success",
+                block_ms=2000,
+                count=5,
+            )
+        ]
+
+    # ------------------------------------------------------------------
+    # BrickBase optional hooks
+    # ------------------------------------------------------------------
+
+    async def _extra_lifespan(self, stack: AsyncExitStack) -> None:
+        """Enter the AsyncSqliteSaver context manager into the lifespan stack.
+
+        Called by ``BrickBase.start()`` before stream loops are launched.
+        Sets ``self._checkpointer`` so that ``_handle_message`` can pass it
+        to ``AgentExecutor``.
+
+        Args:
+            stack: The ``AsyncExitStack`` used for the brick's lifespan.
+        """
+        self._checkpointer = await stack.enter_async_context(self._checkpointer_cm)
 
     def _build_config_candidate(self) -> dict:
         """Build a new configuration snapshot from disk without mutating self.
@@ -264,49 +290,6 @@ class Atelier:
             self._subagent_registry = cfg["subagent_registry"]
         logger.info("Atelier: configuration applied")
 
-    async def reload_config(self) -> bool:
-        """Hot-reload Atelier's YAML configuration without interrupting message processing.
-
-        Uses ``safe_reload`` to guarantee that the previous configuration is
-        preserved if any loader raises.
-
-        Returns:
-            True when the configuration was reloaded successfully.
-            False when the reload failed (previous config preserved).
-        """
-        return await safe_reload(
-            self._config_lock,
-            "atelier",
-            self._build_config_candidate,
-            self._apply_config,
-            checkpoint_paths=self._config_watch_paths(),
-        )
-
-    async def _config_reload_listener(self, redis_conn: Any) -> None:
-        """Subscribe to ``relais:config:reload:atelier`` and trigger hot-reloads.
-
-        Runs as a background asyncio task alongside ``_process_stream``.
-        Only the exact string ``"reload"`` triggers a config reload; all other
-        messages are silently ignored.
-
-        Args:
-            redis_conn: Active async Redis connection (must support pub/sub).
-        """
-        pubsub = redis_conn.pubsub()
-        channel = "relais:config:reload:atelier"
-        await pubsub.subscribe(channel)
-        logger.info("Atelier: subscribed to %s", channel)
-
-        async for message in pubsub.listen():
-            if message.get("type") != "message":
-                continue
-            data = message.get("data", b"")
-            if isinstance(data, bytes):
-                data = data.decode()
-            if data == "reload":
-                logger.info("Atelier: received reload signal — reloading config")
-                await self.reload_config()
-
     def _config_watch_paths(self) -> list[Path]:
         """Return the list of config file paths and directories to watch.
 
@@ -332,11 +315,17 @@ class Atelier:
                 paths.append(subagents_dir)
         return paths
 
-    def _start_file_watcher(self) -> "asyncio.Task | None":
+    def _start_file_watcher(self, shutdown_event: asyncio.Event | None = None) -> "asyncio.Task | None":
         """Create and return an asyncio.Task that watches config files for changes.
 
+        Overrides ``BrickBase._start_file_watcher`` to accept ``shutdown_event``
+        as an optional keyword argument (tests call this method without arguments).
         Returns None when watchfiles is not installed (hot-reload gracefully
         degrades to Redis Pub/Sub only).
+
+        Args:
+            shutdown_event: Optional event used by the base class interface;
+                ignored here as ``watch_and_reload`` manages its own lifecycle.
 
         Returns:
             An asyncio.Task running watch_and_reload, or None when watchfiles
@@ -353,6 +342,66 @@ class Atelier:
             watch_and_reload(self._config_watch_paths(), self.reload_config, "atelier")
         )
 
+    async def reload_config(self) -> bool:
+        """Hot-reload Atelier's YAML configuration without interrupting message processing.
+
+        Overrides ``BrickBase.reload_config()`` to call ``safe_reload`` directly
+        with the builder callable so that loader exceptions are caught by
+        ``safe_reload`` and the previous configuration is preserved on failure.
+
+        Returns:
+            True when the configuration was reloaded successfully.
+            False when the reload failed (previous config preserved).
+        """
+        from common.config_reload import safe_reload
+
+        return await safe_reload(
+            self._config_lock,
+            "atelier",
+            self._build_config_candidate,
+            self._apply_config,
+            checkpoint_paths=self._config_watch_paths(),
+        )
+
+    async def _config_reload_listener(
+        self,
+        redis_conn: Any,
+        shutdown_event: asyncio.Event | None = None,
+    ) -> None:
+        """Subscribe to ``relais:config:reload:atelier`` and trigger hot-reloads.
+
+        Overrides ``BrickBase._config_reload_listener`` to preserve backward
+        compatibility with tests that call this method without ``shutdown_event``.
+        Only the exact string ``"reload"`` triggers a config reload; all other
+        messages are silently ignored.
+
+        Args:
+            redis_conn: Active async Redis connection (must support pub/sub).
+            shutdown_event: Optional event to signal loop termination.  When
+                ``None`` (e.g. in unit tests where ``listen()`` returns a
+                finite iterator), the loop runs until the iterator is exhausted.
+        """
+        pubsub = redis_conn.pubsub()
+        channel = "relais:config:reload:atelier"
+        await pubsub.subscribe(channel)
+        logger.info("Atelier: subscribed to %s", channel)
+
+        async for message in pubsub.listen():
+            if shutdown_event is not None and shutdown_event.is_set():
+                break
+            if message.get("type") != "message":
+                continue
+            data = message.get("data", b"")
+            if isinstance(data, bytes):
+                data = data.decode()
+            if data == "reload":
+                logger.info("Atelier: received reload signal — reloading config")
+                await self.reload_config()
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
     @property
     def _tool_policy(self) -> ToolPolicy:
         """Return a ToolPolicy rooted at the current _skills_base_dir.
@@ -365,6 +414,34 @@ class Atelier:
         """
         return ToolPolicy(base_dir=self._skills_base_dir)
 
+    # ------------------------------------------------------------------
+    # BrickBase handler bridge
+    # ------------------------------------------------------------------
+
+    async def _handle_envelope(self, envelope: Envelope, redis_conn: Any) -> bool:
+        """Bridge from BrickBase stream loop to _handle_message.
+
+        Deserializes the envelope back to JSON so the existing ``_handle_message``
+        implementation (which expects a raw JSON string) can be reused unchanged.
+
+        Args:
+            envelope: Deserialized ``Envelope`` received from the stream loop.
+            redis_conn: Active Redis connection.
+
+        Returns:
+            True when the message should be ACKed (success or DLQ routing).
+            False when a transient error occurred and the message should
+            remain in the PEL for re-delivery.
+        """
+        return await self._handle_message(
+            redis_conn,
+            envelope.correlation_id,
+            envelope.to_json(),
+        )
+
+    # ------------------------------------------------------------------
+    # Core message handler
+    # ------------------------------------------------------------------
 
     async def _handle_message(
         self,
@@ -502,15 +579,24 @@ class Atelier:
             # Archive the turn directly to Souvenir via relais:memory:request.
             # messages_raw stays off the outgoing envelope to avoid serializing
             # the full conversation history through every downstream consumer.
+            # The Envelope format is required: Souvenir's BrickBase loop parses
+            # each message via Envelope.from_json(), and action + kwargs are
+            # carried in envelope.metadata.
+            archive_env = Envelope(
+                content="",
+                sender_id=f"atelier:{envelope.sender_id}",
+                channel="internal",
+                session_id=envelope.session_id,
+                correlation_id=envelope.correlation_id,
+                metadata={
+                    "action": "archive",
+                    "envelope_json": response_env.to_json(),
+                    "messages_raw": agent_result.messages_raw,
+                },
+            )
             await redis_conn.xadd(
                 "relais:memory:request",
-                {
-                    "payload": json.dumps({
-                        "action": "archive",
-                        "envelope_json": response_env.to_json(),
-                        "messages_raw": agent_result.messages_raw,
-                    })
-                },
+                {"payload": archive_env.to_json()},
             )
 
             await redis_conn.xadd("relais:logs", {
@@ -566,92 +652,6 @@ class Atelier:
                 "error": str(exc),
             })
             return False
-
-    async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
-        """Main loop: reads from the Redis stream and dispatches messages.
-
-        Exits cleanly when ``shutdown.is_stopping()`` returns True.
-
-        Args:
-            redis_conn: Active Redis connection.
-            shutdown: GracefulShutdown instance controlling the loop lifetime.
-                If None a new instance is created (backward-compatible).
-        """
-        if shutdown is None:
-            shutdown = GracefulShutdown()
-
-        try:
-            await redis_conn.xgroup_create(
-                self.stream_in, self.group_name, mkstream=True
-            )
-        except Exception as exc:
-            if "BUSYGROUP" not in str(exc):
-                logger.warning("Consumer group error: %s", exc)
-
-        logger.info("Atelier listening for tasks...")
-
-        while not shutdown.is_stopping():
-            try:
-                results = await redis_conn.xreadgroup(
-                    self.group_name,
-                    self.consumer_name,
-                    {self.stream_in: ">"},
-                    count=5,
-                    block=2000,
-                )
-
-                if not results:
-                    continue
-
-                for _, messages in results:
-                    for message_id, data in messages:
-                        payload = data.get("payload", "{}")
-                        should_ack = await self._handle_message(
-                            redis_conn, message_id, payload
-                        )
-                        if should_ack:
-                            await redis_conn.xack(
-                                self.stream_in, self.group_name, message_id
-                            )
-
-            except Exception as exc:
-                logger.error("Stream error: %s", exc)
-                await asyncio.sleep(1)
-
-    async def start(self) -> None:
-        """Start the Atelier service and its main processing loop.
-
-        Registers SIGTERM/SIGINT handlers via GracefulShutdown so the process
-        exits cleanly when sent a termination signal.
-        """
-        shutdown = GracefulShutdown()
-        shutdown.install_signal_handlers()
-        redis_conn = await self.client.get_connection()
-        await redis_conn.xadd(
-            "relais:logs",
-            {"level": "INFO", "brick": "atelier", "message": "Atelier started"},
-        )
-        async with self._checkpointer_cm as checkpointer:
-            self._checkpointer = checkpointer
-            reload_listener_task = asyncio.create_task(
-                self._config_reload_listener(redis_conn)
-            )
-            watcher_task = self._start_file_watcher()
-            try:
-                await self._process_stream(redis_conn, shutdown=shutdown)
-            except asyncio.CancelledError:
-                logger.info("Atelier shutting down...")
-            finally:
-                reload_listener_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await reload_listener_task
-                if watcher_task is not None:
-                    watcher_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await watcher_task
-                self._checkpointer = None
-                await self.client.close()
-                logger.info("Atelier stopped gracefully")
 
 
 if __name__ == "__main__":

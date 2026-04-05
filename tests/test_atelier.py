@@ -183,7 +183,7 @@ async def test_xack_sent_after_successful_sdk_call() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -219,7 +219,7 @@ async def test_xack_sent_and_dlq_on_sdk_execution_error() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -261,7 +261,7 @@ async def test_xack_not_sent_on_generic_exception() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -306,7 +306,7 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -341,7 +341,7 @@ async def test_handle_message_injects_user_message_in_response_metadata() -> Non
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -384,7 +384,7 @@ async def test_handle_message_acks_on_success() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -430,7 +430,7 @@ async def test_streaming_signal_published_for_telegram_channel() -> None:
                         with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
-                                    await atelier._process_stream(redis_conn)
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                                 except asyncio.CancelledError:
                                     pass
 
@@ -474,7 +474,7 @@ async def test_streaming_signal_not_published_for_non_streaming_channel() -> Non
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -524,7 +524,7 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
                         with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
-                                    await atelier._process_stream(redis_conn)
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                                 except asyncio.CancelledError:
                                     pass
 
@@ -571,7 +571,7 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
                         with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
-                                    await atelier._process_stream(redis_conn)
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                                 except asyncio.CancelledError:
                                     pass
 
@@ -634,7 +634,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
                         with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
-                                    await atelier._process_stream(redis_conn)
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                                 except asyncio.CancelledError:
                                     pass
 
@@ -680,7 +680,7 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -736,7 +736,7 @@ async def test_process_stream_passes_role_prompt_path_to_assemble_system_prompt(
                     with patch("atelier.main.assemble_system_prompt", mock_sp):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -778,7 +778,7 @@ async def test_process_stream_role_prompt_path_none_when_absent_in_user_record()
                     with patch("atelier.main.assemble_system_prompt", mock_sp):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -830,7 +830,7 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 
@@ -904,7 +904,7 @@ async def test_handle_message_passes_checkpointer_to_agent_executor() -> None:
                     with patch("atelier.main.assemble_system_prompt", return_value="soul"):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
-                                await atelier._process_stream(redis_conn)
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
                             except asyncio.CancelledError:
                                 pass
 

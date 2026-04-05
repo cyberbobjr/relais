@@ -94,17 +94,21 @@ async def test_portail_xadd_includes_correlation_id(tmp_path: Path) -> None:
     envelope = _make_envelope()
     conn = _make_redis_conn()
 
-    # Simulate one message in the stream then stop
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
-    conn.xreadgroup.return_value = [
-        (
+    # Simulate one message in the stream then stop via CancelledError
+    conn.xreadgroup = AsyncMock(side_effect=[
+        [(
             "relais:messages:incoming",
             [("1000-0", {"payload": envelope.to_json()})],
-        )
-    ]
+        )],
+        asyncio.CancelledError(),
+    ])
 
-    await portail._process_stream(conn, shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     log_payloads = _get_xadd_calls_to_logs(conn)
     assert log_payloads, "Portail must xadd at least one entry to relais:logs"
@@ -138,16 +142,20 @@ async def test_portail_xadd_includes_sender_id(tmp_path: Path) -> None:
     envelope = _make_envelope(sender_id="discord:987654321")
     conn = _make_redis_conn()
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
-    conn.xreadgroup.return_value = [
-        (
+    conn.xreadgroup = AsyncMock(side_effect=[
+        [(
             "relais:messages:incoming",
             [("1001-0", {"payload": envelope.to_json()})],
-        )
-    ]
+        )],
+        asyncio.CancelledError(),
+    ])
 
-    await portail._process_stream(conn, shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     log_payloads = _get_xadd_calls_to_logs(conn)
     success_logs = [p for p in log_payloads if p.get("level") == "INFO"]
@@ -158,8 +166,15 @@ async def test_portail_xadd_includes_sender_id(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_portail_error_xadd_includes_correlation_id(tmp_path: Path) -> None:
-    """Portail error logs must include correlation_id when envelope is available."""
+async def test_portail_error_xadd_includes_correlation_id(tmp_path: Path, caplog) -> None:
+    """Portail parse errors are logged at ERROR level by BrickBase.
+
+    When an incoming payload is not valid JSON, the BrickBase loop catches the
+    JSONDecodeError before invoking the handler and emits an ERROR log entry via
+    the Python logging system.  The message is NOT forwarded and NOT left in the
+    PEL (ack_mode="always" still ACKs it).
+    """
+    import logging
     from portail.main import Portail
 
     portail = Portail.__new__(Portail)
@@ -171,25 +186,26 @@ async def test_portail_error_xadd_includes_correlation_id(tmp_path: Path) -> Non
     portail._user_registry = UserRegistry(config_path=Path("/nonexistent/portail.yaml"))
 
     conn = _make_redis_conn()
-    # Forward xadd succeeds but raising an error mid-processing by injecting
-    # a malformed payload (not valid JSON)
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
-    conn.xreadgroup.return_value = [
-        (
+    conn.xreadgroup = AsyncMock(side_effect=[
+        [(
             "relais:messages:incoming",
-            [("1002-0", {"payload": "INVALID JSON {{{"})],
-        )
-    ]
+            [("1002-0", {"payload": "INVALID JSON {{{"})]
+        )],
+        asyncio.CancelledError(),
+    ])
 
-    await portail._process_stream(conn, shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    with caplog.at_level(logging.ERROR):
+        try:
+            await portail._run_stream_loop(spec, conn, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
-    log_payloads = _get_xadd_calls_to_logs(conn)
-    error_logs = [p for p in log_payloads if p.get("level") == "ERROR"]
-    assert error_logs, "Portail must xadd an ERROR entry to relais:logs on malformed payload"
-    # correlation_id should be empty string (no envelope) — field must exist
-    for err in error_logs:
-        assert "correlation_id" in err, f"ERROR log must have correlation_id key: {err}"
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert error_records, (
+        "BrickBase must log an ERROR when the payload cannot be parsed as JSON"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -216,13 +232,17 @@ async def test_sentinelle_xadd_includes_correlation_id(tmp_path: Path) -> None:
     envelope = _make_envelope()
     conn = _make_redis_conn()
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
-    conn.xreadgroup.return_value = [
-        ("relais:security", [("2000-0", {"payload": envelope.to_json()})])
-    ]
+    conn.xreadgroup = AsyncMock(side_effect=[
+        [("relais:security", [("2000-0", {"payload": envelope.to_json()})])],
+        asyncio.CancelledError(),
+    ])
 
-    await sentinelle._process_stream(conn, shutdown)
+    spec = sentinelle.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await sentinelle._run_stream_loop(spec, conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     log_payloads = _get_xadd_calls_to_logs(conn)
     info_logs = [p for p in log_payloads if p.get("level") == "INFO"]
@@ -250,13 +270,17 @@ async def test_sentinelle_xadd_includes_sender_id(tmp_path: Path) -> None:
     envelope = _make_envelope(sender_id="telegram:55566677")
     conn = _make_redis_conn()
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
-    conn.xreadgroup.return_value = [
-        ("relais:security", [("2001-0", {"payload": envelope.to_json()})])
-    ]
+    conn.xreadgroup = AsyncMock(side_effect=[
+        [("relais:security", [("2001-0", {"payload": envelope.to_json()})])],
+        asyncio.CancelledError(),
+    ])
 
-    await sentinelle._process_stream(conn, shutdown)
+    spec = sentinelle.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await sentinelle._run_stream_loop(spec, conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     log_payloads = _get_xadd_calls_to_logs(conn)
     info_logs = [p for p in log_payloads if p.get("level") == "INFO"]
@@ -285,13 +309,17 @@ async def test_sentinelle_xadd_includes_content_preview(tmp_path: Path) -> None:
     envelope = _make_envelope(content=long_content)
     conn = _make_redis_conn()
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
-    conn.xreadgroup.return_value = [
-        ("relais:security", [("2002-0", {"payload": envelope.to_json()})])
-    ]
+    conn.xreadgroup = AsyncMock(side_effect=[
+        [("relais:security", [("2002-0", {"payload": envelope.to_json()})])],
+        asyncio.CancelledError(),
+    ])
 
-    await sentinelle._process_stream(conn, shutdown)
+    spec = sentinelle.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await sentinelle._run_stream_loop(spec, conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     log_payloads = _get_xadd_calls_to_logs(conn)
     info_logs = [p for p in log_payloads if p.get("level") == "INFO" and "content_preview" in p]

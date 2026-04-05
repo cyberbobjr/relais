@@ -33,7 +33,7 @@ def _make_souvenir_minimal():
         patch("souvenir.main.LongTermStore"),
         patch("souvenir.main.FileStore"),
         patch("souvenir.main.build_registry", return_value={}),
-        patch("souvenir.main.RedisClient"),
+        patch("common.brick_base.RedisClient"),
     ):
         souvenir = Souvenir()
 

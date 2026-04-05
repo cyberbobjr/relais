@@ -20,6 +20,8 @@ from souvenir.handlers.base import BaseActionHandler, HandlerContext
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_PATH_PREFIX = "/memories/"
+
 
 class FileReadHandler(BaseActionHandler):
     """Lit le contenu d'un fichier mémoire depuis SQLite via :class:`FileStore`."""
@@ -35,6 +37,18 @@ class FileReadHandler(BaseActionHandler):
         corr = req.get("correlation_id", "")
         user_id: str = req.get("user_id", "")
         path: str = req.get("path", "")
+
+        if not path.startswith(_ALLOWED_PATH_PREFIX):
+            logger.error(
+                "Souvenir: rejected file operation — path %r does not start with %r",
+                path,
+                _ALLOWED_PATH_PREFIX,
+            )
+            await ctx.redis_conn.xadd(
+                ctx.stream_res,
+                {"payload": json.dumps({"correlation_id": corr, "ok": False, "content": None, "error": "Invalid path prefix"})},
+            )
+            return
 
         if not user_id or not path:
             await ctx.redis_conn.xadd(

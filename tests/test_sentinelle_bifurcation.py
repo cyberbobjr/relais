@@ -7,6 +7,7 @@ Verifies the new routing logic:
 - Known but unauthorised commands → inline reply with permission denied
 - Fail-closed: envelope without user_record → deny
 """
+import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
@@ -126,23 +127,11 @@ def _make_redis(envelope: Envelope) -> AsyncMock:
     redis.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
     redis.xreadgroup = AsyncMock(side_effect=[
         [("relais:security", [(b"1-0", {"payload": envelope.to_json()})])],
-        [],
+        asyncio.CancelledError(),
     ])
     redis.xadd = AsyncMock(return_value=b"2-0")
     redis.xack = AsyncMock(return_value=1)
     return redis
-
-
-def _shutdown_after_first_batch() -> MagicMock:
-    """Return a GracefulShutdown mock that stops after one batch.
-
-    Returns:
-        Configured GracefulShutdown mock.
-    """
-    from common.shutdown import GracefulShutdown
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
-    return shutdown
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +159,12 @@ class TestSentinelleNormalMessageRouting:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         tasks_calls = [c for c in redis.xadd.await_args_list
                        if c.args[0] == "relais:tasks"]
@@ -191,7 +185,12 @@ class TestSentinelleNormalMessageRouting:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         commands_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:commands"]
@@ -223,7 +222,12 @@ class TestSentinelleAuthorisedCommandRouting:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         commands_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:commands"]
@@ -244,7 +248,12 @@ class TestSentinelleAuthorisedCommandRouting:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         tasks_calls = [c for c in redis.xadd.await_args_list
                        if c.args[0] == "relais:tasks"]
@@ -265,7 +274,12 @@ class TestSentinelleAuthorisedCommandRouting:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         redis.xack.assert_awaited_once_with("relais:security", "sentinelle_group", b"1-0")
 
@@ -303,7 +317,12 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         outgoing_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:messages:outgoing:discord"]
@@ -324,7 +343,12 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         outgoing_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:messages:outgoing:discord"]
@@ -346,7 +370,12 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         commands_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:commands"]
@@ -367,7 +396,12 @@ class TestSentinelleUnknownCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         redis.xack.assert_awaited_once_with("relais:security", "sentinelle_group", b"1-0")
 
@@ -400,7 +434,12 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         outgoing_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:messages:outgoing:discord"]
@@ -424,7 +463,12 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         outgoing_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:messages:outgoing:discord"]
@@ -449,7 +493,12 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         commands_calls = [c for c in redis.xadd.await_args_list
                           if c.args[0] == "relais:commands"]
@@ -471,7 +520,12 @@ class TestSentinelleUnauthorisedCommandRejection:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         redis.xack.assert_awaited_once_with("relais:security", "sentinelle_group", b"1-0")
 
@@ -517,7 +571,12 @@ class TestSentinelleFailClosed:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         tasks_calls = [c for c in redis.xadd.await_args_list
                        if c.args[0] == "relais:tasks"]
@@ -551,6 +610,11 @@ class TestSentinelleFailClosed:
         sentinel.consumer_name = "sentinelle_1"
         sentinel._acl = ACLManager(config_path=_make_sentinelle_yaml(tmp_path))
 
-        await sentinel._process_stream(redis, shutdown=_shutdown_after_first_batch())
+        spec = sentinel.stream_specs()[0]
+        shutdown_event = asyncio.Event()
+        try:
+            await sentinel._run_stream_loop(spec, redis, shutdown_event)
+        except asyncio.CancelledError:
+            pass
 
         redis.xack.assert_awaited_once_with("relais:security", "sentinelle_group", b"1-0")

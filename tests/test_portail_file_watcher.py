@@ -89,7 +89,7 @@ async def test_portail_start_file_watcher_returns_task() -> None:
         await asyncio.sleep(0)  # yield control once then return
 
     with (
-        patch("portail.main.watch_and_reload", side_effect=fake_watch_and_reload),
+        patch("common.brick_base.watch_and_reload", side_effect=fake_watch_and_reload),
         patch("common.config_reload.watchfiles", MagicMock()),
     ):
         task = portail._start_file_watcher()
@@ -117,7 +117,7 @@ async def test_portail_start_file_watcher_uses_correct_label() -> None:
         captured_labels.append(label)
 
     with (
-        patch("portail.main.watch_and_reload", side_effect=fake_watch_and_reload),
+        patch("common.brick_base.watch_and_reload", side_effect=fake_watch_and_reload),
         patch("common.config_reload.watchfiles", MagicMock()),
     ):
         task = portail._start_file_watcher()

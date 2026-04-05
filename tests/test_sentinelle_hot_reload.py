@@ -258,3 +258,43 @@ async def test_sentinelle_listener_subscribes_to_correct_channel(tmp_path: Path)
     await sentinelle._config_reload_listener(mock_redis)
 
     assert "relais:config:reload:sentinelle" in subscribe_calls
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sentinelle_listener_stops_on_shutdown_event(tmp_path: Path) -> None:
+    """_config_reload_listener exits the loop when shutdown_event is set."""
+    sentinelle, _ = _make_sentinelle_with_yaml(_SENTINELLE_YAML_V1, tmp_path)
+
+    reload_called: list[bool] = []
+
+    async def fake_reload() -> bool:
+        reload_called.append(True)
+        return True
+
+    sentinelle.reload_config = fake_reload
+
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()  # pre-set so the first iteration breaks immediately
+
+    # Even though a reload message is present, the loop should exit before
+    # processing it because shutdown_event is already set.
+    messages = [
+        {"type": "message", "data": b"reload"},
+        {"type": "message", "data": b"reload"},
+    ]
+
+    async def fake_listen():
+        for msg in messages:
+            yield msg
+
+    mock_pubsub = AsyncMock()
+    mock_pubsub.subscribe = AsyncMock()
+    mock_pubsub.listen = fake_listen
+
+    mock_redis = AsyncMock()
+    mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
+
+    await sentinelle._config_reload_listener(mock_redis, shutdown_event=shutdown_event)
+
+    assert reload_called == [], "reload_config must NOT be called when shutdown_event is set"

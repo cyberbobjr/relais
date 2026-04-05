@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-04
+**Dernière mise à jour :** 2026-04-05
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -83,6 +83,24 @@ Aiguilleur
 | `relais:logs` | toutes les briques | Archiviste |
 | `relais:events:system` | divers | Archiviste |
 | `relais:events:messages` | divers | Archiviste |
+
+---
+
+## BrickBase — infrastructure commune
+
+Toutes les briques du pipeline principal (`portail`, `sentinelle`, `atelier`, `souvenir`) héritent de `common.brick_base.BrickBase`. Cette classe abstraite fournit :
+
+| Mécanisme | Description |
+|-----------|-------------|
+| `start()` | Point d'entrée unifié : connexion Redis → `on_startup()` → boucles stream concurrentes → `on_shutdown()` |
+| `_run_stream_loop(spec, redis, shutdown_event)` | Boucle XREADGROUP avec gestion XACK conditionnelle (`ack_mode="always"\|"on_success"`) |
+| `reload_config()` | Rechargement atomique via `safe_reload` (parse → lock → swap) |
+| `_start_file_watcher()` | Surveille `_config_watch_paths()` via `watchfiles` |
+| `_config_reload_listener()` | Écoute `relais:config:reload:{brick}` en Pub/Sub |
+| `_create_shutdown()` | Instancie `GracefulShutdown` — les sous-classes surchargent pour la patchabilité des tests |
+| `_extra_lifespan(stack)` | Hook pour entrer des context managers supplémentaires (ex. `AsyncSqliteSaver` dans Atelier) |
+
+Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son handler `async (envelope, redis) -> bool`.
 
 ---
 
@@ -185,7 +203,7 @@ La résolution suit :
 
 Toutes les briques supportent le rechargement à chaud de leur configuration sans redémarrage :
 
-**Mécanisme de base** (implémenté dans chaque brique) :
+**Mécanisme de base** (implémenté dans `BrickBase`, hérité par toutes les briques) :
 - `_config_watch_paths()` — retourne la liste des fichiers YAML à surveiller
 - `_start_file_watcher()` — crée une tâche asyncio via `watch_and_reload()` pour détecter les changements fichier système
 - `reload_config()` — recharge et valide la configuration (retourne True/False)

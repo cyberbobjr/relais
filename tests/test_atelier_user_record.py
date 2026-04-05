@@ -178,7 +178,7 @@ async def test_atelier_reads_llm_profile_from_top_level_metadata() -> None:
         MockExec.return_value = mock_instance
 
         try:
-            await atelier._process_stream(redis_conn)
+            await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
         except asyncio.CancelledError:
             pass
 
@@ -236,7 +236,7 @@ async def test_atelier_reads_role_prompt_path_from_user_record_for_soul_assembly
         MockExec.return_value = mock_instance
 
         try:
-            await atelier._process_stream(redis_conn)
+            await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
         except asyncio.CancelledError:
             pass
 
@@ -293,7 +293,7 @@ async def test_atelier_reads_prompt_path_from_user_record() -> None:
         MockExec.return_value = mock_instance
 
         try:
-            await atelier._process_stream(redis_conn)
+            await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
         except asyncio.CancelledError:
             pass
 
@@ -358,7 +358,7 @@ async def test_atelier_reads_skills_dirs_from_user_record(tmp_path: Path) -> Non
             patch("atelier.main.load_for_sdk", return_value={}),
         ):
             try:
-                await atelier._process_stream(redis_conn)
+                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
             except asyncio.CancelledError:
                 pass
 
@@ -404,7 +404,7 @@ async def test_atelier_role_prompt_path_none_when_user_record_absent() -> None:
         MockExec.return_value = mock_instance
 
         try:
-            await atelier._process_stream(redis_conn)
+            await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
         except asyncio.CancelledError:
             pass
 

@@ -4,6 +4,7 @@ After Phase 0:
 - Commands are forwarded to relais:security (no early drop)
 - _is_command method no longer exists on Portail
 """
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -43,14 +44,20 @@ def mock_redis() -> AsyncMock:
 @pytest.mark.asyncio
 async def test_portail_forwards_slash_command_to_security(mock_redis: AsyncMock) -> None:
     """After Phase 0, /clear must be forwarded to relais:security (not dropped)."""
-    mock_redis.xreadgroup = AsyncMock(return_value=_make_message("/clear"))
+    mock_redis.xreadgroup = AsyncMock(side_effect=[
+        _make_message("/clear"),
+        asyncio.CancelledError(),
+    ])
 
     portail = Portail()
     portail._unknown_user_policy = "guest"  # unknown sender allowed
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
 
-    await portail._process_stream(mock_redis, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, mock_redis, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [c for c in mock_redis.xadd.call_args_list
                       if "relais:security" in str(c)]
@@ -61,14 +68,20 @@ async def test_portail_forwards_slash_command_to_security(mock_redis: AsyncMock)
 @pytest.mark.asyncio
 async def test_portail_forwards_quoted_command_to_security(mock_redis: AsyncMock) -> None:
     """After Phase 0, '"/help"' must be forwarded to relais:security (not dropped)."""
-    mock_redis.xreadgroup = AsyncMock(return_value=_make_message('"/help"'))
+    mock_redis.xreadgroup = AsyncMock(side_effect=[
+        _make_message('"/help"'),
+        asyncio.CancelledError(),
+    ])
 
     portail = Portail()
     portail._unknown_user_policy = "guest"
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
 
-    await portail._process_stream(mock_redis, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, mock_redis, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [c for c in mock_redis.xadd.call_args_list
                       if "relais:security" in str(c)]

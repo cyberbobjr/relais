@@ -477,16 +477,16 @@ def test_apply_guest_stamps_uses_guest_role(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
-    """_process_stream enriches metadata with user_record and forwards to relais:security.
+    """_run_stream_loop enriches metadata with user_record and forwards to relais:security.
 
     The forwarded envelope must contain a 'user_record' dict with role and llm_profile.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
+    import asyncio
     from portail.main import Portail
     from portail.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
 
     path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
@@ -496,15 +496,12 @@ async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
     redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
+        asyncio.CancelledError(),
     ])
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
     redis_conn.expire = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
 
     portail = Portail.__new__(Portail)
     portail.stream_in = "relais:messages:incoming"
@@ -515,7 +512,12 @@ async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
     portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -533,7 +535,7 @@ async def test_process_stream_enriches_with_user_record(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_process_stream_check_uses_user_record_key(tmp_path: Path) -> None:
-    """_process_stream checks for 'user_record' (not 'user_role') to detect known users.
+    """_run_stream_loop checks for 'user_record' (not 'user_role') to detect known users.
 
     An envelope with a valid user must be forwarded; the check must use
     'user_record' presence.
@@ -541,9 +543,9 @@ async def test_process_stream_check_uses_user_record_key(tmp_path: Path) -> None
     Args:
         tmp_path: pytest built-in temporary directory.
     """
+    import asyncio
     from portail.main import Portail
     from portail.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
 
     path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
@@ -553,15 +555,12 @@ async def test_process_stream_check_uses_user_record_key(tmp_path: Path) -> None
     redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
+        asyncio.CancelledError(),
     ])
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
     redis_conn.expire = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
 
     portail = Portail.__new__(Portail)
     portail.stream_in = "relais:messages:incoming"
@@ -572,7 +571,12 @@ async def test_process_stream_check_uses_user_record_key(tmp_path: Path) -> None
     portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -593,9 +597,9 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
     Args:
         tmp_path: pytest built-in temporary directory.
     """
+    import asyncio
     from portail.main import Portail
     from portail.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
 
     path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:9999999", channel="discord")
@@ -605,15 +609,12 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
     redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
+        asyncio.CancelledError(),
     ])
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
     redis_conn.expire = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
 
     portail = Portail.__new__(Portail)
     portail.stream_in = "relais:messages:incoming"
@@ -624,7 +625,12 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
     portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     security_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -639,16 +645,16 @@ async def test_process_stream_unknown_user_dropped_by_deny_policy(tmp_path: Path
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> None:
-    """_process_stream calls _update_active_sessions with correct fields.
+    """_run_stream_loop calls _update_active_sessions with correct fields.
 
     The Redis HSET must be called with last_seen, channel, and session_id.
 
     Args:
         tmp_path: pytest built-in temporary directory.
     """
+    import asyncio
     from portail.main import Portail
     from portail.user_registry import UserRegistry
-    from common.shutdown import GracefulShutdown
 
     path = _write_portail_yaml(tmp_path)
     envelope = _make_envelope(sender_id="discord:admin001", channel="discord")
@@ -658,15 +664,12 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
     redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
     redis_conn.xreadgroup = AsyncMock(side_effect=[
         [("relais:messages:incoming", [(b"1-0", {"payload": payload})])],
-        [],
+        asyncio.CancelledError(),
     ])
     redis_conn.xadd = AsyncMock(return_value=b"2-0")
     redis_conn.xack = AsyncMock(return_value=1)
     redis_conn.hset = AsyncMock(return_value=1)
     redis_conn.expire = AsyncMock(return_value=1)
-
-    shutdown = MagicMock(spec=GracefulShutdown)
-    shutdown.is_stopping.side_effect = [False, False, True]
 
     portail = Portail.__new__(Portail)
     portail.stream_in = "relais:messages:incoming"
@@ -677,7 +680,12 @@ async def test_process_stream_calls_update_active_sessions(tmp_path: Path) -> No
     portail._guest_role = portail._user_registry.guest_role
     portail._unknown_user_policy = portail._user_registry.unknown_user_policy
 
-    await portail._process_stream(redis_conn, shutdown=shutdown)
+    spec = portail.stream_specs()[0]
+    shutdown_event = asyncio.Event()
+    try:
+        await portail._run_stream_loop(spec, redis_conn, shutdown_event)
+    except asyncio.CancelledError:
+        pass
 
     hset_calls = redis_conn.hset.await_args_list
     assert len(hset_calls) >= 1

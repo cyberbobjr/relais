@@ -1,13 +1,13 @@
-"""Tests verifying GracefulShutdown is wired into every brick's main loop.
+"""Tests verifying shutdown is wired into every brick's main loop.
 
-Each test simulates a shutdown signal by pre-setting GracefulShutdown.stop_event
-(or replacing is_stopping with a one-shot sentinel) and asserts that the brick's
-_process_stream (or equivalent) exits without hanging.
+Each test simulates a shutdown signal by using a pre-set asyncio.Event
+and asserts that the brick's _run_stream_loop exits without hanging.
 
 The pattern used for every brick:
-  - Patch ``common.shutdown.GracefulShutdown`` so tests control the stop_event.
+  - Build a pre-set asyncio.Event (shutdown_event.set() before passing).
   - Provide a minimal async Redis mock that returns empty results.
-  - Call the process method and assert it returns within a tight timeout.
+  - Call _run_stream_loop(spec, redis_conn, shutdown_event) and assert it
+    returns within a tight timeout.
 """
 
 import asyncio
@@ -27,8 +27,7 @@ def _make_redis_mock(xreadgroup_side_effect=None):
 
     Args:
         xreadgroup_side_effect: Optional side_effect list for xreadgroup calls.
-            Defaults to a single empty-result followed by StopAsyncIteration to
-            break the loop (but the loop should break on shutdown first).
+            Defaults to a single empty-result.
 
     Returns:
         MagicMock with async methods for xgroup_create, xreadgroup, xack, xadd.
@@ -47,52 +46,6 @@ def _make_redis_mock(xreadgroup_side_effect=None):
     return redis_conn
 
 
-class _PreSetShutdown:
-    """Stub GracefulShutdown whose stop_event is already set at construction time.
-
-    This causes any ``while not shutdown.is_stopping()`` loop to exit immediately
-    on first evaluation, making tests deterministic without needing real signals.
-    """
-
-    def __init__(self) -> None:
-        self._stop_event = asyncio.Event()
-        self._stop_event.set()  # already triggered
-
-    def install_signal_handlers(self) -> None:
-        """No-op: signals are not relevant in unit test context."""
-
-    def is_stopping(self) -> bool:
-        """Returns True always (shutdown pre-triggered).
-
-        Returns:
-            True.
-        """
-        return self._stop_event.is_set()
-
-    @property
-    def stop_event(self) -> asyncio.Event:
-        """Returns the pre-set stop event.
-
-        Returns:
-            An asyncio.Event that is already set.
-        """
-        return self._stop_event
-
-    def register(self, task) -> None:
-        """No-op task registration.
-
-        Args:
-            task: Ignored.
-        """
-
-    async def wait_for_tasks(self, timeout=None) -> None:
-        """No-op wait.
-
-        Args:
-            timeout: Ignored.
-        """
-
-
 # ---------------------------------------------------------------------------
 # T1: Portail exits when shutdown is requested
 # ---------------------------------------------------------------------------
@@ -101,9 +54,9 @@ class _PreSetShutdown:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_portail_exits_on_shutdown() -> None:
-    """Portail._process_stream exits when GracefulShutdown.is_stopping() is True.
+    """Portail._run_stream_loop exits when shutdown_event is already set.
 
-    Wires a pre-set shutdown stub and asserts the coroutine completes within
+    Wires a pre-set asyncio.Event and asserts the coroutine completes within
     1 second (no infinite loop).
     """
     from portail.main import Portail
@@ -116,17 +69,21 @@ async def test_portail_exits_on_shutdown() -> None:
 
     redis_conn = _make_redis_mock()
 
-    with patch("portail.main.GracefulShutdown", return_value=_PreSetShutdown()):
-        try:
-            await asyncio.wait_for(
-                portail._process_stream(redis_conn),
-                timeout=1.0,
-            )
-        except asyncio.TimeoutError:
-            pytest.fail(
-                "Portail._process_stream did not exit after shutdown was requested "
-                "(loop still running after 1 s — GracefulShutdown not wired)"
-            )
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+
+    spec = portail.stream_specs()[0]
+
+    try:
+        await asyncio.wait_for(
+            portail._run_stream_loop(spec, redis_conn, shutdown_event),
+            timeout=1.0,
+        )
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "Portail._run_stream_loop did not exit after shutdown was requested "
+            "(loop still running after 1 s — shutdown_event not wired)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +94,9 @@ async def test_portail_exits_on_shutdown() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_sentinelle_exits_on_shutdown() -> None:
-    """Sentinelle._process_stream exits when GracefulShutdown.is_stopping() is True.
+    """Sentinelle._run_stream_loop exits when shutdown_event is already set.
 
-    Wires a pre-set shutdown stub and asserts the coroutine completes within
+    Wires a pre-set asyncio.Event and asserts the coroutine completes within
     1 second (no infinite loop).
     """
     from sentinelle.main import Sentinelle
@@ -152,17 +109,21 @@ async def test_sentinelle_exits_on_shutdown() -> None:
 
     redis_conn = _make_redis_mock()
 
-    with patch("sentinelle.main.GracefulShutdown", return_value=_PreSetShutdown()):
-        try:
-            await asyncio.wait_for(
-                sentinelle._process_stream(redis_conn),
-                timeout=1.0,
-            )
-        except asyncio.TimeoutError:
-            pytest.fail(
-                "Sentinelle._process_stream did not exit after shutdown was requested "
-                "(loop still running after 1 s — GracefulShutdown not wired)"
-            )
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+
+    spec = sentinelle.stream_specs()[0]
+
+    try:
+        await asyncio.wait_for(
+            sentinelle._run_stream_loop(spec, redis_conn, shutdown_event),
+            timeout=1.0,
+        )
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "Sentinelle._run_stream_loop did not exit after shutdown was requested "
+            "(loop still running after 1 s — shutdown_event not wired)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +134,9 @@ async def test_sentinelle_exits_on_shutdown() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_souvenir_request_stream_exits_on_shutdown() -> None:
-    """Souvenir._process_request_stream exits when GracefulShutdown.is_stopping() is True.
+    """Souvenir._run_stream_loop exits when shutdown_event is already set.
 
-    Wires a pre-set shutdown stub and asserts the coroutine completes within
+    Wires a pre-set asyncio.Event and asserts the coroutine completes within
     1 second (no infinite loop).
     """
     from souvenir.main import Souvenir
@@ -188,22 +149,21 @@ async def test_souvenir_request_stream_exits_on_shutdown() -> None:
 
     redis_conn = _make_redis_mock()
 
-    with patch("souvenir.main.GracefulShutdown", return_value=_PreSetShutdown()):
-        try:
-            await asyncio.wait_for(
-                souvenir._process_request_stream(redis_conn),
-                timeout=1.0,
-            )
-        except asyncio.TimeoutError:
-            pytest.fail(
-                "Souvenir._process_request_stream did not exit after shutdown was requested "
-                "(loop still running after 1 s — GracefulShutdown not wired)"
-            )
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
 
+    spec = souvenir.stream_specs()[0]
 
-# ---------------------------------------------------------------------------
-# T3b: Souvenir (outgoing stream) exits when shutdown is requested
-# ---------------------------------------------------------------------------
+    try:
+        await asyncio.wait_for(
+            souvenir._run_stream_loop(spec, redis_conn, shutdown_event),
+            timeout=1.0,
+        )
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "Souvenir._run_stream_loop did not exit after shutdown was requested "
+            "(loop still running after 1 s — shutdown_event not wired)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +188,27 @@ async def test_archiviste_exits_on_shutdown() -> None:
 
     redis_conn = _make_redis_mock()
 
+    class _PreSetShutdown:
+        def __init__(self):
+            self._stop_event = asyncio.Event()
+            self._stop_event.set()
+
+        def install_signal_handlers(self):
+            pass
+
+        def is_stopping(self):
+            return self._stop_event.is_set()
+
+        @property
+        def stop_event(self):
+            return self._stop_event
+
+        def register(self, task):
+            pass
+
+        async def wait_for_tasks(self, timeout=None):
+            pass
+
     with patch("archiviste.main.GracefulShutdown", return_value=_PreSetShutdown()):
         # _write_event uses open() — patch it so no filesystem access occurs
         with patch.object(archiviste, "_write_event", return_value=None):
@@ -251,9 +232,9 @@ async def test_archiviste_exits_on_shutdown() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_atelier_exits_on_shutdown() -> None:
-    """Atelier._process_stream exits when GracefulShutdown.is_stopping() is True.
+    """Atelier._run_stream_loop exits when shutdown_event is already set.
 
-    Wires a pre-set shutdown stub and asserts the coroutine completes within
+    Wires a pre-set asyncio.Event and asserts the coroutine completes within
     1 second (no infinite loop).
     """
     from atelier.main import Atelier
@@ -265,17 +246,21 @@ async def test_atelier_exits_on_shutdown() -> None:
 
     redis_conn = _make_redis_mock()
 
-    with patch("atelier.main.GracefulShutdown", return_value=_PreSetShutdown()):
-        try:
-            await asyncio.wait_for(
-                atelier._process_stream(redis_conn),
-                timeout=1.0,
-            )
-        except asyncio.TimeoutError:
-            pytest.fail(
-                "Atelier._process_stream did not exit after shutdown was requested "
-                "(loop still running after 1 s — GracefulShutdown not wired)"
-            )
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+
+    spec = atelier.stream_specs()[0]
+
+    try:
+        await asyncio.wait_for(
+            atelier._run_stream_loop(spec, redis_conn, shutdown_event),
+            timeout=1.0,
+        )
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "Atelier._run_stream_loop did not exit after shutdown was requested "
+            "(loop still running after 1 s — shutdown_event not wired)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -305,18 +290,30 @@ async def test_portail_calls_install_signal_handlers() -> None:
     mock_client.close = AsyncMock()
     portail.client = mock_client
 
-    stub = _PreSetShutdown()
     install_called = []
 
-    original_install = stub.install_signal_handlers
+    class _TrackingShutdown:
+        def __init__(self):
+            self._stop_event = asyncio.Event()
+            self._stop_event.set()
 
-    def _tracking_install():
-        install_called.append(True)
-        original_install()
+        def install_signal_handlers(self):
+            install_called.append(True)
 
-    stub.install_signal_handlers = _tracking_install
+        def is_stopping(self):
+            return self._stop_event.is_set()
 
-    with patch("portail.main.GracefulShutdown", return_value=stub):
+        @property
+        def stop_event(self):
+            return self._stop_event
+
+        def register(self, task):
+            pass
+
+        async def wait_for_tasks(self, timeout=None):
+            pass
+
+    with patch("common.brick_base.GracefulShutdown", return_value=_TrackingShutdown()):
         await portail.start()
 
     assert install_called, (
@@ -346,17 +343,30 @@ async def test_sentinelle_calls_install_signal_handlers() -> None:
     mock_client.close = AsyncMock()
     sentinelle.client = mock_client
 
-    stub = _PreSetShutdown()
     install_called = []
-    original_install = stub.install_signal_handlers
 
-    def _tracking_install():
-        install_called.append(True)
-        original_install()
+    class _TrackingShutdown:
+        def __init__(self):
+            self._stop_event = asyncio.Event()
+            self._stop_event.set()
 
-    stub.install_signal_handlers = _tracking_install
+        def install_signal_handlers(self):
+            install_called.append(True)
 
-    with patch("sentinelle.main.GracefulShutdown", return_value=stub):
+        def is_stopping(self):
+            return self._stop_event.is_set()
+
+        @property
+        def stop_event(self):
+            return self._stop_event
+
+        def register(self, task):
+            pass
+
+        async def wait_for_tasks(self, timeout=None):
+            pass
+
+    with patch("common.brick_base.GracefulShutdown", return_value=_TrackingShutdown()):
         await sentinelle.start()
 
     assert install_called, (
@@ -390,17 +400,30 @@ async def test_atelier_calls_install_signal_handlers() -> None:
     mock_client.close = AsyncMock()
     atelier.client = mock_client
 
-    stub = _PreSetShutdown()
     install_called = []
-    original_install = stub.install_signal_handlers
 
-    def _tracking_install():
-        install_called.append(True)
-        original_install()
+    class _TrackingShutdown:
+        def __init__(self):
+            self._stop_event = asyncio.Event()
+            self._stop_event.set()
 
-    stub.install_signal_handlers = _tracking_install
+        def install_signal_handlers(self):
+            install_called.append(True)
 
-    with patch("atelier.main.GracefulShutdown", return_value=stub):
+        def is_stopping(self):
+            return self._stop_event.is_set()
+
+        @property
+        def stop_event(self):
+            return self._stop_event
+
+        def register(self, task):
+            pass
+
+        async def wait_for_tasks(self, timeout=None):
+            pass
+
+    with patch("common.brick_base.GracefulShutdown", return_value=_TrackingShutdown()):
         await atelier.start()
 
     assert install_called, (

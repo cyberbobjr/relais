@@ -10,7 +10,8 @@ ACL enforcement.  Unknown senders are handled according to the configured
 
 Technical overview
 ------------------
-``Portail`` is a single asyncio consumer loop.  Key helpers:
+``Portail`` extends :class:`~common.brick_base.BrickBase` and runs a single
+asyncio consumer loop.  Key helpers:
 
 * ``UserRegistry`` — loads and caches user records from portail.yaml;
   resolves ``sender_id`` → ``UserRecord``.
@@ -63,35 +64,24 @@ Processing flow
 """
 
 import asyncio
-import contextlib
 import logging
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# Configure logging to standard output
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout
-)
-
-from common.redis_client import RedisClient
+from common.brick_base import BrickBase, StreamSpec
+from common.config_reload import safe_reload
 from common.envelope import Envelope
-from common.shutdown import GracefulShutdown
+from common.redis_client import RedisClient
 from common.user_record import UserRecord
-from common.config_reload import safe_reload, watch_and_reload
 from portail.user_registry import UserRegistry
 
 logger = logging.getLogger("portail")
 
 
-class Portail:
+class Portail(BrickBase):
     """La brique Le Portail du système RELAIS.
 
     Responsible for consuming incoming messages from external relays, enriching
@@ -100,37 +90,35 @@ class Portail:
 
     The ``user_record`` dict in ``envelope.metadata`` is the sole carrier of
     user identity and role data for all downstream bricks.
+
+    Inherits the full lifecycle plumbing (connection, shutdown, hot-reload,
+    logging) from :class:`~common.brick_base.BrickBase`.
     """
 
     def __init__(self) -> None:
         """Initialise Le Portail with Redis stream and group configurations."""
-        self.client: RedisClient = RedisClient("portail")
+        super().__init__("portail")
         self.stream_in: str = "relais:messages:incoming"
         self.stream_out: str = "relais:security"
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
-        # Resolve the portail.yaml config path once — UserRegistry._resolve_path logic
-        # is reused to honour the config cascade consistently.
-        _registry = UserRegistry()
-        self._config_path: Path | None = _registry._config_path
-        # Config reload lock — guards _user_registry, _guest_role, _unknown_user_policy
-        self._config_lock: asyncio.Lock = asyncio.Lock()
-        # Initialise config-dependent state via _load()
-        self._user_registry: UserRegistry = _registry
-        self._guest_role: str = _registry.guest_role
-        self._unknown_user_policy: str = _registry.unknown_user_policy
-        logger.info(
-            "Portail: unknown_user_policy=%s, guest_role=%s",
-            self._unknown_user_policy,
-            self._guest_role,
-        )
+        # Discover config path via a temporary registry instantiation, then
+        # delegate all state initialisation to _load() so __init__ and hot-reload
+        # share a single authoritative code path.
+        self._config_path: Path | None = UserRegistry()._config_path
+        self._load()
+
+    # ------------------------------------------------------------------
+    # BrickBase abstract interface
+    # ------------------------------------------------------------------
 
     def _load(self) -> None:
-        """Reload configuration state from portail.yaml.
+        """Load (or reload) configuration state from portail.yaml.
 
         Reconstructs ``self._user_registry``, ``self._guest_role``, and
-        ``self._unknown_user_policy`` from disk.  Called by ``__init__`` and
-        by ``reload_config()`` (via ``safe_reload``).
+        ``self._unknown_user_policy`` from disk.  Called once by ``__init__``
+        for initial load; hot-reload goes through the ``_build_config_candidate``
+        → ``_apply_config`` path instead.
 
         This method is the single authoritative entry point for loading
         Portail's mutable configuration.  It never touches Redis or any
@@ -151,7 +139,40 @@ class Portail:
             self._guest_role,
         )
 
-    def _build_registry_candidate(self) -> UserRegistry:
+    def stream_specs(self) -> list[StreamSpec]:
+        """Return the StreamSpec for consuming ``relais:messages:incoming``.
+
+        Returns:
+            A list containing one :class:`~common.brick_base.StreamSpec` that
+            describes the ``portail_group`` consumer on
+            ``relais:messages:incoming``.  ``ack_mode="always"`` because every
+            message is ACKed unconditionally — validation errors are logged and
+            dropped, never left in the PEL.
+        """
+        return [
+            StreamSpec(
+                stream=self.stream_in,
+                group=self.group_name,
+                consumer=self.consumer_name,
+                handler=self._handle_envelope,
+                ack_mode="always",
+            )
+        ]
+
+    # ------------------------------------------------------------------
+    # BrickBase optional hooks
+    # ------------------------------------------------------------------
+
+    def _config_watch_paths(self) -> list[Path]:
+        """Return the list of config file paths to watch for changes.
+
+        Returns:
+            A list containing the portail.yaml config path.
+        """
+        cfg_path = getattr(self, "_config_path", None)
+        return [cfg_path] if cfg_path is not None else []
+
+    def _build_config_candidate(self) -> UserRegistry:
         """Build a new UserRegistry from disk without mutating self.
 
         Pre-validates the YAML before handing off to UserRegistry so that
@@ -175,7 +196,7 @@ class Portail:
         yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
         return UserRegistry(config_path=self._config_path)
 
-    def _apply_registry(self, registry: UserRegistry) -> None:
+    def _apply_config(self, registry: UserRegistry) -> None:
         """Swap in a freshly loaded UserRegistry and update dependent fields.
 
         Args:
@@ -190,6 +211,10 @@ class Portail:
             self._guest_role,
         )
 
+    # ------------------------------------------------------------------
+    # Hot-reload (override to delegate to safe_reload directly)
+    # ------------------------------------------------------------------
+
     async def reload_config(self) -> bool:
         """Hot-reload portail.yaml without interrupting the processing loop.
 
@@ -203,67 +228,16 @@ class Portail:
         return await safe_reload(
             self._config_lock,
             "portail",
-            self._build_registry_candidate,
-            self._apply_registry,
+            self._build_config_candidate,
+            self._apply_config,
             checkpoint_paths=[self._config_path] if self._config_path else [],
         )
 
-    def _config_watch_paths(self) -> list[Path]:
-        """Return the list of config file paths to watch for changes.
+    # ------------------------------------------------------------------
+    # Envelope enrichment helpers
+    # ------------------------------------------------------------------
 
-        Returns:
-            A list containing the portail.yaml config path.
-        """
-        cfg_path = getattr(self, "_config_path", None)
-        return [cfg_path] if cfg_path is not None else []
-
-    def _start_file_watcher(self) -> "asyncio.Task | None":
-        """Create and return an asyncio.Task that watches config files for changes.
-
-        Returns None when watchfiles is not installed (hot-reload gracefully
-        degrades to Redis Pub/Sub only).
-
-        Returns:
-            An asyncio.Task running watch_and_reload, or None when watchfiles
-            is unavailable.
-        """
-        from common.config_reload import watchfiles as _wf
-        if _wf is None:
-            logger.warning(
-                "Portail: watchfiles not installed — file-based hot-reload disabled. "
-                "Install with: pip install watchfiles"
-            )
-            return None
-        return asyncio.create_task(
-            watch_and_reload(self._config_watch_paths(), self.reload_config, "portail")
-        )
-
-    async def _config_reload_listener(self, redis_conn: Any) -> None:
-        """Subscribe to ``relais:config:reload:portail`` and trigger hot-reloads.
-
-        Runs as a background asyncio task alongside ``_process_stream``.
-        Only the exact string ``"reload"`` triggers a config reload; all other
-        messages are silently ignored.
-
-        Args:
-            redis_conn: Active async Redis connection (must support pub/sub).
-        """
-        pubsub = redis_conn.pubsub()
-        channel = "relais:config:reload:portail"
-        await pubsub.subscribe(channel)
-        logger.info("Portail: subscribed to %s", channel)
-
-        async for message in pubsub.listen():
-            if message.get("type") != "message":
-                continue
-            data = message.get("data", b"")
-            if isinstance(data, bytes):
-                data = data.decode()
-            if data == "reload":
-                logger.info("Portail: received reload signal — reloading config")
-                await self.reload_config()
-
-    def _enrich_envelope(self, envelope: "Envelope") -> None:
+    def _enrich_envelope(self, envelope: Envelope) -> None:
         """Stamp ``user_record`` dict and ``llm_profile`` into envelope.metadata.
 
         Resolves the sender against the UserRegistry.  When found, writes the
@@ -293,7 +267,7 @@ class Portail:
             envelope.metadata.get("channel_profile") or "default"
         )
 
-    def _apply_guest_stamps(self, envelope: "Envelope") -> None:
+    def _apply_guest_stamps(self, envelope: Envelope) -> None:
         """Stamp a synthetic guest ``user_record`` dict onto an unknown-user envelope.
 
         Applied when ``unknown_user_policy=guest`` and ``resolve_user()``
@@ -311,7 +285,7 @@ class Portail:
             envelope.metadata.get("channel_profile") or "default"
         )
 
-    async def _update_active_sessions(self, redis_conn: Any, envelope: "Envelope") -> None:
+    async def _update_active_sessions(self, redis_conn: Any, envelope: Envelope) -> None:
         """Track active sessions per user for the Crieur (push notifications).
 
         Stores user activity metadata in a Redis Hash with a 1-hour TTL.
@@ -352,156 +326,83 @@ class Portail:
                 exc,
             )
 
-    async def _process_stream(self, redis_conn: Any, shutdown: GracefulShutdown | None = None) -> None:
-        """Consume incoming messages from Relays and forward to Sentinelle.
+    # ------------------------------------------------------------------
+    # BrickBase handler
+    # ------------------------------------------------------------------
 
-        Exits cleanly when ``shutdown.is_stopping()`` returns True.
+    async def _handle_envelope(self, envelope: Envelope, redis_conn: Any) -> bool:
+        """Process one incoming envelope: enrich, apply policy, forward.
+
+        This is the handler invoked by the BrickBase stream loop for each
+        message consumed from ``relais:messages:incoming``.
 
         Args:
-            redis_conn: Active Redis connection.
-            shutdown: GracefulShutdown instance controlling the loop lifetime.
-                If None a new instance is created (backward-compatible).
+            envelope: Deserialized incoming envelope.
+            redis_conn: Active async Redis connection.
+
+        Returns:
+            ``True`` always — Portail uses ``ack_mode="always"`` so the
+            BrickBase loop ACKs unconditionally regardless of the return value.
         """
-        if shutdown is None:
-            shutdown = GracefulShutdown()
+        logger.info(
+            "Received message: %s from %s",
+            envelope.correlation_id,
+            envelope.channel,
+        )
 
-        try:
-            await redis_conn.xgroup_create(self.stream_in, self.group_name, mkstream=True)
-        except Exception as e:
-            if "BUSYGROUP" not in str(e):
-                logger.warning(f"Consumer group error: {e}")
+        # Enrich envelope with single user_record dict
+        self._enrich_envelope(envelope)
 
-        logger.info("Gateway listening to incoming messages...")
-
-        while not shutdown.is_stopping():
-            try:
-                results = await redis_conn.xreadgroup(
-                    self.group_name,
-                    self.consumer_name,
-                    {self.stream_in: ">"},
-                    count=10,
-                    block=2000
+        # Apply unknown-user policy when user_record is absent
+        if "user_record" not in envelope.metadata:
+            policy = self._unknown_user_policy
+            if policy == "guest":
+                self._apply_guest_stamps(envelope)
+            elif policy == "pending":
+                logger.info(
+                    "unknown_user_policy=pending — publishing %s to pending_users",
+                    envelope.sender_id,
                 )
+                await redis_conn.xadd(
+                    "relais:admin:pending_users",
+                    {
+                        "sender_id": envelope.sender_id,
+                        "channel": envelope.channel,
+                        "correlation_id": envelope.correlation_id,
+                        "timestamp": str(envelope.timestamp),
+                    },
+                )
+                return True  # drop — ACKed via ack_mode="always"
+            else:
+                # deny (default) — drop silently
+                logger.info(
+                    "unknown_user_policy=deny — dropping message from %s",
+                    envelope.sender_id,
+                )
+                return True  # drop — ACKed via ack_mode="always"
 
-                if not results:
-                    continue
+        # Update active session tracking
+        await self._update_active_sessions(redis_conn, envelope)
 
-                for _, messages in results:
-                    for message_id, data in messages:
-                        target_id = message_id
-                        try:
-                            # Parse Envelope
-                            payload = data.get(b"payload") or data.get("payload", "{}")
-                            if isinstance(payload, bytes):
-                                payload = payload.decode()
-                            envelope = Envelope.from_json(payload)
+        # Add trace
+        envelope.add_trace("portail", "received and session updated")
 
-                            logger.info(
-                                f"Received message: {envelope.correlation_id} "
-                                f"from {envelope.channel}"
-                            )
+        # Forward to La Sentinelle
+        await redis_conn.xadd(
+            self.stream_out, {"payload": envelope.to_json()}
+        )
 
-                            # Enrich envelope with single user_record dict
-                            self._enrich_envelope(envelope)
-
-                            # Apply unknown-user policy when user_record is absent
-                            if "user_record" not in envelope.metadata:
-                                policy = self._unknown_user_policy
-                                if policy == "guest":
-                                    self._apply_guest_stamps(envelope)
-                                elif policy == "pending":
-                                    logger.info(
-                                        "unknown_user_policy=pending — publishing %s to pending_users",
-                                        envelope.sender_id,
-                                    )
-                                    await redis_conn.xadd(
-                                        "relais:admin:pending_users",
-                                        {
-                                            "sender_id": envelope.sender_id,
-                                            "channel": envelope.channel,
-                                            "correlation_id": envelope.correlation_id,
-                                            "timestamp": str(envelope.timestamp),
-                                        },
-                                    )
-                                    continue  # drop — finally:xack executes
-                                else:
-                                    # deny (default) — drop silently
-                                    logger.info(
-                                        "unknown_user_policy=deny — dropping message from %s",
-                                        envelope.sender_id,
-                                    )
-                                    continue  # drop — finally:xack executes
-
-                            # Update active session tracking
-                            await self._update_active_sessions(redis_conn, envelope)
-
-                            # Add trace
-                            envelope.add_trace("portail", "received and session updated")
-
-                            # Forward to La Sentinelle
-                            await redis_conn.xadd(
-                                self.stream_out, {"payload": envelope.to_json()}
-                            )
-
-                            # Log to Redis stream
-                            await redis_conn.xadd("relais:logs", {
-                                "level": "INFO",
-                                "brick": "portail",
-                                "correlation_id": envelope.correlation_id,
-                                "sender_id": envelope.sender_id,
-                                "message": f"Forwarded {envelope.correlation_id} to sentinelle",
-                                "content_preview": envelope.content[:60] if envelope.content else "",
-                            })
-
-                        except Exception as inner_e:
-                            logger.error(f"Failed to process message {target_id}: {inner_e}")
-                            await redis_conn.xadd("relais:logs", {
-                                "level": "ERROR",
-                                "brick": "portail",
-                                "correlation_id": "",
-                                "message": f"Malformed envelope error: {inner_e}",
-                                "error": str(inner_e),
-                            })
-                        finally:
-                            # Acknowledge the message
-                            await redis_conn.xack(self.stream_in, self.group_name, message_id)
-
-            except Exception as e:
-                logger.error(f"Stream error: {e}")
-                await asyncio.sleep(1)
-
-    async def start(self) -> None:
-        """Start Le Portail service and its main processing loop.
-
-        Registers SIGTERM/SIGINT handlers via GracefulShutdown so the process
-        exits cleanly when sent a termination signal.
-        """
-        shutdown = GracefulShutdown()
-        shutdown.install_signal_handlers()
-        redis_conn = await self.client.get_connection()
+        # Log to Redis stream
         await redis_conn.xadd("relais:logs", {
             "level": "INFO",
             "brick": "portail",
-            "message": "Portail started"
+            "correlation_id": envelope.correlation_id,
+            "sender_id": envelope.sender_id,
+            "message": f"Forwarded {envelope.correlation_id} to sentinelle",
+            "content_preview": envelope.content[:60] if envelope.content else "",
         })
-        reload_listener_task = asyncio.create_task(
-            self._config_reload_listener(redis_conn)
-        )
-        watcher_task = self._start_file_watcher()
-        try:
-            await self._process_stream(redis_conn, shutdown=shutdown)
-        except asyncio.CancelledError:
-            logger.info("Portail shutting down...")
-        finally:
-            reload_listener_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await reload_listener_task
-            if watcher_task is not None:
-                watcher_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await watcher_task
-            await self.client.close()
-            logger.info("Portail stopped gracefully")
+
+        return True
 
 
 if __name__ == "__main__":
@@ -509,6 +410,7 @@ if __name__ == "__main__":
     initialize_user_dir()
     portail = Portail()
     try:
-        asyncio.run(portail.start())
+        import asyncio as _asyncio
+        _asyncio.run(portail.start())
     except KeyboardInterrupt:
         pass

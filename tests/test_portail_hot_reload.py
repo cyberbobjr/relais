@@ -90,6 +90,8 @@ def _make_portail_with_yaml(yaml_content: str, tmp_path: Path):
     with patch.object(Portail, "__init__", lambda self: None):
         portail = Portail.__new__(Portail)
         portail.client = MagicMock()
+        portail._brick_name = "portail"
+        portail._logger = logging.getLogger("portail")
         portail.stream_in = "relais:messages:incoming"
         portail.stream_out = "relais:security"
         portail.group_name = "portail_group"

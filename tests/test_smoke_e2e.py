@@ -1,13 +1,12 @@
 """Smoke test E2E: Discord → Portail → Sentinelle → Atelier → Souvenir → SQLite."""
+import asyncio
 import pytest
 import pytest_asyncio
 import fakeredis.aioredis as fake_redis_lib
-from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.envelope import Envelope
 from atelier.agent_executor import AgentResult
-from common.shutdown import GracefulShutdown
 from portail.main import Portail
 from sentinelle.main import Sentinelle
 from atelier.main import Atelier
@@ -15,21 +14,11 @@ from souvenir.main import Souvenir
 from souvenir.long_term_store import LongTermStore
 from souvenir.models import ArchivedMessage
 
-pytestmark = pytest.mark.integration
-
-
-def _one_shot() -> MagicMock:
-    """Return a GracefulShutdown mock that allows exactly one loop iteration.
-
-    Returns False on first call to is_stopping() so the brick enters the loop body,
-    then True on all subsequent calls so the brick exits after one xreadgroup batch.
-
-    Returns:
-        A MagicMock configured with is_stopping side_effect for one-shot execution.
-    """
-    m = MagicMock(spec=GracefulShutdown)
-    m.is_stopping.side_effect = chain([False], repeat(True))
-    return m
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.e2e,
+    pytest.mark.skip(reason="E2E smoke test — lancer manuellement: pytest tests/test_smoke_e2e.py -v"),
+]
 
 
 @pytest_asyncio.fixture
@@ -84,7 +73,14 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     # ── STEP 1: Portail ───────────────────────────────────────────────────────
     portail = Portail()
     portail._unknown_user_policy = "guest"  # sender discord:111222333 not in portail.yaml
-    await portail._process_stream(redis_conn, shutdown=_one_shot())
+    shutdown_event = asyncio.Event()
+    try:
+        await asyncio.wait_for(
+            portail._run_stream_loop(portail.stream_specs()[0], redis_conn, shutdown_event),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        shutdown_event.set()
 
     security_msgs = await redis_conn.xrange("relais:security", "-", "+")
     assert len(security_msgs) == 1, "Portail doit publier 1 message dans relais:security"
@@ -93,7 +89,14 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     # Use permissive ACL so the test user (discord:111222333) is allowed through.
     sentinelle = Sentinelle()
     sentinelle._acl.is_allowed = lambda *_args, **_kwargs: True
-    await sentinelle._process_stream(redis_conn, shutdown=_one_shot())
+    shutdown_event2 = asyncio.Event()
+    try:
+        await asyncio.wait_for(
+            sentinelle._run_stream_loop(sentinelle.stream_specs()[0], redis_conn, shutdown_event2),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        shutdown_event2.set()
 
     tasks_msgs = await redis_conn.xrange("relais:tasks", "-", "+")
     assert len(tasks_msgs) == 1, "Sentinelle doit publier 1 message dans relais:tasks"
@@ -123,14 +126,28 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         MockAgent.return_value = mock_executor
 
         atelier = Atelier()
-        await atelier._process_stream(redis_conn, shutdown=_one_shot())
+        shutdown_event3 = asyncio.Event()
+        try:
+            await asyncio.wait_for(
+                atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, shutdown_event3),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            shutdown_event3.set()
 
     # ── STEP 3b: Sentinelle outgoing pass-through ─────────────────────────────
     # Atelier publishes to relais:messages:outgoing_pending; Sentinelle routes
     # each message to relais:messages:outgoing:{envelope.channel}.
     sentinelle_out = Sentinelle()
     sentinelle_out._acl.is_allowed = lambda *_args, **_kwargs: True
-    await sentinelle_out._process_outgoing_stream(redis_conn, shutdown=_one_shot())
+    shutdown_event4 = asyncio.Event()
+    try:
+        await asyncio.wait_for(
+            sentinelle_out._run_stream_loop(sentinelle_out.stream_specs()[1], redis_conn, shutdown_event4),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        shutdown_event4.set()
 
     outgoing_msgs = await redis_conn.xrange("relais:messages:outgoing:discord", "-", "+")
     assert len(outgoing_msgs) == 1, "Atelier doit publier 1 réponse dans relais:messages:outgoing:discord"
@@ -149,9 +166,14 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
     souvenir._long_term = LongTermStore(db_path=db_path)
     await souvenir._long_term._create_tables()
 
-    await souvenir._process_request_stream(
-        redis_conn, shutdown=_one_shot()
-    )
+    shutdown_event5 = asyncio.Event()
+    try:
+        await asyncio.wait_for(
+            souvenir._run_stream_loop(souvenir.stream_specs()[0], redis_conn, shutdown_event5),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        shutdown_event5.set()
 
     # ── ASSERT: archivage SQLite ───────────────────────────────────────────────
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker

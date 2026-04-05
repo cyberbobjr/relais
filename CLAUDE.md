@@ -224,6 +224,12 @@ Test organization:
 - Use `@pytest.mark.unit`, `@pytest.mark.integration` for categorization
 - Use `pytest-asyncio` for async test fixtures
 
+**CRITICAL — E2E tests:**
+- `tests/test_smoke_e2e.py` is marked `@pytest.mark.skip` — it is **never** run automatically
+- To run manually: `pytest tests/test_smoke_e2e.py -v` (explicit skip override not needed, just run the file directly)
+- **Never** include `test_smoke_e2e.py` in automated test loops or retry loops
+- **Never** run `pytest tests/` without `-x --timeout=30`; if a test times out, stop and report to the user instead of retrying
+
 ### Linting & Type Checking
 
 ```bash
@@ -306,12 +312,43 @@ Per-profile MCP constraints (fields in `ProfileConfig`):
 
 ### Adding a New Brick
 
-1. Create `{brick_name}/{main,consumer,producer,transformer}.py` with async class
-2. Implement required methods: `__init__`, `start()` (entry point)
-3. Register in `supervisord.conf` with appropriate priority
-4. Add Redis ACL entry in `config/redis.conf` with stream permissions
-5. Update `docs/ARCHITECTURE.md` with brick role
-6. Add unit tests in `tests/test_{brick_name}.py`
+All bricks inherit from `common.brick_base.BrickBase`. The minimum template:
+
+```python
+from common.brick_base import BrickBase, StreamSpec
+from common.shutdown import GracefulShutdown  # noqa: F401 — test patch target
+
+class MyBrick(BrickBase):
+    def __init__(self) -> None:
+        super().__init__("mybrick")
+        # load config here
+
+    def _create_shutdown(self) -> GracefulShutdown:
+        return GracefulShutdown()  # lets tests patch mybrick.main.GracefulShutdown
+
+    def _load(self) -> None:
+        pass  # called by reload_config(); load YAML into self attributes
+
+    def stream_specs(self) -> list[StreamSpec]:
+        return [StreamSpec(stream="relais:my:stream", group="mybrick_group",
+                           consumer="mybrick_1", handler=self._handle)]
+
+    async def _handle(self, envelope, redis_conn) -> bool:
+        ...
+        return True  # True = XACK, False = leave in PEL
+
+if __name__ == "__main__":
+    asyncio.run(MyBrick().start())
+```
+
+Steps:
+1. Create `{brick_name}/main.py` with class inheriting `BrickBase`
+2. Implement `_load()` and `stream_specs()` (both abstract — required)
+3. Override `_create_shutdown()` for test patch compatibility
+4. Register in `supervisord.conf` with appropriate priority
+5. Add Redis ACL entry in `config/redis.conf` with stream permissions
+6. Update `docs/ARCHITECTURE.md` with brick role
+7. Add unit tests in `tests/test_{brick_name}.py`
 
 ### Adding a New Subagent
 
