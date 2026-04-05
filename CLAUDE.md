@@ -19,14 +19,14 @@ The main pipeline flows through these bricks in order:
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
    - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
-   - **Profile stamping**: each adapter stamps `envelope.metadata["channel_profile"]` from `ChannelConfig.profile` (channels.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
+   - **Profile stamping**: each adapter stamps `context["aiguilleur"]["channel_profile"]` from `ChannelConfig.profile` (channels.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
 
 2. **Portail** (`portail/`) - Consumer enriching message context
    - Consumes: `relais:messages:incoming`
    - Validates Envelope format, resolves user from `UserRegistry` (portail.yaml), applies reply_policy (vacation/in_meeting)
-   - Stamps contextual metadata: `user_id` (YAML key, e.g. `"usr_admin"` — stable cross-channel), `user_record` (full dict), `llm_profile` (top-level, from `channel_profile` or `"default"`)
+   - Stamps into `context["portail"]`: `user_id` (YAML key, e.g. `"usr_admin"` — stable cross-channel), `user_record` (full dict), `llm_profile` (from `channel_profile` or `"default"`)
    - Produces: `relais:security`
 
 3. **Sentinelle** (`sentinelle/`) - Bidirectional security checkpoint
@@ -42,8 +42,8 @@ The main pipeline flows through these bricks in order:
    - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by `McpSessionManager`
    - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
-   - **User context**: reads `user_role` and `display_name` from `envelope.metadata` (stamped upstream by Portail) to select role-based prompt layer
-   - **LLM profile resolution**: reads `envelope.metadata.get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
+   - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
+   - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
    - **Subagent registry**: YAML files in `config/atelier/subagents/*.yaml` loaded by `SubagentRegistry.load()` from the config cascade (user > system > project); user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `relais-config` (configuration CRUD); tool tokens support `mcp:<glob>` (MCP pool filter), `inherit` (all request_tools), or `<static_name>` (ToolRegistry lookup); hot-reload swaps the registry atomically when the `config/atelier/subagents/` directory changes
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
 
@@ -68,7 +68,9 @@ The main pipeline flows through these bricks in order:
 ### Configuration & Utilities
 
 - **common/** - Shared utilities
-  - `envelope.py`: Message wrapper (content, sender_id, channel, session_id, correlation_id, metadata, traces)
+  - `envelope.py`: Message wrapper with header (content, sender_id, channel, session_id, correlation_id, timestamp, action, traces) + namespaced context
+  - `envelope_actions.py`: Canonical ACTION_* constants for first-class action field
+  - `contexts.py`: Namespace constants (CTX_*) and TypedDicts for per-brick contexts
   - `redis_client.py`: Async Redis factory with per-brick ACL (password per service)
   - `config_loader.py`: YAML config cascade (user > system > project)
   - `user_registry.py`: UserRegistry and UserRecord for user resolution from portail.yaml
@@ -108,18 +110,29 @@ All messages use a standardized `Envelope` dataclass:
 @dataclass
 class Envelope:
     content: str
-    sender_id: str  # "discord:{user_id}", "telegram:{chat_id}"
+    sender_id: str       # "discord:{user_id}", "telegram:{chat_id}"
     channel: str
     session_id: str
     correlation_id: str  # UUID for request tracking
-    timestamp: float  # epoch seconds
-    metadata: dict  # Dynamic, includes reply_to, traces, session info
+    timestamp: float     # epoch seconds
+    action: str          # self-describing intent token (see common/envelope_actions.py)
+    traces: list[dict]   # ordered pipeline step records: [{brick, action, timestamp}]
+    context: dict        # namespaced per-brick sub-dicts (see common/contexts.py)
     media_refs: list[MediaRef]
 ```
 
+Each brick writes into its own `context` namespace and must not mutate other namespaces:
+- `context["aiguilleur"]` — `channel_profile`, `channel_prompt_path`, `reply_to`, `content_type`
+- `context["portail"]` — `user_id`, `user_record`, `llm_profile`, `session_start`
+- `context["sentinelle"]` — `acl_passed`, `acl_role`, `outgoing_checked`
+- `context["atelier"]` — `streamed`, `user_message`, `progress_event`, `progress_detail`
+- `context["souvenir_request"]` — request parameters for memory actions (`session_id`, `user_id`, etc.)
+
+Namespace constants are in `common/contexts.py` (`CTX_AIGUILLEUR`, `CTX_PORTAIL`, …). Use `ensure_ctx(envelope, key)` to get-or-create a namespace sub-dict safely.
+
 Bricks use:
 - `Envelope.from_json()` to deserialize from Redis
-- `Envelope.from_parent()` or `.create_response_to()` to derive child envelopes
+- `Envelope.from_parent()` to derive child envelopes (deep-copies `traces` and `context`, clears `action`)
 - `Envelope.add_trace(brick, action)` to record pipeline progression
 - `Envelope.to_json()` to serialize for Redis
 

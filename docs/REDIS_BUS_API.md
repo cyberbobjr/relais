@@ -32,11 +32,23 @@ Every pipeline stream message wraps its content in an **Envelope**.
   "session_id": "sess-abc",
   "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
   "timestamp": 1711234567.890,
-  "metadata": {
-    "reply_to": "999888777",
-    "traces": [
-      {"brick": "portail", "action": "validated", "timestamp": 1711234567.900}
-    ]
+  "action": "message_validated",
+  "traces": [
+    {"brick": "portail", "action": "validated", "timestamp": 1711234567.900}
+  ],
+  "context": {
+    "portail": {
+      "user_id": "usr_admin",
+      "user_record": {"user_id": "usr_admin", "display_name": "Admin"},
+      "llm_profile": "default",
+      "session_start": 1711234567.890
+    },
+    "aiguilleur": {
+      "channel_profile": "default",
+      "channel_prompt_path": "channels/discord_default.md",
+      "content_type": "text",
+      "reply_to": "999888777"
+    }
   },
   "media_refs": []
 }
@@ -50,7 +62,9 @@ Every pipeline stream message wraps its content in an **Envelope**.
 | `session_id` | `string` | Stable session identifier (used by Souvenir for context lookup) |
 | `correlation_id` | `string` | UUID, propagated end-to-end for tracing |
 | `timestamp` | `float` | Unix epoch (seconds) |
-| `metadata` | `object` | Extensible map; channel-specific keys documented per-stream below |
+| `action` | `string` | Self-describing action token (e.g. `message_incoming`, `message_validated`, `message_task`) from `common/envelope_actions.py` |
+| `traces` | `array` | Pipeline trace list (each entry: `{brick: string, action: string, timestamp: float}`) |
+| `context` | `object` | Namespaced context dictionary. Each brick writes only to `context[CTX_SELF]` but may read any namespace. Namespace constants defined in `common/contexts.py` |
 | `media_refs` | `array` | List of `MediaRef` objects (see below) |
 
 ### MediaRef schema
@@ -80,19 +94,14 @@ Carries raw inbound messages from external channel adapters before any validatio
 XADD relais:messages:incoming * payload <Envelope JSON>
 ```
 
-**Metadata keys set by Aiguilleur (all channel adapters)**:
+**Context keys set by Aiguilleur (in `context.aiguilleur`)**:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `channel_profile` | `string` (optional) | LLM profile name, resolved in order: `channels.yaml:profile` → `config.yaml:llm.default_profile` → `"default"`. Stamped by the Aiguilleur adapter at envelope creation time. Read by Portail to derive `llm_profile`. |
 | `channel_prompt_path` | `string` \| `null` | Relative path (relative to `prompts/`) to the channel formatting overlay, taken from `channels.yaml:channels[*].prompt_path`. `null` when not configured — no channel overlay is loaded by Atelier. Stamped by the adapter so Atelier can load the prompt layer explicitly. |
-
-**Metadata keys set by Aiguilleur (Discord only)**:
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `content_type` | `string` | Always `"text"` for plain messages |
-| `reply_to` | `string` | Discord channel ID as string (target for response routing) |
+| `content_type` | `string` | Always `"text"` for plain messages (Discord only) |
+| `reply_to` | `string` | Discord channel ID as string (target for response routing) (Discord only) |
 
 ---
 
@@ -101,19 +110,19 @@ XADD relais:messages:incoming * payload <Envelope JSON>
 **Direction**: Portail → Sentinelle
 **Consumer group**: `sentinelle_group`
 
-Carries validated and enriched envelopes pending ACL and content-security checks. Portail resolves user information via UserRegistry and stamps contextual metadata.
+Carries validated and enriched envelopes pending ACL and content-security checks. Portail resolves user information via UserRegistry and stamps `context["portail"]`.
 
 ```
 XADD relais:security * payload <Envelope JSON>
 ```
 
-**Additional metadata added by Portail**:
+**Context keys added by Portail (in `context.portail`)**:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `user_id` | `string` | Stable cross-channel user identifier, equal to the YAML key in portail.yaml (e.g. `"usr_admin"`). `"guest"` for unknown users under guest policy. Use this to resume conversations across channels. |
 | `user_record` | `dict` | Serialized `UserRecord` with fields: `user_id`, `display_name`, `role`, `blocked`, `actions`, `skills_dirs`, `allowed_mcp_tools`, `prompt_path`, `role_prompt_path`. `prompt_path` = per-user overlay path (user entry only, no role fallback). `role_prompt_path` = role-level overlay path (role entry only). Both are independent and both can be `null`. Does **not** contain `llm_profile`. |
-| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (Aiguilleur) → `"default"`. Stamped as top-level metadata by Portail. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
+| `llm_profile` | `string` | Resolved LLM profile name: `channel_profile` (Aiguilleur) → `"default"`. Used by Atelier to load the appropriate `ProfileConfig` from `profiles.yaml`. |
 | `session_start` | `float` (optional) | Epoch timestamp if this is a new session |
 
 ---
@@ -129,7 +138,7 @@ Carries security-cleared envelopes ready for LLM processing.
 XADD relais:tasks * payload <Envelope JSON>
 ```
 
-No additional metadata is added by Sentinelle beyond what Portail set.
+No additional context keys are added by Sentinelle beyond what Portail set.
 
 ---
 
@@ -147,8 +156,8 @@ reaching this stream.
 XADD relais:commands * payload <Envelope JSON>
 ```
 
-The envelope content is the raw slash command (e.g. `/clear`).  All metadata
-stamped by Portail (user_record, llm_profile, …) is preserved.
+The envelope content is the raw slash command (e.g. `/clear`).  All context
+stamped by Portail (`context["portail"]`: user_record, llm_profile, …) is preserved.
 
 **XACK contract**: Commandant ACKs every message it dequeues, regardless of whether a
 handler exists for the command name.  Post-ACL unknown-command filtering at this layer
@@ -189,13 +198,15 @@ The destination channel is determined by the `channel` field inside the Envelope
 XADD relais:messages:outgoing_pending * payload <Envelope JSON>
 ```
 
-**Metadata added by Atelier**:
+**Context keys added by Atelier (in `context.atelier`)**:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `user_message` | `string` | Original user message content (copied from incoming envelope) |
 | `messages_raw` | `array` | Full serialized LangChain message list for the turn (via `atelier.message_serializer.serialize_messages()`). Read by Souvenir to archive the complete turn history. |
-| `traces` | `array` | Pipeline trace list appended with `{"brick": "atelier", "action": "Generated via {model}"}` |
+
+**Traces updated by Atelier**:
+- The `traces` array is appended with entry: `{"brick": "atelier", "action": "Generated via {model}", "timestamp": ...}`
 
 ---
 
@@ -211,11 +222,8 @@ Carries outgoing-validated response envelopes for delivery to the user. Sentinel
 XADD relais:messages:outgoing:discord * payload <Envelope JSON>
 ```
 
-**Metadata added by Sentinelle**:
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `traces` | `array` | Pipeline trace list appended with `{"brick": "sentinelle", "action": "outgoing pass-through"}` |
+**Traces updated by Sentinelle**:
+- The `traces` array is appended with entry: `{"brick": "sentinelle", "action": "outgoing pass-through", "timestamp": ...}`
 
 ---
 
@@ -375,9 +383,9 @@ PUBLISH relais:streaming:start:telegram <Envelope JSON>
 **Payload**: Full **Envelope JSON** (same schema as all pipeline streams).
 
 > **Important**: The payload MUST be a complete JSON-serialized Envelope, not a bare UUID or correlation_id string.
-> The subscriber performs `json.loads(payload)` and reconstructs the Envelope to extract `correlation_id` and `metadata.reply_to`.
+> The subscriber performs `json.loads(payload)` and reconstructs the Envelope to extract `correlation_id` and `context.aiguilleur.reply_to`.
 
-**Why the full Envelope?** The subscriber needs both `correlation_id` (to identify the stream key) and `metadata.reply_to` (to find the target channel).
+**Why the full Envelope?** The subscriber needs both `correlation_id` (to identify the stream key) and `context.aiguilleur.reply_to` (to find the target channel).
 
 ---
 
