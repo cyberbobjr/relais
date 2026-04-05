@@ -11,13 +11,17 @@ PID_PATH="$REPO_ROOT/.relais/supervisord.pid"
 usage() {
     cat <<'EOF'
 Usage:
-  ./supervisor.sh start all
+  ./supervisor.sh [--verbose] start all
+  ./supervisor.sh [--verbose] restart all
   ./supervisor.sh stop all
-  ./supervisor.sh restart all
   ./supervisor.sh reload all
   ./supervisor.sh status
   ./supervisor.sh clear
   ./supervisor.sh force-kill
+
+Options:
+  --verbose   Après démarrage, suit les logs de toutes les briques en temps réel.
+              Ctrl+C détache les logs sans arrêter supervisord.
 
 Notes:
   - start all démarre supervisord si nécessaire puis lance tous les programmes.
@@ -287,8 +291,30 @@ force_kill_launchers() {
     fi
 }
 
-ACTION="${1:-}"
-TARGET="${2:-}"
+VERBOSE=0
+POSITIONAL=()
+for arg in "$@"; do
+    if [[ "$arg" == "--verbose" ]]; then
+        VERBOSE=1
+    else
+        POSITIONAL+=("$arg")
+    fi
+done
+
+ACTION="${POSITIONAL[0]:-}"
+TARGET="${POSITIONAL[1]:-}"
+
+tail_logs() {
+    local logs_dir="$REPO_ROOT/.relais/logs"
+    echo "Mode verbose — suivi des logs (Ctrl+C pour détacher)..."
+    sleep 0.5
+    # shellcheck disable=SC2012
+    if ls "$logs_dir"/*.log >/dev/null 2>&1; then
+        tail -f "$logs_dir"/*.log
+    else
+        echo "Aucun fichier .log trouvé dans $logs_dir." >&2
+    fi
+}
 
 require_command supervisord
 require_command supervisorctl
@@ -301,6 +327,7 @@ case "$ACTION" in
         fi
         ensure_supervisord_running
         run_supervisorctl start all
+        [[ "$VERBOSE" == 1 ]] && tail_logs
         ;;
     stop)
         if [[ "$TARGET" != "all" ]]; then
@@ -337,6 +364,7 @@ case "$ACTION" in
         supervisord -c "$CONFIG_PATH"
         wait_for_supervisord
         run_supervisorctl start all
+        [[ "$VERBOSE" == 1 ]] && tail_logs
         ;;
     reload)
         if [[ "$TARGET" != "all" ]]; then
