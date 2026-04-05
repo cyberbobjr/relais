@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST
+from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
 from common.text_utils import strip_outer_quotes
 
@@ -65,7 +65,8 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
         envelope: L'enveloppe du message /clear reçu.
         redis_conn: Connexion Redis async active.
     """
-    user_id = envelope.context.get(CTX_PORTAIL, {}).get("user_id", envelope.sender_id)
+    portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+    user_id = portail_ctx.get("user_id", envelope.sender_id)
     clear_env = Envelope(
         content="",
         sender_id=envelope.sender_id,

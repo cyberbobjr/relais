@@ -21,7 +21,7 @@ from deepagents import create_deep_agent
 from common.config_loader import get_relais_home
 from atelier.profile_loader import ProfileConfig
 from atelier.message_serializer import serialize_messages
-from common.contexts import CTX_PORTAIL
+from common.contexts import CTX_PORTAIL, PortailCtx
 from common.envelope import Envelope
 
 logger = logging.getLogger(__name__)
@@ -274,7 +274,8 @@ class AgentExecutor:
             envelope.correlation_id,
             envelope.sender_id,
         )
-        user_id = envelope.context.get(CTX_PORTAIL, {}).get("user_id", envelope.sender_id)
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+        user_id = portail_ctx.get("user_id", envelope.sender_id)
         config = {"configurable": {"thread_id": user_id}}
         try:
             reply = await self._stream(

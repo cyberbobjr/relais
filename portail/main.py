@@ -73,7 +73,7 @@ import yaml
 
 from common.brick_base import BrickBase, StreamSpec
 from common.config_reload import safe_reload
-from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, ensure_ctx
+from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, AiguilleurCtx, PortailCtx, ensure_ctx
 from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_VALIDATED
 from common.redis_client import RedisClient
@@ -263,12 +263,11 @@ class Portail(BrickBase):
         if record is None:
             return
 
+        aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})
         ctx = ensure_ctx(envelope, CTX_PORTAIL)
         ctx["user_record"] = record.to_dict()
         ctx["user_id"] = record.user_id
-        ctx["llm_profile"] = (
-            envelope.context.get(CTX_AIGUILLEUR, {}).get("channel_profile") or "default"
-        )
+        ctx["llm_profile"] = aiguilleur_ctx.get("channel_profile") or "default"
 
     def _apply_guest_stamps(self, envelope: Envelope) -> None:
         """Stamp a synthetic guest ``user_record`` dict into context[CTX_PORTAIL].
@@ -282,12 +281,11 @@ class Portail(BrickBase):
             envelope: The incoming envelope to enrich in place.
         """
         guest_record = self._user_registry.build_guest_record()
+        aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})
         ctx = ensure_ctx(envelope, CTX_PORTAIL)
         ctx["user_record"] = guest_record.to_dict()
         ctx["user_id"] = "guest"
-        ctx["llm_profile"] = (
-            envelope.context.get(CTX_AIGUILLEUR, {}).get("channel_profile") or "default"
-        )
+        ctx["llm_profile"] = aiguilleur_ctx.get("channel_profile") or "default"
 
     async def _update_active_sessions(self, redis_conn: Any, envelope: Envelope) -> None:
         """Track active sessions per user for the Crieur (push notifications).
@@ -315,7 +313,8 @@ class Portail(BrickBase):
             "session_id": envelope.session_id,
         }
 
-        user_record_dict: dict[str, Any] = envelope.context.get(CTX_PORTAIL, {}).get("user_record") or {}
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+        user_record_dict: dict[str, Any] = portail_ctx.get("user_record") or {}
         display_name: str = str(user_record_dict.get("display_name") or "")
         if display_name:
             mapping["display_name"] = display_name

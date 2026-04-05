@@ -85,7 +85,7 @@ import yaml
 from common.brick_base import BrickBase, StreamSpec
 from common.command_utils import KNOWN_COMMANDS, extract_command_name, is_command
 from common.config_reload import safe_reload, watch_and_reload
-from common.contexts import CTX_PORTAIL
+from common.contexts import CTX_PORTAIL, PortailCtx
 from common.envelope import Envelope
 from common.redis_client import RedisClient  # noqa: F401 — kept for test-namespace patching
 from common.user_record import UserRecord
@@ -313,7 +313,7 @@ class Sentinelle(BrickBase):
         Returns:
             Always True (ack_mode="always" — errors are logged and dropped).
         """
-        portail_ctx = envelope.context.get(CTX_PORTAIL, {})
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
         _raw_context = portail_ctx.get("access_context", "dm")
         acl_context: str = _raw_context if _raw_context in {"dm", "group"} else "dm"
         acl_scope: str | None = portail_ctx.get("access_scope")

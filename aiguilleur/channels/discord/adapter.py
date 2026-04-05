@@ -35,7 +35,7 @@ import discord
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_INCOMING, ACTION_MESSAGE_PROGRESS
-from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
+from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER, AiguilleurCtx, AtelierCtx
 from common.config_loader import get_default_llm_profile
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
@@ -338,7 +338,8 @@ class _RelaisDiscordClient(discord.Client):
             if resolution fails.
         """
         try:
-            channel_id = int(envelope.context.get(CTX_AIGUILLEUR, {}).get("reply_to", 0))
+            aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})
+            channel_id = int(aiguilleur_ctx.get("reply_to", 0))
             channel = self.get_channel(channel_id)
             if channel:
                 return channel
@@ -369,7 +370,7 @@ class _RelaisDiscordClient(discord.Client):
                 and ``context[CTX_ATELIER]["progress_detail"]`` carry the event data.
             channel: Discord channel or DM to send the notification to.
         """
-        atelier_ctx = envelope.context.get(CTX_ATELIER, {})
+        atelier_ctx: AtelierCtx = envelope.context.get(CTX_ATELIER, {})
         event = atelier_ctx.get("progress_event", "")
         if not event:
             return

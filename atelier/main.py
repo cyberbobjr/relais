@@ -101,7 +101,14 @@ from pathlib import Path
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
-from common.contexts import CTX_ATELIER, CTX_PORTAIL, CTX_SOUVENIR_REQUEST, ensure_ctx
+from common.contexts import (
+    CTX_ATELIER,
+    CTX_PORTAIL,
+    CTX_SOUVENIR_REQUEST,
+    AtelierCtx,
+    PortailCtx,
+    ensure_ctx,
+)
 from common.envelope_actions import ACTION_MEMORY_ARCHIVE
 from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
@@ -444,7 +451,7 @@ class Atelier(BrickBase):
             )
 
             # 1. Resolve LLM profile — read from CTX_PORTAIL stamped by Portail
-            portail_ctx = envelope.context.get(CTX_PORTAIL, {})
+            portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
             ur: dict = portail_ctx.get("user_record") or {}
             profile_name = portail_ctx.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)
