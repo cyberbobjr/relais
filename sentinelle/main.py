@@ -63,10 +63,14 @@ XACK contract:
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 # Configure logging
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -81,6 +85,7 @@ from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 from common.command_utils import is_command, extract_command_name, KNOWN_COMMANDS
 from common.user_record import UserRecord
+from common.config_reload import safe_reload, watch_and_reload
 from sentinelle.acl import ACLManager
 
 logger = logging.getLogger("sentinelle")
@@ -103,7 +108,137 @@ class Sentinelle:
         self.consumer_name: str = "sentinelle_1"
         self.outgoing_group_name: str = "sentinelle_outgoing_group"
         self.outgoing_consumer_name: str = "sentinelle_outgoing_1"
-        self._acl: ACLManager = ACLManager()
+        # Resolve config path once via ACLManager's own resolver for consistency.
+        _initial_acl = ACLManager()
+        self._config_path: Path | None = _initial_acl._config_path
+        # Config reload lock — guards self._acl
+        self._config_lock: asyncio.Lock = asyncio.Lock()
+        self._acl: ACLManager = _initial_acl
+
+    def _load(self) -> None:
+        """Reload ACL configuration from sentinelle.yaml.
+
+        Reconstructs ``self._acl`` from disk.  Called by ``__init__`` and
+        (indirectly) by ``reload_config()``.
+
+        This is the single authoritative entry point for loading Sentinelle's
+        mutable configuration.  Does not touch Redis or any async resource.
+
+        Raises:
+            FileNotFoundError: If ``self._config_path`` is None or missing.
+            yaml.YAMLError: If the config file cannot be parsed as valid YAML.
+        """
+        if self._config_path is None or not self._config_path.exists():
+            raise FileNotFoundError(
+                f"Sentinelle config file not found: {self._config_path}"
+            )
+        # Pre-validate YAML — ACLManager silently falls back to permissive mode
+        # on parse errors; we want an explicit failure here so safe_reload can
+        # preserve the previous ACL.
+        raw = self._config_path.read_text(encoding="utf-8")
+        yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
+        self._acl = ACLManager(config_path=self._config_path)
+        logger.info("Sentinelle: ACL config loaded from %s", self._config_path)
+
+    def _build_acl_candidate(self) -> ACLManager:
+        """Build a new ACLManager from disk without mutating self.
+
+        Returns:
+            A fresh ACLManager loaded from the current config file.
+
+        Raises:
+            FileNotFoundError: If ``self._config_path`` is None or missing.
+            yaml.YAMLError: If the config file cannot be parsed as valid YAML.
+        """
+        if self._config_path is None or not self._config_path.exists():
+            raise FileNotFoundError(
+                f"Sentinelle config file not found: {self._config_path}"
+            )
+        raw = self._config_path.read_text(encoding="utf-8")
+        yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
+        return ACLManager(config_path=self._config_path)
+
+    def _apply_acl(self, acl: ACLManager) -> None:
+        """Swap in a freshly loaded ACLManager.
+
+        Args:
+            acl: The new ACLManager instance to install.
+        """
+        self._acl = acl
+        logger.info("Sentinelle: ACL config applied")
+
+    async def reload_config(self) -> bool:
+        """Hot-reload sentinelle.yaml without interrupting the processing loops.
+
+        Uses ``safe_reload`` to guarantee that the previous ACL is preserved if
+        the new file is malformed or cannot be parsed.
+
+        Returns:
+            True when the configuration was reloaded successfully.
+            False when the reload failed (previous ACL preserved).
+        """
+        return await safe_reload(
+            self._config_lock,
+            "sentinelle",
+            self._build_acl_candidate,
+            self._apply_acl,
+            checkpoint_paths=[self._config_path] if self._config_path else [],
+        )
+
+    def _config_watch_paths(self) -> list[Path]:
+        """Return the list of config file paths to watch for changes.
+
+        Returns:
+            A list containing the sentinelle.yaml config path.
+        """
+        cfg_path = getattr(self, "_config_path", None)
+        return [cfg_path] if cfg_path is not None else []
+
+    def _start_file_watcher(self) -> "asyncio.Task | None":
+        """Create and return an asyncio.Task that watches config files for changes.
+
+        Returns None when watchfiles is not installed (hot-reload gracefully
+        degrades to Redis Pub/Sub only).
+
+        Returns:
+            An asyncio.Task running watch_and_reload, or None when watchfiles
+            is unavailable.
+        """
+        from common.config_reload import watchfiles as _wf
+        if _wf is None:
+            logger.warning(
+                "Sentinelle: watchfiles not installed — file-based hot-reload disabled. "
+                "Install with: pip install watchfiles"
+            )
+            return None
+        return asyncio.create_task(
+            watch_and_reload(self._config_watch_paths(), self.reload_config, "sentinelle")
+        )
+
+    async def _config_reload_listener(self, redis_conn: Any) -> None:
+        """Subscribe to ``relais:config:reload:sentinelle`` and trigger hot-reloads.
+
+        Runs as a background asyncio task alongside the main processing loops.
+        Only the exact string ``"reload"`` triggers a config reload; all other
+        messages are silently ignored.
+
+        Args:
+            redis_conn: Active async Redis connection (must support pub/sub).
+        """
+        pubsub = redis_conn.pubsub()
+        channel = "relais:config:reload:sentinelle"
+        await pubsub.subscribe(channel)
+        logger.info("Sentinelle: subscribed to %s", channel)
+
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = message.get("data", b"")
+            if isinstance(data, bytes):
+                data = data.decode()
+            if data == "reload":
+                logger.info("Sentinelle: received reload signal — reloading config")
+                await self.reload_config()
 
     async def _reply_inline(self, redis_conn: Any, envelope: Envelope, message: str) -> None:
         """Send a short reply directly to the channel's outgoing stream.
@@ -393,6 +528,10 @@ class Sentinelle:
             "message": "Sentinelle started"
         })
 
+        reload_listener_task = asyncio.create_task(
+            self._config_reload_listener(redis_conn)
+        )
+        watcher_task = self._start_file_watcher()
         try:
             await asyncio.gather(
                 self._process_stream(redis_conn, shutdown=shutdown),
@@ -401,6 +540,13 @@ class Sentinelle:
         except asyncio.CancelledError:
             logger.info("Sentinelle shutting down...")
         finally:
+            reload_listener_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reload_listener_task
+            if watcher_task is not None:
+                watcher_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await watcher_task
             await self.client.close()
             logger.info("Sentinelle stopped gracefully")
 

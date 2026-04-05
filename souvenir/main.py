@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -85,6 +86,82 @@ class Souvenir:
         self._long_term = LongTermStore()
         self._file_store = FileStore()
         self._action_registry = build_registry()
+        # Config reload lock — Souvenir has no config to reload today;
+        # the interface exists for consistency and forward-compatibility.
+        self._config_lock: asyncio.Lock = asyncio.Lock()
+
+    def _load(self) -> None:
+        """Reload Souvenir's configuration from disk.
+
+        No-op for now: Souvenir has no YAML configuration to reload.  The
+        method exists so that the hot-reload contract is consistent across all
+        bricks and can be extended in the future without interface changes.
+
+        Returns:
+            None
+        """
+
+    async def reload_config(self) -> bool:
+        """Hot-reload Souvenir's configuration.
+
+        No-op for now — returns True immediately since there is no configuration
+        to reload.  The method exists for interface consistency with other bricks.
+
+        Returns:
+            True (always — there is nothing to reload, so it always "succeeds").
+        """
+        return True
+
+    def _config_watch_paths(self) -> list[Path]:
+        """Return the list of config file paths to watch for changes.
+
+        Souvenir has no YAML configuration to watch today.  Returns an empty
+        list so that ``_start_file_watcher`` knows not to create a task.
+
+        Returns:
+            An empty list.
+        """
+        return []
+
+    def _start_file_watcher(self) -> asyncio.Task | None:
+        """Create a file watcher task, or return None if there are no paths to watch.
+
+        Returns:
+            None when ``_config_watch_paths()`` is empty (current behaviour).
+            An asyncio.Task when there are paths to watch (future use).
+        """
+        paths = self._config_watch_paths()
+        if not paths:
+            return None
+        from common.config_reload import watch_and_reload
+        return asyncio.create_task(
+            watch_and_reload(paths, self.reload_config, "souvenir")
+        )
+
+    async def _config_reload_listener(self, redis_conn: Any) -> None:
+        """Subscribe to ``relais:config:reload:souvenir`` and trigger hot-reloads.
+
+        Runs as a background asyncio task.  Only the exact string ``"reload"``
+        triggers a config reload (currently a no-op); all other messages are
+        silently ignored.
+
+        Args:
+            redis_conn: Active async Redis connection (must support pub/sub).
+        """
+        pubsub = redis_conn.pubsub()
+        channel = "relais:config:reload:souvenir"
+        await pubsub.subscribe(channel)
+        logger.info("Souvenir: subscribed to %s", channel)
+
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = message.get("data", b"")
+            if isinstance(data, bytes):
+                data = data.decode()
+            if data == "reload":
+                logger.info("Souvenir: received reload signal — reloading config")
+                await self.reload_config()
 
     # ------------------------------------------------------------------
     # Internal consumer loop

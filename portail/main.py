@@ -49,12 +49,15 @@ Processing flow
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 # Configure logging to standard output
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -68,6 +71,7 @@ from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
 from common.user_record import UserRecord
+from common.config_reload import safe_reload, watch_and_reload
 from portail.user_registry import UserRegistry
 
 logger = logging.getLogger("portail")
@@ -91,14 +95,159 @@ class Portail:
         self.stream_out: str = "relais:security"
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
-        self._user_registry: UserRegistry = UserRegistry()
-        self._guest_role: str = self._user_registry.guest_role
-        self._unknown_user_policy: str = self._user_registry.unknown_user_policy
+        # Resolve the portail.yaml config path once — UserRegistry._resolve_path logic
+        # is reused to honour the config cascade consistently.
+        _registry = UserRegistry()
+        self._config_path: Path | None = _registry._config_path
+        # Config reload lock — guards _user_registry, _guest_role, _unknown_user_policy
+        self._config_lock: asyncio.Lock = asyncio.Lock()
+        # Initialise config-dependent state via _load()
+        self._user_registry: UserRegistry = _registry
+        self._guest_role: str = _registry.guest_role
+        self._unknown_user_policy: str = _registry.unknown_user_policy
         logger.info(
             "Portail: unknown_user_policy=%s, guest_role=%s",
             self._unknown_user_policy,
             self._guest_role,
         )
+
+    def _load(self) -> None:
+        """Reload configuration state from portail.yaml.
+
+        Reconstructs ``self._user_registry``, ``self._guest_role``, and
+        ``self._unknown_user_policy`` from disk.  Called by ``__init__`` and
+        by ``reload_config()`` (via ``safe_reload``).
+
+        This method is the single authoritative entry point for loading
+        Portail's mutable configuration.  It never touches Redis or any
+        async resource.
+
+        Raises:
+            Any exception raised by ``UserRegistry.__init__`` (e.g. YAML parse
+            errors) propagates to the caller so ``safe_reload`` can intercept it
+            and preserve the previous configuration.
+        """
+        registry = UserRegistry(config_path=self._config_path)
+        self._user_registry = registry
+        self._guest_role = registry.guest_role
+        self._unknown_user_policy = registry.unknown_user_policy
+        logger.info(
+            "Portail: config loaded — unknown_user_policy=%s, guest_role=%s",
+            self._unknown_user_policy,
+            self._guest_role,
+        )
+
+    def _build_registry_candidate(self) -> UserRegistry:
+        """Build a new UserRegistry from disk without mutating self.
+
+        Pre-validates the YAML before handing off to UserRegistry so that
+        malformed files raise an exception (``safe_reload`` then intercepts
+        the error and preserves the current configuration).
+
+        Returns:
+            A fresh UserRegistry loaded from the current config file.
+
+        Raises:
+            FileNotFoundError: If ``self._config_path`` is None or does not exist.
+            yaml.YAMLError: If the config file cannot be parsed as valid YAML.
+        """
+        if self._config_path is None or not self._config_path.exists():
+            raise FileNotFoundError(
+                f"Portail config file not found: {self._config_path}"
+            )
+        # Validate YAML before constructing the registry — UserRegistry catches
+        # parse errors internally and falls back silently; we want hard failure here.
+        raw = self._config_path.read_text(encoding="utf-8")
+        yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
+        return UserRegistry(config_path=self._config_path)
+
+    def _apply_registry(self, registry: UserRegistry) -> None:
+        """Swap in a freshly loaded UserRegistry and update dependent fields.
+
+        Args:
+            registry: The new UserRegistry instance to install.
+        """
+        self._user_registry = registry
+        self._guest_role = registry.guest_role
+        self._unknown_user_policy = registry.unknown_user_policy
+        logger.info(
+            "Portail: config applied — unknown_user_policy=%s, guest_role=%s",
+            self._unknown_user_policy,
+            self._guest_role,
+        )
+
+    async def reload_config(self) -> bool:
+        """Hot-reload portail.yaml without interrupting the processing loop.
+
+        Uses ``safe_reload`` to guarantee that the previous configuration is
+        preserved if the new file is malformed or cannot be parsed.
+
+        Returns:
+            True when the configuration was reloaded successfully.
+            False when the reload failed (previous config preserved).
+        """
+        return await safe_reload(
+            self._config_lock,
+            "portail",
+            self._build_registry_candidate,
+            self._apply_registry,
+            checkpoint_paths=[self._config_path] if self._config_path else [],
+        )
+
+    def _config_watch_paths(self) -> list[Path]:
+        """Return the list of config file paths to watch for changes.
+
+        Returns:
+            A list containing the portail.yaml config path.
+        """
+        cfg_path = getattr(self, "_config_path", None)
+        return [cfg_path] if cfg_path is not None else []
+
+    def _start_file_watcher(self) -> "asyncio.Task | None":
+        """Create and return an asyncio.Task that watches config files for changes.
+
+        Returns None when watchfiles is not installed (hot-reload gracefully
+        degrades to Redis Pub/Sub only).
+
+        Returns:
+            An asyncio.Task running watch_and_reload, or None when watchfiles
+            is unavailable.
+        """
+        from common.config_reload import watchfiles as _wf
+        if _wf is None:
+            logger.warning(
+                "Portail: watchfiles not installed — file-based hot-reload disabled. "
+                "Install with: pip install watchfiles"
+            )
+            return None
+        return asyncio.create_task(
+            watch_and_reload(self._config_watch_paths(), self.reload_config, "portail")
+        )
+
+    async def _config_reload_listener(self, redis_conn: Any) -> None:
+        """Subscribe to ``relais:config:reload:portail`` and trigger hot-reloads.
+
+        Runs as a background asyncio task alongside ``_process_stream``.
+        Only the exact string ``"reload"`` triggers a config reload; all other
+        messages are silently ignored.
+
+        Args:
+            redis_conn: Active async Redis connection (must support pub/sub).
+        """
+        pubsub = redis_conn.pubsub()
+        channel = "relais:config:reload:portail"
+        await pubsub.subscribe(channel)
+        logger.info("Portail: subscribed to %s", channel)
+
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = message.get("data", b"")
+            if isinstance(data, bytes):
+                data = data.decode()
+            if data == "reload":
+                logger.info("Portail: received reload signal — reloading config")
+                await self.reload_config()
 
     def _enrich_envelope(self, envelope: "Envelope") -> None:
         """Stamp ``user_record`` dict and ``llm_profile`` into envelope.metadata.
@@ -321,11 +470,22 @@ class Portail:
             "brick": "portail",
             "message": "Portail started"
         })
+        reload_listener_task = asyncio.create_task(
+            self._config_reload_listener(redis_conn)
+        )
+        watcher_task = self._start_file_watcher()
         try:
             await self._process_stream(redis_conn, shutdown=shutdown)
         except asyncio.CancelledError:
             logger.info("Portail shutting down...")
         finally:
+            reload_listener_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reload_listener_task
+            if watcher_task is not None:
+                watcher_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await watcher_task
             await self.client.close()
             logger.info("Portail stopped gracefully")
 

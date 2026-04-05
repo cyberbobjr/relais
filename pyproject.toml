@@ -28,6 +28,7 @@ dependencies = [
     "langchain-deepseek>=1.0.1",
     "langgraph-checkpoint-sqlite>=2.0",
     "langsmith>=0.7.23",
+    "watchfiles>=0.21",
 ]
 
 [build-system]

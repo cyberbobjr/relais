@@ -98,6 +98,7 @@ logging.basicConfig(
 from common.redis_client import RedisClient
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown
+from common.config_reload import safe_reload, watch_and_reload
 from atelier.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
@@ -108,7 +109,7 @@ from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
 from atelier.progress_config import load_progress_config
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from common.config_loader import resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
+from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from aiguilleur.channel_config import load_channels_config
 from atelier.tool_policy import ToolPolicy
 from atelier.agents import SubagentRegistry
@@ -162,6 +163,10 @@ class Atelier:
         # Subagent registry — auto-discovers modules in atelier/agents/.
         self._subagent_registry: SubagentRegistry = SubagentRegistry.discover()
 
+        # Config reload lock — guards _profiles, _mcp_servers_default,
+        # _progress_config, and _streaming_capable_channels.
+        self._config_lock: asyncio.Lock = asyncio.Lock()
+
         # Persistent LangGraph checkpointer — owned by the Atelier singleton so
         # it survives across per-message AgentExecutor instances.  Uses a
         # dedicated SQLite file (checkpoints.db) separate from Souvenir's
@@ -171,6 +176,149 @@ class Atelier:
         checkpoints_db = str(resolve_storage_dir() / "checkpoints.db")
         self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoints_db)
         self._checkpointer: AsyncSqliteSaver | None = None
+
+    def _load(self) -> None:
+        """Reload Atelier's runtime configuration from disk.
+
+        Refreshes ``_profiles``, ``_mcp_servers_default``, ``_progress_config``,
+        and ``_streaming_capable_channels``.  Called by ``__init__`` is a no-op
+        pattern here — ``__init__`` loads these directly; ``_load()`` is
+        provided so ``reload_config()`` can call it through ``safe_reload``.
+
+        This method is the single authoritative entry point for loading Atelier's
+        mutable configuration.  Does not touch Redis or any async resource.
+
+        Raises:
+            Any exception raised by the underlying loader functions (e.g.
+            ``FileNotFoundError``, ``yaml.YAMLError``) propagates so that
+            ``safe_reload`` can intercept it and preserve the current state.
+        """
+        new_profiles = load_profiles()
+        new_mcp_servers = load_for_sdk()
+        new_progress = load_progress_config()
+        new_streaming = frozenset(
+            name for name, cfg in load_channels_config().items() if cfg.streaming
+        )
+        self._profiles = new_profiles
+        self._mcp_servers_default = new_mcp_servers
+        self._progress_config = new_progress
+        self._streaming_capable_channels = new_streaming
+        logger.info("Atelier: configuration reloaded from disk")
+
+    def _build_config_candidate(self) -> dict:
+        """Build a new configuration snapshot from disk without mutating self.
+
+        Returns:
+            A dict with keys ``profiles``, ``mcp_servers``, ``progress``,
+            ``streaming_channels``.
+
+        Raises:
+            Any exception from the underlying loaders.
+        """
+        new_profiles = load_profiles()
+        new_mcp_servers = load_for_sdk()
+        new_progress = load_progress_config()
+        new_streaming = frozenset(
+            name for name, cfg in load_channels_config().items() if cfg.streaming
+        )
+        return {
+            "profiles": new_profiles,
+            "mcp_servers": new_mcp_servers,
+            "progress": new_progress,
+            "streaming_channels": new_streaming,
+        }
+
+    def _apply_config(self, cfg: dict) -> None:
+        """Swap in a freshly loaded configuration snapshot.
+
+        Args:
+            cfg: Dict returned by ``_build_config_candidate``.
+        """
+        self._profiles = cfg["profiles"]
+        self._mcp_servers_default = cfg["mcp_servers"]
+        self._progress_config = cfg["progress"]
+        self._streaming_capable_channels = cfg["streaming_channels"]
+        logger.info("Atelier: configuration applied")
+
+    async def reload_config(self) -> bool:
+        """Hot-reload Atelier's YAML configuration without interrupting message processing.
+
+        Uses ``safe_reload`` to guarantee that the previous configuration is
+        preserved if any loader raises.
+
+        Returns:
+            True when the configuration was reloaded successfully.
+            False when the reload failed (previous config preserved).
+        """
+        return await safe_reload(
+            self._config_lock,
+            "atelier",
+            self._build_config_candidate,
+            self._apply_config,
+            checkpoint_paths=self._config_watch_paths(),
+        )
+
+    async def _config_reload_listener(self, redis_conn: Any) -> None:
+        """Subscribe to ``relais:config:reload:atelier`` and trigger hot-reloads.
+
+        Runs as a background asyncio task alongside ``_process_stream``.
+        Only the exact string ``"reload"`` triggers a config reload; all other
+        messages are silently ignored.
+
+        Args:
+            redis_conn: Active async Redis connection (must support pub/sub).
+        """
+        pubsub = redis_conn.pubsub()
+        channel = "relais:config:reload:atelier"
+        await pubsub.subscribe(channel)
+        logger.info("Atelier: subscribed to %s", channel)
+
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = message.get("data", b"")
+            if isinstance(data, bytes):
+                data = data.decode()
+            if data == "reload":
+                logger.info("Atelier: received reload signal — reloading config")
+                await self.reload_config()
+
+    def _config_watch_paths(self) -> list[Path]:
+        """Return the list of config file paths to watch for changes.
+
+        Resolves all four Atelier config files via the config cascade:
+        profiles.yaml, mcp_servers.yaml, atelier.yaml, and channels.yaml.
+
+        Returns:
+            A list of four resolved Path instances.
+        """
+        return [
+            resolve_config_path("atelier/profiles.yaml"),
+            resolve_config_path("atelier/mcp_servers.yaml"),
+            resolve_config_path("atelier.yaml"),
+            resolve_config_path("channels.yaml"),
+        ]
+
+    def _start_file_watcher(self) -> "asyncio.Task | None":
+        """Create and return an asyncio.Task that watches config files for changes.
+
+        Returns None when watchfiles is not installed (hot-reload gracefully
+        degrades to Redis Pub/Sub only).
+
+        Returns:
+            An asyncio.Task running watch_and_reload, or None when watchfiles
+            is unavailable.
+        """
+        from common.config_reload import watchfiles as _wf
+        if _wf is None:
+            logger.warning(
+                "Atelier: watchfiles not installed — file-based hot-reload disabled. "
+                "Install with: pip install watchfiles"
+            )
+            return None
+        return asyncio.create_task(
+            watch_and_reload(self._config_watch_paths(), self.reload_config, "atelier")
+        )
 
     @property
     def _tool_policy(self) -> ToolPolicy:
@@ -450,11 +598,22 @@ class Atelier:
         )
         async with self._checkpointer_cm as checkpointer:
             self._checkpointer = checkpointer
+            reload_listener_task = asyncio.create_task(
+                self._config_reload_listener(redis_conn)
+            )
+            watcher_task = self._start_file_watcher()
             try:
                 await self._process_stream(redis_conn, shutdown=shutdown)
             except asyncio.CancelledError:
                 logger.info("Atelier shutting down...")
             finally:
+                reload_listener_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await reload_listener_task
+                if watcher_task is not None:
+                    watcher_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await watcher_task
                 self._checkpointer = None
                 await self.client.close()
                 logger.info("Atelier stopped gracefully")
