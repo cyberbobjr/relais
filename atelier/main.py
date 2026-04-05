@@ -121,7 +121,7 @@ from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
-from atelier.progress_config import load_progress_config
+from atelier.progress_config import load_progress_config, ProgressConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from aiguilleur.channel_config import load_channels_config
@@ -163,7 +163,7 @@ class Atelier(BrickBase):
         # subsequent safe_reload() checkpoints share the same code path.
         self._profiles: dict = {}
         self._mcp_servers_default: dict = {}
-        self._progress_config: object = None
+        self._progress_config: ProgressConfig | None = None
         self._streaming_capable_channels: frozenset[str] = frozenset()
         self._load()
 
@@ -451,7 +451,7 @@ class Atelier(BrickBase):
             )
 
             # 1. Resolve LLM profile — read from CTX_PORTAIL stamped by Portail
-            portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+            portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore[assignment]
             ur: dict = portail_ctx.get("user_record") or {}
             profile_name = portail_ctx.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)

@@ -462,6 +462,7 @@ class BrickBase(abc.ABC):
             self._config_lock = asyncio.Lock()
         if getattr(self, "client", None) is None:
             self.client = RedisClient(brick_name)
+        assert self.client is not None, "RedisClient initialization failed"
         redis_conn = await self.client.get_connection()
         self._brick_logger = BrickLogger(brick_name, lambda: redis_conn)
 

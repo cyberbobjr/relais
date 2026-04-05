@@ -263,7 +263,7 @@ class Portail(BrickBase):
         if record is None:
             return
 
-        aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})
+        aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {}) # type: ignore
         ctx = ensure_ctx(envelope, CTX_PORTAIL)
         ctx["user_record"] = record.to_dict()
         ctx["user_id"] = record.user_id
@@ -281,7 +281,7 @@ class Portail(BrickBase):
             envelope: The incoming envelope to enrich in place.
         """
         guest_record = self._user_registry.build_guest_record()
-        aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})
+        aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {}) # type: ignore
         ctx = ensure_ctx(envelope, CTX_PORTAIL)
         ctx["user_record"] = guest_record.to_dict()
         ctx["user_id"] = "guest"
@@ -313,7 +313,7 @@ class Portail(BrickBase):
             "session_id": envelope.session_id,
         }
 
-        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {}) # type: ignore
         user_record_dict: dict[str, Any] = portail_ctx.get("user_record") or {}
         display_name: str = str(user_record_dict.get("display_name") or "")
         if display_name:
