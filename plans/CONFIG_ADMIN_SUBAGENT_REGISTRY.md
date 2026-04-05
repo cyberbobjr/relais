@@ -1,6 +1,11 @@
 # Plan — Registre de sous-agents avec auto-discovery
 
-> Remplace le câblage hardcodé du sous-agent config-admin par un système
+> **SUPERSEDED** — Ce plan décrit l'implémentation initiale basée sur des modules Python
+> (`atelier/agents/`).  Cette architecture a été remplacée par le format répertoire
+> (`config/atelier/subagents/<name>/`).  Voir `plans/SUBAGENTS_YAML_MIGRATION.md` pour la
+> conception actuelle.
+
+> ~~Remplace le câblage hardcodé du sous-agent config-admin par un système
 > de plugins sous `atelier/agents/`. Chaque sous-agent est un module Python
 > exposant un protocole minimal. Un registre auto-découvre les modules au
 > démarrage, filtre par `allowed_subagents` dans le user_record, et assemble

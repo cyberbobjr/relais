@@ -4,6 +4,7 @@ Tests validate:
 - mcp:<glob> token resolves against request_tools by fnmatch
 - inherit token yields all request_tools
 - bare <name> token resolves via tool_registry.get()
+- local:<name> token resolves from pack's local_tools dict
 - Mixed tokens work correctly together
 - Unknown static tokens are logged as WARNING and dropped
 - inherit never widens scope beyond request_tools
@@ -56,45 +57,29 @@ def _make_fake_tool_registry(tools: dict | None = None) -> MagicMock:
     return registry
 
 
-def _write_subagent_yaml(directory: Path, name: str, extra: dict | None = None) -> Path:
-    """Write a subagent YAML file to directory.
+def _write_pack(base_dir: Path, name: str, extra: dict | None = None) -> Path:
+    """Create a subagent pack directory with subagent.yaml.
 
     Args:
-        directory: Target directory.
-        name: Subagent name (used as file stem too).
-        extra: Extra YAML fields.
+        base_dir: Parent directory for the pack (``config/atelier/subagents/``).
+        name: Subagent name — both the directory name and the ``name`` field.
+        extra: Extra YAML fields to merge into the spec.
 
     Returns:
-        Path to the written file.
+        Path to the created ``<name>/subagent.yaml`` file.
     """
-    directory.mkdir(parents=True, exist_ok=True)
-    data = {
+    pack_dir = base_dir / name
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    data: dict = {
         "name": name,
         "description": f"Description of {name}",
         "system_prompt": f"You are {name}.",
     }
     if extra:
         data.update(extra)
-    path = directory / f"{name}.yaml"
-    path.write_text(yaml.dump(data))
-    return path
-
-
-def _load_registry(tmp_path: Path, tool_registry: MagicMock, yaml_path: Path):
-    """Load a SubagentRegistry pointing at the given tmp_path.
-
-    Args:
-        tmp_path: Temp directory root.
-        tool_registry: Mock tool registry.
-        yaml_path: Not used directly; base is tmp_path.
-
-    Returns:
-        A loaded SubagentRegistry.
-    """
-    from atelier.subagents import SubagentRegistry
-
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
-        return SubagentRegistry.load(tool_registry)
+    yaml_path = pack_dir / "subagent.yaml"
+    yaml_path.write_text(yaml.dump(data))
+    return yaml_path
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +100,7 @@ def test_resolve_inherit_yields_all_request_tools() -> None:
         tokens=("inherit",),
         request_tools=[tool_a, tool_b],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -137,6 +123,7 @@ def test_resolve_mcp_glob_matches_by_name() -> None:
         tokens=("mcp:filesystem_*",),
         request_tools=[fs_read, fs_write, git_commit],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -158,6 +145,7 @@ def test_resolve_mcp_glob_star_matches_all() -> None:
         tokens=("mcp:*",),
         request_tools=[tool_a, tool_b],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -177,6 +165,7 @@ def test_resolve_mcp_glob_no_match_returns_empty() -> None:
         tokens=("mcp:nonexistent_*",),
         request_tools=[tool_a],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -195,11 +184,56 @@ def test_resolve_bare_name_from_tool_registry() -> None:
         tokens=("read_config_file",),
         request_tools=[],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
     assert static_tool in result
     assert len(result) == 1
+
+
+@pytest.mark.unit
+def test_resolve_local_token_from_local_tools() -> None:
+    """'local:<name>' token resolves from the local_tools dict."""
+    from atelier.subagents import _resolve_tool_tokens
+
+    local_tool = _make_mock_tool("my_search")
+    registry = _make_fake_tool_registry()
+
+    result = _resolve_tool_tokens(
+        tokens=("local:my_search",),
+        request_tools=[],
+        tool_registry=registry,
+        local_tools={"my_search": local_tool},
+        spec_name="test-agent",
+    )
+
+    assert local_tool in result
+    assert len(result) == 1
+
+
+@pytest.mark.unit
+def test_resolve_local_token_unknown_name_logs_warning_and_drops(caplog) -> None:
+    """'local:<name>' with no matching tool logs WARNING and is dropped."""
+    from atelier.subagents import _resolve_tool_tokens
+
+    registry = _make_fake_tool_registry()
+
+    with caplog.at_level(logging.WARNING):
+        result = _resolve_tool_tokens(
+            tokens=("local:nonexistent",),
+            request_tools=[],
+            tool_registry=registry,
+            local_tools={},
+            spec_name="my-agent",
+        )
+
+    assert result == []
+    assert any(
+        "nonexistent" in r.message or "my-agent" in r.message
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    )
 
 
 @pytest.mark.unit
@@ -214,6 +248,7 @@ def test_resolve_unknown_bare_name_logs_warning_and_drops(caplog) -> None:
             tokens=("nonexistent_tool",),
             request_tools=[],
             tool_registry=registry,
+            local_tools={},
             spec_name="my-agent",
         )
 
@@ -227,26 +262,29 @@ def test_resolve_unknown_bare_name_logs_warning_and_drops(caplog) -> None:
 
 @pytest.mark.unit
 def test_resolve_mixed_tokens() -> None:
-    """Mixed mcp:<glob> + inherit + bare_name all resolve correctly."""
+    """Mixed mcp:<glob> + inherit + bare_name + local: all resolve correctly."""
     from atelier.subagents import _resolve_tool_tokens
 
     fs_read = _make_mock_tool("fs_read")
     fs_write = _make_mock_tool("fs_write")
     git_tool = _make_mock_tool("git_log")
     static_tool = _make_mock_tool("my_static")
+    local_tool = _make_mock_tool("local_helper")
 
     registry = _make_fake_tool_registry({"my_static": static_tool})
 
     result = _resolve_tool_tokens(
-        tokens=("mcp:fs_*", "my_static"),
+        tokens=("mcp:fs_*", "my_static", "local:local_helper"),
         request_tools=[fs_read, fs_write, git_tool],
         tool_registry=registry,
+        local_tools={"local_helper": local_tool},
         spec_name="test-agent",
     )
 
     assert fs_read in result
     assert fs_write in result
     assert static_tool in result
+    assert local_tool in result
     assert git_tool not in result
 
 
@@ -265,6 +303,7 @@ def test_resolve_inherit_does_not_widen_beyond_request_tools() -> None:
         tokens=("inherit",),
         request_tools=[allowed_tool],  # only allowed_tool is in scope
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -284,6 +323,7 @@ def test_resolve_deduplicates_tools_from_multiple_tokens() -> None:
         tokens=("mcp:fs_read", "inherit"),  # both would include fs_read
         request_tools=[tool],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -302,6 +342,7 @@ def test_resolve_empty_tokens_returns_empty_list() -> None:
         tokens=(),
         request_tools=[tool],
         tool_registry=registry,
+        local_tools={},
         spec_name="test-agent",
     )
 
@@ -319,11 +360,7 @@ def test_specs_for_user_resolves_mcp_tokens(tmp_path: Path) -> None:
     from atelier.subagents import SubagentRegistry
 
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    _write_subagent_yaml(
-        subagents_dir,
-        "mcp-agent",
-        extra={"tools": ["mcp:git_*"]},
-    )
+    _write_pack(subagents_dir, "mcp-agent", extra={"tool_tokens": ["mcp:git_*"]})
 
     git_commit = _make_mock_tool("git_commit")
     git_log = _make_mock_tool("git_log")
@@ -350,11 +387,7 @@ def test_specs_for_user_resolves_inherit_tokens(tmp_path: Path) -> None:
     from atelier.subagents import SubagentRegistry
 
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    _write_subagent_yaml(
-        subagents_dir,
-        "all-tools-agent",
-        extra={"tools": ["inherit"]},
-    )
+    _write_pack(subagents_dir, "all-tools-agent", extra={"tool_tokens": ["inherit"]})
 
     tool_x = _make_mock_tool("tool_x")
     tool_y = _make_mock_tool("tool_y")
@@ -380,11 +413,7 @@ def test_specs_for_user_resolves_static_name_tokens(tmp_path: Path) -> None:
     from atelier.subagents import SubagentRegistry
 
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    _write_subagent_yaml(
-        subagents_dir,
-        "static-agent",
-        extra={"tools": ["read_config"]},
-    )
+    _write_pack(subagents_dir, "static-agent", extra={"tool_tokens": ["read_config"]})
 
     static_tool = _make_mock_tool("read_config")
     tool_reg = _make_fake_tool_registry({"read_config": static_tool})
@@ -406,7 +435,7 @@ def test_specs_for_user_returns_empty_when_no_allowed(tmp_path: Path) -> None:
     from atelier.subagents import SubagentRegistry
 
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    _write_subagent_yaml(subagents_dir, "some-agent")
+    _write_pack(subagents_dir, "some-agent")
 
     registry = _make_fake_tool_registry()
 
@@ -423,7 +452,7 @@ def test_specs_for_user_default_request_tools_is_empty_list(tmp_path: Path) -> N
     from atelier.subagents import SubagentRegistry
 
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    _write_subagent_yaml(subagents_dir, "no-tools-agent")  # no tools field
+    _write_pack(subagents_dir, "no-tools-agent")  # no tool_tokens field
 
     registry = _make_fake_tool_registry()
 
@@ -434,16 +463,17 @@ def test_specs_for_user_default_request_tools_is_empty_list(tmp_path: Path) -> N
     specs = subagent_reg.specs_for_user({"allowed_subagents": ["*"]})
 
     assert len(specs) == 1
-    assert specs[0]["tools"] == []
+    # tools key is omitted when empty
+    assert specs[0].get("tools", []) == []
 
 
 @pytest.mark.unit
 def test_specs_for_user_result_dict_has_required_keys(tmp_path: Path) -> None:
-    """Each dict returned by specs_for_user has name, description, system_prompt, tools."""
+    """Each dict returned by specs_for_user has name, description, system_prompt."""
     from atelier.subagents import SubagentRegistry
 
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    _write_subagent_yaml(subagents_dir, "full-agent")
+    _write_pack(subagents_dir, "full-agent")
 
     registry = _make_fake_tool_registry()
 
@@ -457,4 +487,41 @@ def test_specs_for_user_result_dict_has_required_keys(tmp_path: Path) -> None:
     assert "name" in spec
     assert "description" in spec
     assert "system_prompt" in spec
-    assert "tools" in spec
+
+
+@pytest.mark.unit
+def test_specs_for_user_omits_tools_key_when_empty(tmp_path: Path) -> None:
+    """specs_for_user omits the 'tools' key entirely when no tools resolved."""
+    from atelier.subagents import SubagentRegistry
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    _write_pack(subagents_dir, "no-tools-agent")  # no tool_tokens
+
+    registry = _make_fake_tool_registry()
+
+    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+        subagent_reg = SubagentRegistry.load(registry)
+
+    specs = subagent_reg.specs_for_user({"allowed_subagents": ["*"]})
+
+    assert len(specs) == 1
+    assert "tools" not in specs[0]
+
+
+@pytest.mark.unit
+def test_specs_for_user_omits_skills_key_when_empty(tmp_path: Path) -> None:
+    """specs_for_user omits the 'skills' key entirely when no skills resolved."""
+    from atelier.subagents import SubagentRegistry
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    _write_pack(subagents_dir, "no-skills-agent")  # no skill_tokens
+
+    registry = _make_fake_tool_registry()
+
+    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+        subagent_reg = SubagentRegistry.load(registry)
+
+    specs = subagent_reg.specs_for_user({"allowed_subagents": ["*"]})
+
+    assert len(specs) == 1
+    assert "skills" not in specs[0]

@@ -177,7 +177,7 @@ class Atelier(BrickBase):
         # Static tool registry — discovers @tool-decorated functions in atelier/tools/.
         self._tool_registry: ToolRegistry = ToolRegistry.discover()
 
-        # Subagent registry — loads specs from config/atelier/subagents/*.yaml cascade.
+        # Subagent registry — loads specs from config/atelier/subagents/*/ directories in cascade.
         self._subagent_registry: SubagentRegistry = SubagentRegistry.load(self._tool_registry)
 
         # Persistent LangGraph checkpointer — owned by the Atelier singleton so

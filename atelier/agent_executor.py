@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
 from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
+from deepagents.schema import SubAgent
 from langchain_core.tools import BaseTool
+from langchain_core.runnables import RunnableConfig
 from langchain.chat_models import BaseChatModel, init_chat_model
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -226,6 +228,10 @@ class AgentExecutor:
                 "/memories/": memories_backend,
             },
         )
+        # Convert dict subagent specs to SubAgent objects
+        compiled_subagents: list[SubAgent] = [
+            SubAgent(**spec) for spec in (subagents or [])
+        ]
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
@@ -235,7 +241,7 @@ class AgentExecutor:
             skills=skills or [],
             backend=composite_backend,
             checkpointer=checkpointer or MemorySaver(),
-            subagents=subagents or [],
+            subagents=compiled_subagents,
         )
 
     async def execute(
@@ -274,9 +280,9 @@ class AgentExecutor:
             envelope.correlation_id,
             envelope.sender_id,
         )
-        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {}) # type: ignore
         user_id = portail_ctx.get("user_id", envelope.sender_id)
-        config = {"configurable": {"thread_id": user_id}}
+        config = RunnableConfig(configurable={"thread_id": user_id})
         try:
             reply = await self._stream(
                 {"messages": messages}, stream_callback, progress_callback, config=config
@@ -307,7 +313,7 @@ class AgentExecutor:
         input_data: dict[str, list[dict[str, str]]],
         stream_callback: Callable[[str], Awaitable[None]] | None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
-        config: dict | None = None,
+        config: RunnableConfig | None = None,
     ) -> str:
         """Stream tokens and events from the agent, logging all operations.
 
