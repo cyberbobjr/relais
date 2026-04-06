@@ -413,7 +413,7 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 
 ### 6.2 ✅ Architecture AIGUILLEUR configurable (2026-03-30) DONE
 
-`AiguilleurManager` charge les canaux depuis `channels.yaml` (enabled/disabled, streaming flag, type, restart policy). Adapter discovery par convention : `aiguilleur.channels.{name}.adapter` ou `class_path` override. Restart automatique avec backoff exponentiel.
+`AiguilleurManager` charge les canaux depuis `aiguilleur.yaml` (enabled/disabled, streaming flag, type, restart policy). Adapter discovery par convention : `aiguilleur.channels.{name}.adapter` ou `class_path` override. Restart automatique avec backoff exponentiel.
 
 ---
 

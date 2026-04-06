@@ -112,8 +112,8 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Démarre un adaptateur par canal activé.
 - L'implémentation complète présente dans le dépôt est surtout l'adaptateur Discord.
 - Côté Discord, l'entrée est `relais:messages:incoming` et la sortie `relais:messages:outgoing:discord`.
-- Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (channels.yaml).
-- Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (channels.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
+- Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (aiguilleur.yaml).
+- Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 
 ### Portail
 
@@ -195,9 +195,9 @@ La résolution suit :
 | `config/atelier.yaml` | configuration des progress events |
 | `config/atelier/profiles.yaml` | profils LLM |
 | `config/atelier/mcp_servers.yaml` | serveurs MCP |
-| `config/channels.yaml` | canaux Aiguilleur si fichier présent ; sinon fallback Discord |
+| `config/aiguilleur.yaml` | canaux Aiguilleur si fichier présent ; sinon fallback Discord |
 
-`initialize_user_dir()` ne copie pas `channels.yaml` actuellement.
+`initialize_user_dir()` ne copie pas `aiguilleur.yaml` actuellement.
 
 ### Rechargement à chaud de la configuration
 
@@ -214,7 +214,7 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
 - **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
-- **Aiguilleur**: `config/channels.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
+- **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
 
 **Flux de rechargement** :
 1. Surveillance fichier système via `watchfiles` (inotify sur Linux, FSEvents sur macOS, ReadDirectoryChangesW sur Windows)
@@ -231,7 +231,7 @@ Une fois qu'une configuration valide et non-permissive a été chargée (`_confi
 - Permet audit et rollback manuel si nécessaire
 
 **Hot-reload Aiguilleur — champs souples vs durs** :
-Le rechargement de `channels.yaml` par l'Aiguilleur distingue deux catégories de champs :
+Le rechargement de `aiguilleur.yaml` par l'Aiguilleur distingue deux catégories de champs :
 
 | Catégorie | Champs | Effet |
 |-----------|--------|-------|
@@ -255,7 +255,7 @@ Le mécanisme repose sur un thread daemon `aiguilleur-config-watcher` qui survei
 1. `prompts/soul/SOUL.md` — personnalité de base (toujours chargée)
 2. `role_prompt_path` — chemin relatif configuré dans `portail.yaml` (`roles[*].prompt_path`), estampillé dans `UserRecord.role_prompt_path` par Portail
 3. `user_prompt_path` — chemin relatif configuré dans `portail.yaml` (`users[*].prompt_path`), estampillé dans `UserRecord.prompt_path` par Portail. Indépendant de `role_prompt_path` — aucun fallback entre les deux.
-4. `channel_prompt_path` — chemin relatif configuré dans `channels.yaml` (`channels[*].prompt_path`), estampillé dans `context.aiguilleur["channel_prompt_path"]` par l'Aiguilleur
+4. `channel_prompt_path` — chemin relatif configuré dans `aiguilleur.yaml` (`channels[*].prompt_path`), estampillé dans `context.aiguilleur["channel_prompt_path"]` par l'Aiguilleur
 
 Les fichiers `prompts/policies/*.md` existent dans les templates, mais ils ne sont pas injectés automatiquement dans le prompt principal par le code actuel.
 

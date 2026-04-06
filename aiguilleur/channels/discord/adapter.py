@@ -127,7 +127,7 @@ class _RelaisDiscordClient(discord.Client):
 
     Streaming is intentionally disabled on this adapter: responses are sent as
     a single message once Atelier finishes. Set ``streaming: false`` in
-    ``channels.yaml`` to prevent Atelier from publishing partial chunks.
+    ``aiguilleur.yaml`` to prevent Atelier from publishing partial chunks.
     """
 
     def __init__(

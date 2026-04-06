@@ -14,12 +14,12 @@ The main pipeline flows through these bricks in order:
 
 1. **Aiguilleur** (`aiguilleur/`) - Unified configurable channel relay manager
    - Single process (`aiguilleur/main.py`) manages all channel adapters
-   - `AiguilleurManager` loads channels from `channels.yaml` (enabled/disabled, streaming flag, type, restart policy)
+   - `AiguilleurManager` loads channels from `aiguilleur.yaml` (enabled/disabled, streaming flag, type, restart policy)
    - `NativeAiguilleur` (thread + asyncio.run) for Python adapters (e.g., DiscordAiguilleur)
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
    - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
-   - **Profile stamping**: each adapter stamps `context["aiguilleur"]["channel_profile"]` from `ChannelConfig.profile` (channels.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
+   - **Profile stamping**: each adapter stamps `context["aiguilleur"]["channel_profile"]` from `ChannelConfig.profile` (aiguilleur.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
 
@@ -41,7 +41,7 @@ The main pipeline flows through these bricks in order:
    - Tool access controlled by `ToolPolicy` (`atelier/tool_policy.py`); skill dirs resolved per-role and passed as `skills=` to `create_deep_agent()`
    - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by singleton `McpSessionManager` (started once at brick startup, shared across requests; per-server locks; dead-session eviction)
    - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
-   - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `channels.yaml` per-request
+   - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `aiguilleur.yaml` per-request
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
    - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
@@ -80,7 +80,7 @@ The main pipeline flows through these bricks in order:
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings
-  - `channels.yaml`: Channel definitions (enabled/disabled, streaming flag, type, class_path, max_restarts)
+  - `aiguilleur.yaml`: Channel definitions (enabled/disabled, streaming flag, type, class_path, max_restarts)
   - `litellm.yaml`: Model definitions, router settings, master key
   - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
   - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)
@@ -168,7 +168,7 @@ Priority-based startup (`supervisord.conf`):
 - **Priority 1**: `courier` (Redis server)
 - **Priority 8**: `archiviste` (observer, non-blocking)
 - **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir) + **aiguilleur** (unified channel manager)
-- ~~Priority 20~~: Aiguilleur relays (DEPRECATED — single `aiguilleur/main.py` process now manages all channels via `channels.yaml`)
+- ~~Priority 20~~: Aiguilleur relays (DEPRECATED — single `aiguilleur/main.py` process now manages all channels via `aiguilleur.yaml`)
 
 All processes log to `~/.relais/logs/` via supervisord stdout_logfile.
 

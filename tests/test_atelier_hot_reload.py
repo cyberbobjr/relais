@@ -105,7 +105,7 @@ def test_atelier_load_reloads_progress_config() -> None:
 
 @pytest.mark.unit
 def test_atelier_streaming_flag_read_from_envelope_context() -> None:
-    """Atelier reads streaming capability from context["aiguilleur"]["streaming"], not from channels.yaml."""
+    """Atelier reads streaming capability from context["aiguilleur"]["streaming"], not from aiguilleur.yaml."""
     from common.contexts import CTX_AIGUILLEUR
 
     atelier = _make_atelier_minimal()

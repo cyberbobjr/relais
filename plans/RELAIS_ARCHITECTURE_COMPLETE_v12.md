@@ -280,7 +280,7 @@ mcp_servers:
 
 > **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
 >
-> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s) et `mcp_max_tools` (défaut 20) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `atelier/profiles.yaml`.
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s), `mcp_max_tools` (défaut 20) et `parallel_tool_calls` (défaut `None`) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `atelier/profiles.yaml`.
 
 ---
 
@@ -383,7 +383,7 @@ PUB/SUB (fire & forget — perte acceptable)
 
 ### Architecture — processus unifié
 
-L'Aiguilleur est un **processus unique** (`aiguilleur/main.py`) qui gère tous les adaptateurs de canaux. L'`AiguilleurManager` charge les canaux depuis `channels.yaml` et instancie les adaptateurs au démarrage.
+L'Aiguilleur est un **processus unique** (`aiguilleur/main.py`) qui gère tous les adaptateurs de canaux. L'`AiguilleurManager` charge les canaux depuis `aiguilleur.yaml` et instancie les adaptateurs au démarrage.
 
 - **Adaptateurs natifs** (`type: native`) — thread Python + `asyncio.run`, ex: `DiscordAiguilleur`
 - **Adaptateurs externes** (`type: external`) — `subprocess.Popen`, pour les adaptateurs non-Python
@@ -394,9 +394,9 @@ L'Aiguilleur est un **processus unique** (`aiguilleur/main.py`) qui gère tous l
 
 Le repo contient aujourd'hui un seul adaptateur concret : `aiguilleur/channels/discord/adapter.py`.
 
-Les autres canaux visibles dans `channels.yaml.default` sont des cibles de configuration ou des placeholders de supervision ; ils ne correspondent pas à des adaptateurs présents dans le code à ce stade.
+Les autres canaux visibles dans `aiguilleur.yaml.default` sont des cibles de configuration ou des placeholders de supervision ; ils ne correspondent pas à des adaptateurs présents dans le code à ce stade.
 
-### Configuration des canaux via `channels.yaml`
+### Configuration des canaux via `aiguilleur.yaml`
 
 ```yaml
 channels:
@@ -652,6 +652,8 @@ L'`AgentExecutor` gère un cycle multi-tour via `deepagents.create_deep_agent()`
 4. Dispatch des tool calls ; injection des résultats (`tool_result`)
 5. Rebouclage jusqu'à `end_turn` ou `max_turns`
 
+**Loop guard** : si le même outil nommé retourne `status="error"` 5 fois consécutives, `AgentExecutor.execute()` lève `AgentExecutionError` pour interrompre la requête et éviter les boucles infinies (ex: bug Mistral avec appels parallèles sur `write_todos`). Les outils sans nom (`name == "?"`) sont exclus du comptage pour éviter les faux positifs.
+
 ### Outils skills — ToolPolicy + deepagents natif
 
 `atelier/tool_policy.py` centralise l'accès aux skills et aux outils MCP :
@@ -683,6 +685,7 @@ Les chemins resolus sont passés directement à `create_deep_agent(skills=[...])
 | `fallback_model` | str \| None | Fallback déclaré au niveau du profil |
 | `mcp_timeout` | int | Timeout d'un appel MCP |
 | `mcp_max_tools` | int | Nombre max d'outils MCP exposés |
+| `parallel_tool_calls` | bool \| None | Transmet le paramètre OpenAI-compatible `parallel_tool_calls` au modèle. `False` désactive les appels parallèles (utile pour Mistral qui émet des appels parallèles incorrects). `None` (défaut) : le provider décide. |
 
 > `allowed_tools`, `allowed_mcp`, `guardrails`, `memory_scope` sont retirés de `ProfileConfig` — voir `portail.yaml:roles:` pour le contrôle d'accès par rôle.
 
@@ -955,7 +958,7 @@ La structure réelle parsée par `atelier/profile_loader.py` est volontairement 
 
 Le profil actif pour un message entrant est résolu dans cet ordre strict (le premier trouvé gagne) :
 
-1. **`channels.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.context["aiguilleur"]["channel_profile"]`)
+1. **`aiguilleur.yaml:profile`** — profil défini sur le canal d'origine (stampé par l'Aiguilleur dans `envelope.context["aiguilleur"]["channel_profile"]`)
 2. **`"default"`** — valeur de repli ultime
 
 > La résolution est effectuée par le **Portail** et le résultat est stampé dans `envelope.context["portail"]["llm_profile"]` (clé dans le namespace portail). L'Atelier relit ensuite cette valeur depuis `envelope.context["portail"]["llm_profile"]`.
@@ -1105,7 +1108,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── atelier.yaml.default           ← config comportementale Atelier (progress events)
 │   ├── portail.yaml.default
 │   ├── sentinelle.yaml.default
-│   ├── channels.yaml.default
+│   ├── aiguilleur.yaml.default
 │   ├── redis.conf
 │   ├── HEARTBEAT.md.default
 │   └── atelier/
@@ -1192,7 +1195,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── atelier.yaml
 │   ├── portail.yaml
 │   ├── sentinelle.yaml
-│   ├── channels.yaml
+│   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
 │   └── atelier/
 │       ├── profiles.yaml

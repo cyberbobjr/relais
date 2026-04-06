@@ -48,7 +48,7 @@ CTX_SOUVENIR_REQUEST = "souvenir_request"
 
 class AiguilleurCtx(TypedDict, total=False):
     """Context stamped by Aiguilleur on incoming messages."""
-    channel_profile: str        # LLM profile name from channels.yaml
+    channel_profile: str        # LLM profile name from aiguilleur.yaml
     channel_prompt_path: str    # Path to channel prompt overlay (Layer 4)
     reply_to: str               # Channel/thread ID for reply routing
     content_type: str           # "text" | "image" | …

@@ -1,7 +1,7 @@
 # RELAIS channel configuration.
 #
 # Each entry configures one Aiguilleur adapter.
-# Copy to ~/.relais/config/channels.yaml to override defaults.
+# Copy to ~/.relais/config/aiguilleur.yaml to override defaults.
 #
 # Fields per channel:
 #   enabled     (bool)   — Whether the adapter is started by the Aiguilleur process.

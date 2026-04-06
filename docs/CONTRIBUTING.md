@@ -178,7 +178,7 @@ if __name__ == "__main__":
 
 ## Ajouter un canal Aiguilleur
 
-L’entrée du superviseur de canaux est [aiguilleur/main.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/main.py). Les canaux sont configurés via `config/channels.yaml` puis chargés par `load_channels_config()`.
+L’entrée du superviseur de canaux est [aiguilleur/main.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/main.py). Les canaux sont configurés via `config/aiguilleur.yaml` puis chargés par `load_channels_config()`.
 
 ### Deux modes pris en charge
 
@@ -197,7 +197,7 @@ L’exemple de référence actuel est [aiguilleur/channels/discord/adapter.py](/
 
 ### Pour un canal externe
 
-Déclarer dans `channels.yaml` :
+Déclarer dans `aiguilleur.yaml` :
 
 ```yaml
 channels:
@@ -212,10 +212,10 @@ channels:
 
 ### Configuration
 
-`config/channels.yaml` n’est pas copié automatiquement par `initialize_user_dir()`. Si vous ajoutez un canal, pensez à :
+`config/aiguilleur.yaml` n’est pas copié automatiquement par `initialize_user_dir()`. Si vous ajoutez un canal, pensez à :
 
-- mettre à jour [config/channels.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/channels.yaml.default)
-- documenter la création manuelle du fichier override dans `RELAIS_HOME/config/channels.yaml`
+- mettre à jour [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default)
+- documenter la création manuelle du fichier override dans `RELAIS_HOME/config/aiguilleur.yaml`
 
 ---
 

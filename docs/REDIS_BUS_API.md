@@ -98,8 +98,8 @@ XADD relais:messages:incoming * payload <Envelope JSON>
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `channel_profile` | `string` (optional) | LLM profile name, resolved in order: `channels.yaml:profile` → `config.yaml:llm.default_profile` → `"default"`. Stamped by the Aiguilleur adapter at envelope creation time. Read by Portail to derive `llm_profile`. |
-| `channel_prompt_path` | `string` \| `null` | Relative path (relative to `prompts/`) to the channel formatting overlay, taken from `channels.yaml:channels[*].prompt_path`. `null` when not configured — no channel overlay is loaded by Atelier. Stamped by the adapter so Atelier can load the prompt layer explicitly. |
+| `channel_profile` | `string` (optional) | LLM profile name, resolved in order: `aiguilleur.yaml:profile` → `config.yaml:llm.default_profile` → `"default"`. Stamped by the Aiguilleur adapter at envelope creation time. Read by Portail to derive `llm_profile`. |
+| `channel_prompt_path` | `string` \| `null` | Relative path (relative to `prompts/`) to the channel formatting overlay, taken from `aiguilleur.yaml:channels[*].prompt_path`. `null` when not configured — no channel overlay is loaded by Atelier. Stamped by the adapter so Atelier can load the prompt layer explicitly. |
 | `content_type` | `string` | Always `"text"` for plain messages (Discord only) |
 | `reply_to` | `string` | Discord channel ID as string (target for response routing) (Discord only) |
 

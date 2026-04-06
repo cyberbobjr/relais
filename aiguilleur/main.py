@@ -3,13 +3,13 @@
 Functional role
 ---------------
 Entry point for all external channel integrations (Discord, Telegram, etc.).
-Loads channel definitions from channels.yaml and spawns one adapter per
+Loads channel definitions from aiguilleur.yaml and spawns one adapter per
 enabled channel.  Acts as the ingestion boundary: each adapter translates
 external API events into Envelope messages and pushes them onto the Redis bus.
 
 Technical overview
 ------------------
-``AiguilleurManager`` reads channels.yaml and instantiates either:
+``AiguilleurManager`` reads aiguilleur.yaml and instantiates either:
 
 * ``NativeAiguilleur`` — Python adapters (e.g. DiscordAiguilleur) run in a
   dedicated OS thread via ``asyncio.run``.
@@ -22,14 +22,14 @@ seconds, up to 5 restarts per channel before the adapter is marked as failed.
 Each adapter stamps context keys under ``CTX_AIGUILLEUR`` on every outbound envelope:
 
 * ``envelope.context[CTX_AIGUILLEUR]["channel_profile"]`` — from ``ChannelConfig.profile``
-  (channels.yaml) → ``get_default_llm_profile()`` (config.yaml:
+  (aiguilleur.yaml) → ``get_default_llm_profile()`` (config.yaml:
   llm.default_profile) → ``"default"`` (resolved by Portail).
 * ``envelope.context[CTX_AIGUILLEUR]["channel_prompt_path"]`` — from
-  ``ChannelConfig.prompt_path`` (channels.yaml).  ``None`` when the channel
+  ``ChannelConfig.prompt_path`` (aiguilleur.yaml).  ``None`` when the channel
   has no ``prompt_path`` configured; in that case no channel formatting
   overlay is loaded by Atelier.
 * ``envelope.context[CTX_AIGUILLEUR]["streaming"]`` — ``bool`` from
-  ``ChannelConfig.streaming`` (channels.yaml); read by Atelier to decide
+  ``ChannelConfig.streaming`` (aiguilleur.yaml); read by Atelier to decide
   whether to stream tokens to ``relais:messages:streaming:{channel}:{corr_id}``
   or publish a single outgoing envelope after the full reply is assembled.
 
@@ -44,12 +44,12 @@ Consumed (by the corresponding relay adapter process):
 
 Processing flow
 ---------------
-  (1) Load channels.yaml; skip disabled entries.
+  (1) Load aiguilleur.yaml; skip disabled entries.
   (2) For each enabled channel: instantiate NativeAiguilleur or
       ExternalAiguilleur depending on the adapter type.
   (3) Start all adapters (threads / subprocesses) concurrently.
   (4) Start background config-watcher daemon thread (watchfiles) that
-      monitors channels.yaml for filesystem changes and calls
+      monitors aiguilleur.yaml for filesystem changes and calls
       ``_reload_channel_profiles()`` on every change.
   (5) Monitor adapter health; restart with exponential backoff on crash.
   (6) On SIGTERM / SIGINT: signal the config-watcher thread to stop,
@@ -57,7 +57,7 @@ Processing flow
 
 Hot-reload — soft vs hard fields
 ---------------------------------
-channels.yaml changes are classified into two categories:
+aiguilleur.yaml changes are classified into two categories:
 
 * **Soft fields** (``profile``, ``prompt_path``, ``streaming``): applied
   live without restarting the adapter.  ``profile`` is updated through

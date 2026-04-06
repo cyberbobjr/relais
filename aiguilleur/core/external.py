@@ -24,7 +24,7 @@ class ExternalAiguilleur(BaseAiguilleur):
     The command and args come from the ChannelConfig.  The process
     inherits the current environment (including Redis credentials).
 
-    Example channels.yaml entry::
+    Example aiguilleur.yaml entry::
 
         whatsapp:
           enabled: true

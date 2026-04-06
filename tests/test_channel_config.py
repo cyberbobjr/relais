@@ -158,7 +158,7 @@ channels:
 
 @pytest.mark.unit
 def test_load_channels_config_missing_file_returns_discord_fallback():
-    """When channels.yaml is missing, fall back to discord enabled + streaming."""
+    """When aiguilleur.yaml is missing, fall back to discord enabled + streaming."""
     with patch(
         "aiguilleur.channel_config.resolve_config_path",
         side_effect=FileNotFoundError("not found"),

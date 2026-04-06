@@ -1,7 +1,7 @@
 name: relais-config
 description: >
   Reads and modifies RELAIS YAML configuration files
-  (portail.yaml, channels.yaml, profiles.yaml, sentinelle.yaml,
+  (portail.yaml, aiguilleur.yaml, profiles.yaml, sentinelle.yaml,
   mcp_servers.yaml), prompt overlays (soul, roles, users, channels,
   policies), and agent skills (create, modify, delete SKILL.md).
   Use when the user asks to add/remove/edit a user, role, channel,
@@ -9,7 +9,7 @@ description: >
   when the user asks to display or inspect any configuration.
 delegation_snippet: |
   - **relais-config**: Reads and modifies RELAIS configuration files
-    (portail.yaml, channels.yaml, profiles.yaml, sentinelle.yaml,
+    (portail.yaml, aiguilleur.yaml, profiles.yaml, sentinelle.yaml,
     mcp_servers.yaml), prompt overlays, and agent skills.
     Delegate via task() when the user asks to add, remove, edit,
     or inspect any configuration.
@@ -23,7 +23,7 @@ system_prompt: |
   You can read and modify:
   - User accounts and roles: config/portail.yaml
   - Access control lists: config/sentinelle.yaml
-  - Channel adapters: config/channels.yaml
+  - Channel adapters: config/aiguilleur.yaml
   - LLM profiles: config/atelier/profiles.yaml
   - MCP servers: config/atelier/mcp_servers.yaml
   - Progress events: config/atelier.yaml
@@ -47,8 +47,8 @@ system_prompt: |
   | Add / edit / block a user | config/portail.yaml | portail |
   | Change a user's role | config/portail.yaml | portail |
   | Add / edit a role definition | config/portail.yaml | portail |
-  | Enable / disable a channel | config/channels.yaml | aiguilleur |
-  | Change a channel's LLM profile | config/channels.yaml | aiguilleur |
+  | Enable / disable a channel | config/aiguilleur.yaml | aiguilleur |
+  | Change a channel's LLM profile | config/aiguilleur.yaml | aiguilleur |
   | Create / edit an LLM profile | config/atelier/profiles.yaml | atelier souvenir |
   | Modify ACL rules | config/sentinelle.yaml | sentinelle |
   | Allow / block a group | config/sentinelle.yaml | sentinelle |
@@ -75,7 +75,7 @@ system_prompt: |
   | 1. Soul | prompts/soul/SOUL.md | hardcoded (always loaded) |
   | 2. Role | prompts/roles/{role}.md | portail.yaml → roles[*].prompt_path |
   | 3. User | prompts/users/{file}.md | portail.yaml → users[*].prompt_path |
-  | 4. Channel | prompts/channels/{file}.md | channels.yaml → channels[*].prompt_path |
+  | 4. Channel | prompts/channels/{file}.md | aiguilleur.yaml → channels[*].prompt_path |
 
   Policy prompts (prompts/policies/*.md) are loaded separately by Portail.
 
@@ -304,7 +304,7 @@ system_prompt: |
 
   After each modification, verify:
   - YAML syntax is valid (2-space indent, no tabs)
-  - profile: in channels.yaml exists in profiles.yaml
+  - profile: in aiguilleur.yaml exists in profiles.yaml
   - prompt_path: points to an existing file in prompts/
   - role: in users exists in the roles section
   - usr_system has not been deleted, blocked, or demoted

@@ -135,7 +135,7 @@ PYTHONPATH=. uv run python scripts/reload_config.py --scope all
 
 ## Critères de succès
 
-- [ ] Modifier `channels.yaml` + trigger reload → nouveau canal démarre / canal retiré s'arrête, sans restart Aiguilleur
+- [ ] Modifier `aiguilleur.yaml` + trigger reload → nouveau canal démarre / canal retiré s'arrête, sans restart Aiguilleur
 - [ ] Modifier `portail.yaml` + trigger reload → Portail et Sentinelle utilisent les nouvelles identités/ACL au prochain message
 - [ ] Modifier `atelier/profiles.yaml` + trigger reload → Atelier utilise le nouveau profil au prochain message
 - [ ] Modifier `atelier/mcp_servers.yaml` + trigger reload → Atelier utilise les nouveaux serveurs MCP au prochain message

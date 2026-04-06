@@ -130,9 +130,9 @@ alembic upgrade head
 `initialize_user_dir()` crée `RELAIS_HOME` et y copie seulement certains templates. En particulier :
 
 - copiés : `config/config.yaml`, `config/portail.yaml`, `config/sentinelle.yaml`, `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/HEARTBEAT.md`, les prompts livrés
-- non copié aujourd'hui : `config/channels.yaml`
+- non copié aujourd'hui : `config/aiguilleur.yaml`
 
-Si vous voulez surcharger `channels.yaml`, créez-le vous-même dans `RELAIS_HOME/config/channels.yaml` à partir de [config/channels.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/channels.yaml.default).
+Si vous voulez surcharger `aiguilleur.yaml`, créez-le vous-même dans `RELAIS_HOME/config/aiguilleur.yaml` à partir de [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default).
 
 ### `RELAIS_HOME`
 
@@ -199,9 +199,9 @@ Toutes les briques supportent le rechargement de leur configuration sans redéma
 **Fichiers surveillés par brique:**
 - **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
-- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/channels.yaml`
+- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/aiguilleur.yaml`
 - **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
-- **Aiguilleur**: `config/channels.yaml` (définitions canaux)
+- **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux)
 
 **Cas d'usage:**
 - Modification des ACL (Sentinelle) sans redémarrage
@@ -362,7 +362,7 @@ mcp_servers:
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
 ```
 
-### `config/channels.yaml`
+### `config/aiguilleur.yaml`
 
 `load_channels_config()` charge ce fichier via la cascade de config. S'il est absent, le code retombe sur un fallback minimal Discord.
 

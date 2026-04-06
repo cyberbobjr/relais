@@ -1,4 +1,4 @@
-"""Tests for Aiguilleur hot-reload of the 'profile' field in channels.yaml.
+"""Tests for Aiguilleur hot-reload of the 'profile' field in aiguilleur.yaml.
 
 TDD RED phase — all tests are written before the implementation exists.
 
@@ -339,7 +339,7 @@ def test_watcher_starts_daemon_thread_when_watchfiles_available(tmp_path):
     """_start_config_watcher() starts a daemon thread when watchfiles is importable."""
     import types
 
-    channels_yaml = tmp_path / "channels.yaml"
+    channels_yaml = tmp_path / "aiguilleur.yaml"
     channels_yaml.write_text("channels: {}\n")
 
     # Barrier: watch() blocks until the test releases it, letting us verify the thread exists

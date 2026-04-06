@@ -171,7 +171,7 @@ class AiguilleurManager:
     # ------------------------------------------------------------------
 
     def _reload_channel_profiles(self) -> None:
-        """Reload channels.yaml and update soft fields live without restarting adapters.
+        """Reload aiguilleur.yaml and update soft fields live without restarting adapters.
 
         Only ``profile`` (via ``ProfileRef.update()``) and ``prompt_path`` are
         updated in-place.  Hard fields (``type``, ``class_path``, ``enabled``,
@@ -184,7 +184,7 @@ class AiguilleurManager:
         try:
             new_configs = load_channels_config()
         except Exception as exc:  # noqa: BLE001
-            logger.error("channels.yaml reload failed — keeping previous config: %s", exc)
+            logger.error("aiguilleur.yaml reload failed — keeping previous config: %s", exc)
             return
 
         with self._reload_lock:
@@ -240,13 +240,13 @@ class AiguilleurManager:
             for name in list(self._adapters.keys()):
                 if name not in new_configs:
                     logger.warning(
-                        "Channel '%s' was removed from channels.yaml — "
+                        "Channel '%s' was removed from aiguilleur.yaml — "
                         "restart required to deactivate the running adapter.",
                         name,
                     )
 
     def _start_config_watcher(self) -> None:
-        """Start a background daemon thread that watches channels.yaml for changes.
+        """Start a background daemon thread that watches aiguilleur.yaml for changes.
 
         Uses ``watchfiles`` for efficient filesystem event detection.  If the
         package is not installed, logs a warning and returns without error
@@ -259,15 +259,15 @@ class AiguilleurManager:
             import watchfiles  # noqa: PLC0415
         except ImportError:
             logger.warning(
-                "watchfiles not installed — channels.yaml hot-reload disabled."
+                "watchfiles not installed — aiguilleur.yaml hot-reload disabled."
                 "  Install with: pip install watchfiles"
             )
             return
 
         try:
-            channels_yaml_path = str(resolve_config_path("channels.yaml"))
+            channels_yaml_path = str(resolve_config_path("aiguilleur.yaml"))
         except FileNotFoundError:
-            logger.warning("channels.yaml not found — hot-reload disabled.")
+            logger.warning("aiguilleur.yaml not found — hot-reload disabled.")
             return
 
         shutdown_event = self._shutdown_event
@@ -276,7 +276,7 @@ class AiguilleurManager:
             for _changes in watchfiles.watch(channels_yaml_path, stop_event=shutdown_event):
                 if shutdown_event.is_set():
                     break
-                logger.info("channels.yaml changed — reloading soft config fields")
+                logger.info("aiguilleur.yaml changed — reloading soft config fields")
                 self._reload_channel_profiles()
 
         t = threading.Thread(

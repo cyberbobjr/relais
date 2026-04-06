@@ -15,7 +15,7 @@ import yaml
 
 from common.config_loader import resolve_config_path
 
-_CHANNELS_CONFIG_FILE = "channels.yaml"
+_CHANNELS_CONFIG_FILE = "aiguilleur.yaml"
 
 
 class ProfileRef:
@@ -128,7 +128,7 @@ def _parse_int(value: object, default: int) -> int:
 
 
 def load_channels_config() -> dict[str, ChannelConfig]:
-    """Load channel configurations from channels.yaml.
+    """Load channel configurations from aiguilleur.yaml.
 
     Returns a dict keyed by channel name. Falls back to a minimal
     discord-enabled config when the file is not found.

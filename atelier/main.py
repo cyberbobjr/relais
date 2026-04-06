@@ -106,8 +106,8 @@ raised — which routes the message to the DLQ and ACKs it, preventing indefinit
 PEL poisoning.
 
 Streaming mode is determined by ``context["aiguilleur"]["streaming"]`` (stamped
-by the channel adapter from ``ChannelConfig.streaming`` in channels.yaml) —
-Atelier no longer loads channels.yaml per-request.  For streaming-capable
+by the channel adapter from ``ChannelConfig.streaming`` in aiguilleur.yaml) —
+Atelier no longer loads aiguilleur.yaml per-request.  For streaming-capable
 channels each text chunk is also published via StreamPublisher for real-time
 rendering before the full reply is ready.  Discord receives a final reply only,
 with live progress events (tool_call, tool_result, subagent_start) sent to

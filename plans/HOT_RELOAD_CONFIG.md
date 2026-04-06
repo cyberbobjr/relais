@@ -11,15 +11,15 @@ lorsqu'un fichier YAML de configuration est modifié.
 
 | Brick | Fichiers consommés | Moment du chargement | Objet rechargeable |
 |---|---|---|---|
-| **Aiguilleur** | `channels.yaml` | `AiguilleurManager.run()` avant `start()` | `self._adapters` (dict d'adaptateurs actifs) |
+| **Aiguilleur** | `aiguilleur.yaml` | `AiguilleurManager.run()` avant `start()` | `self._adapters` (dict d'adaptateurs actifs) |
 | **Portail** | `portail.yaml` | `Portail.__init__` → `UserRegistry._load()` | `self._user_registry._sender_index` / `_by_identifier` |
 | **Sentinelle** | `sentinelle.yaml` | `Sentinelle.__init__` → `ACLManager._load()` | `self._acl._groups` / `_access_control` |
-| **Atelier** | `atelier/profiles.yaml`, `mcp_servers.yaml`, `atelier.yaml`, `channels.yaml` | `Atelier.__init__` (4 appels) | `self._profiles`, `self._mcp_servers_default`, `self._progress_config`, `self._streaming_capable_channels` |
+| **Atelier** | `atelier/profiles.yaml`, `mcp_servers.yaml`, `atelier.yaml`, `aiguilleur.yaml` | `Atelier.__init__` (4 appels) | `self._profiles`, `self._mcp_servers_default`, `self._progress_config`, `self._streaming_capable_channels` |
 | **Souvenir** | `souvenir/profiles.yaml` (MemoryExtractor uniquement) | À l'appel, pas au démarrage | Aucune state durée |
 
 **Pattern commun** : chaque brick appelle `resolve_config_path(filename)` → lit le YAML → peuple des structures en mémoire. `_load()` est déjà une fonction séparable, ce qui facilite le rechargement.
 
-**Contrainte Aiguilleur** : `channels.yaml` contrôle quels adaptateurs sont démarrés. Un reload implique potentiellement de démarrer/arrêter des threads d'adaptateurs, pas seulement de swapper un dict → complexité structurellement plus élevée que les autres bricks.
+**Contrainte Aiguilleur** : `aiguilleur.yaml` contrôle quels adaptateurs sont démarrés. Un reload implique potentiellement de démarrer/arrêter des threads d'adaptateurs, pas seulement de swapper un dict → complexité structurellement plus élevée que les autres bricks.
 
 ---
 
@@ -100,7 +100,7 @@ async def _watch_config(self) -> None:
 |---|---|
 | Détection quasi-instantanée (< 1 ms, event-driven) | Nouvelle dépendance (`watchfiles`) |
 | Intégration asyncio native | Chaque brick lance son propre watcher |
-| Utilisé par FastAPI/uvicorn — mature et stable | `channels.yaml` surveillé en double (Aiguilleur + Atelier) |
+| Utilisé par FastAPI/uvicorn — mature et stable | `aiguilleur.yaml` surveillé en double (Aiguilleur + Atelier) |
 | Chaque brick reste autonome | Nécessite des wrappers OS sur certains systèmes de fichiers distants (NFS) |
 
 **Verdict** : Meilleur rapport qualité/simplicité si on accepte une dépendance supplémentaire légère. Recommandé pour Portail, Sentinelle, Atelier, Souvenir.
@@ -112,7 +112,7 @@ async def _watch_config(self) -> None:
 Nouveau process `gardien/` qui surveille tous les fichiers de config avec `watchfiles`. Lorsqu'un fichier change, il publie sur `relais:config:reload:{brick}` (Redis Pub/Sub). Chaque brick souscrit à son canal et appelle `_reload()`.
 
 ```
-channels.yaml modifié
+aiguilleur.yaml modifié
     → Gardien détecte la modification
     → PUBLISH relais:config:reload:aiguilleur
     → PUBLISH relais:config:reload:atelier
@@ -125,7 +125,7 @@ channels.yaml modifié
 WATCHED_FILES = {
     "portail.yaml":          ["portail"],
     "sentinelle.yaml":       ["sentinelle"],
-    "channels.yaml":         ["aiguilleur", "atelier"],
+    "aiguilleur.yaml":         ["aiguilleur", "atelier"],
     "atelier/profiles.yaml": ["atelier"],
     "mcp_servers.yaml":      ["atelier"],
     "atelier.yaml":          ["atelier"],
@@ -155,7 +155,7 @@ async def _config_reload_listener(self, redis_conn):
 | Découplement fort : les bricks ne contiennent pas de code inotify | Si Gardien crash → plus de reload automatique (dégradation gracieuse) |
 | Extensible : le canal Pub/Sub peut être utilisé pour un reload manuel (`/reload portail`) | Saut réseau Redis (~1 ms) |
 | Traçabilité : Gardien peut loguer `relais:events:system` | Complexité initiale plus élevée (nouveau brick complet à écrire et tester) |
-| `channels.yaml` surveillé une seule fois même s'il intéresse deux bricks | Ordering : si Portail n'est pas encore subscribed au démarrage, il rate le premier event |
+| `aiguilleur.yaml` surveillé une seule fois même s'il intéresse deux bricks | Ordering : si Portail n'est pas encore subscribed au démarrage, il rate le premier event |
 
 **Verdict** : Solution la plus propre architecturalement. Alignée avec la philosophie micro-bricks de RELAIS. Recommandée si on vise le long terme et qu'on veut pouvoir déclencher les reloads depuis le slash command `/reload`.
 
@@ -211,9 +211,9 @@ Pas de watcher. L'opérateur (ou un slash command `/reload <brick>`) publie sur 
 
 ---
 
-## 5. Cas particulier : Aiguilleur et `channels.yaml`
+## 5. Cas particulier : Aiguilleur et `aiguilleur.yaml`
 
-L'Aiguilleur ne se contente pas de lire des données — `channels.yaml` détermine quels adaptateurs (threads) sont actifs. Un reload a trois cas possibles :
+L'Aiguilleur ne se contente pas de lire des données — `aiguilleur.yaml` détermine quels adaptateurs (threads) sont actifs. Un reload a trois cas possibles :
 
 1. **Canal `enabled` → `enabled`** : paramètres changés → stop + restart de l'adaptateur
 2. **Canal `disabled` → `enabled`** : créer et démarrer le nouvel adaptateur
@@ -321,7 +321,7 @@ pytest tests/test_portail_hot_reload.py -v
       ConfigWatcher(["atelier/profiles.yaml"], self._reload_profiles),
       ConfigWatcher(["mcp_servers.yaml"], self._reload_mcp_servers),
       ConfigWatcher(["atelier.yaml"], self._reload_progress_config),
-      ConfigWatcher(["channels.yaml"], self._reload_channels),
+      ConfigWatcher(["aiguilleur.yaml"], self._reload_channels),
   ]
   ```
 - [ ] Tests : `tests/test_atelier_hot_reload.py`
@@ -332,7 +332,7 @@ pytest tests/test_portail_hot_reload.py -v
 
 ---
 
-### Étape 4 — Aiguilleur : reload de `channels.yaml` avec reconciliation
+### Étape 4 — Aiguilleur : reload de `aiguilleur.yaml` avec reconciliation
 
 **Contexte** : Cas le plus complexe. Voir section 5 ci-dessus.
 
@@ -347,7 +347,7 @@ pytest tests/test_portail_hot_reload.py -v
 
 **Vérification** : `pytest tests/test_aiguilleur_hot_reload.py -v`
 
-**Exit criteria** : Activer/désactiver un canal dans `channels.yaml` démarre/arrête l'adaptateur sans toucher les autres
+**Exit criteria** : Activer/désactiver un canal dans `aiguilleur.yaml` démarre/arrête l'adaptateur sans toucher les autres
 
 ---
 

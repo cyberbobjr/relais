@@ -250,7 +250,7 @@ def test_config_admin_prompt_contains_all_config_paths() -> None:
     data = _load_config_admin_yaml()
     prompt = data["system_prompt"]
 
-    for path in ["portail.yaml", "sentinelle.yaml", "channels.yaml",
+    for path in ["portail.yaml", "sentinelle.yaml", "aiguilleur.yaml",
                   "profiles.yaml", "mcp_servers.yaml", "prompts/"]:
         assert path in prompt, f"Missing config path: {path}"
 

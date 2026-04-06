@@ -4,7 +4,7 @@ Layer assembly order:
   1. soul/SOUL.md               — core personality (always attempted)
   2. role_prompt_path           — role-level overlay (explicit path from portail.yaml)
   3. user_prompt_path           — per-user override (explicit path from portail.yaml)
-  4. channel_prompt_path        — channel formatting rules (explicit path from channels.yaml)
+  4. channel_prompt_path        — channel formatting rules (explicit path from aiguilleur.yaml)
 
 All paths are explicit: nothing is inferred from role names, channel names, or
 any other convention.  Missing or empty files are silently skipped (logged at
@@ -47,7 +47,7 @@ def assemble_system_prompt(
             as configured in ``portail.yaml`` (``users[*].prompt_path`` field),
             relative to *prompts_dir*.  ``None`` = no user overlay loaded.
         channel_prompt_path: Relative path to the channel formatting overlay,
-            as configured in ``channels.yaml`` (``prompt_path`` field per channel),
+            as configured in ``aiguilleur.yaml`` (``prompt_path`` field per channel),
             stamped into ``envelope.context["aiguilleur"]["channel_prompt_path"]`` by
             Aiguilleur.  ``None`` = no channel overlay loaded.
 

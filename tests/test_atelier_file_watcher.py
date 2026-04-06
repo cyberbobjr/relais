@@ -88,9 +88,9 @@ def test_atelier_watch_paths_contains_four_paths() -> None:
     ):
         paths = atelier._config_watch_paths()
 
-    assert len(paths) == 4, (
-        "_config_watch_paths() must return 4 paths "
-        f"(profiles.yaml, mcp_servers.yaml, atelier.yaml, channels.yaml), got {len(paths)}"
+    assert len(paths) == 3, (
+        "_config_watch_paths() must return 3 paths "
+        f"(profiles.yaml, mcp_servers.yaml, atelier.yaml), got {len(paths)}"
     )
 
 
