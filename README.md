@@ -434,10 +434,14 @@ Le chemin le plus complet du dépôt est le couple `supervisord.conf` + `supervi
 
 ```bash
 ./supervisor.sh start all
+./supervisor.sh [--verbose] start all
+./supervisor.sh [--verbose] restart all
 ./supervisor.sh status
-./supervisor.sh restart all
 ./supervisor.sh stop all
+./supervisor.sh reload all
 ```
+
+**Flag `--verbose`** : Après démarrage/redémarrage, suit les logs de toutes les briques en temps réel. Appuyez sur `Ctrl+C` pour détacher les logs sans arrêter supervisord.
 
 Le wrapper :
 

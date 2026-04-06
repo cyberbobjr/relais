@@ -51,14 +51,31 @@ from common.config_reload import safe_reload, watch_and_reload
 from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
+from common.streams import STREAM_LOGS
 
-# Configure logging once at import time using LOG_LEVEL env-var.
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout,
-)
+# Module-level guard: ensures basicConfig is called at most once per process,
+# even when multiple bricks are instantiated in the same process (e.g. tests).
+# Tests that call configure_logging_once() will flip this flag; subsequent
+# bricks that call it in the same test process are unaffected.
+_logging_configured = False
+
+
+def configure_logging_once() -> None:
+    """Configure Python logging exactly once across the process lifetime.
+
+    Safe to call from any brick (including subclasses that override
+    ``start()``).  Subsequent calls are no-ops so that multiple bricks
+    starting in the same process do not re-configure the root logger.
+    """
+    global _logging_configured
+    if not _logging_configured:
+        _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+        logging.basicConfig(
+            level=_log_level,
+            format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
+            stream=sys.stdout,
+        )
+        _logging_configured = True
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +469,8 @@ class BrickBase(abc.ABC):
         9. Call ``on_shutdown()``.
         10. Close Redis connection.
         """
+        configure_logging_once()
+
         shutdown = GracefulShutdown()
         shutdown.install_signal_handlers()
         brick_name = getattr(self, "_brick_name", "unknown")
@@ -467,7 +486,7 @@ class BrickBase(abc.ABC):
         self._brick_logger = BrickLogger(brick_name, lambda: redis_conn)
 
         await redis_conn.xadd(
-            "relais:logs",
+            STREAM_LOGS,
             {
                 "level": "INFO",
                 "brick": brick_name,

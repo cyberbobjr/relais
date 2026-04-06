@@ -298,3 +298,76 @@ async def test_sentinelle_listener_stops_on_shutdown_event(tmp_path: Path) -> No
     await sentinelle._config_reload_listener(mock_redis, shutdown_event=shutdown_event)
 
     assert reload_called == [], "reload_config must NOT be called when shutdown_event is set"
+
+
+# ---------------------------------------------------------------------------
+# _config_loaded_once — fail-closed guard (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_sentinelle_config_loaded_once_set_after_valid_load(tmp_path: Path) -> None:
+    """After a successful _load() with a valid sentinelle.yaml, _config_loaded_once is True."""
+    sentinelle, _ = _make_sentinelle_with_yaml(_SENTINELLE_YAML_V1, tmp_path)
+    assert sentinelle._config_loaded_once is True
+
+
+@pytest.mark.unit
+def test_sentinelle_config_loaded_once_initially_false() -> None:
+    """_config_loaded_once is False when Sentinelle.__init__ sees a permissive ACLManager.
+
+    Verifies that __init__ derives the flag from is_permissive rather than
+    hard-coding True.  A permissive ACLManager (no config file at startup)
+    must leave _config_loaded_once as False so the fail-closed guard activates
+    correctly on the first successful reload.
+    """
+    from unittest.mock import MagicMock, patch
+    import sentinelle.main as sentinelle_main
+
+    permissive_acl = MagicMock()
+    permissive_acl.is_permissive = True
+    permissive_acl._config_path = None
+
+    with patch.object(sentinelle_main, "ACLManager", return_value=permissive_acl):
+        instance = sentinelle_main.Sentinelle()
+
+    assert instance._config_loaded_once is False
+
+
+@pytest.mark.unit
+def test_sentinelle_build_candidate_raises_on_permissive_regression(tmp_path: Path) -> None:
+    """_build_config_candidate must raise RuntimeError if the new candidate is permissive
+    and _config_loaded_once is True (regression to permissive mode is forbidden)."""
+    from sentinelle.acl import ACLManager
+
+    sentinelle, config_file = _make_sentinelle_with_yaml(_SENTINELLE_YAML_V1, tmp_path)
+    assert sentinelle._config_loaded_once is True
+
+    # Delete the config file so the ACLManager candidate would be permissive,
+    # but _build_config_candidate should raise RuntimeError before that happens.
+    config_file.unlink()
+
+    with pytest.raises((RuntimeError, FileNotFoundError), match="permissive|not found"):
+        sentinelle._build_config_candidate()
+
+
+@pytest.mark.unit
+def test_sentinelle_apply_config_sets_loaded_once(tmp_path: Path) -> None:
+    """_apply_config with a non-permissive ACLManager must set _config_loaded_once."""
+    from sentinelle.main import Sentinelle
+    from sentinelle.acl import ACLManager
+
+    sentinelle = Sentinelle.__new__(Sentinelle)
+    sentinelle._config_loaded_once = False
+    sentinelle._config_lock = asyncio.Lock()
+    missing = tmp_path / "sentinelle.yaml"  # does not exist yet
+    sentinelle._config_path = missing
+    sentinelle._acl = ACLManager(config_path=missing)
+
+    config_file = tmp_path / "sentinelle.yaml"
+    config_file.write_text(_SENTINELLE_YAML_V1, encoding="utf-8")
+    fresh_acl = ACLManager(config_path=config_file)
+
+    sentinelle._apply_config(fresh_acl)
+
+    assert sentinelle._config_loaded_once is True

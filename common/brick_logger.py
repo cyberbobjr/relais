@@ -10,6 +10,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from common.streams import STREAM_LOGS
+
 
 class BrickLogger:
     """Structured logger that writes to Python logging AND ``relais:logs``.
@@ -57,7 +59,7 @@ class BrickLogger:
                 "message": message,
             }
             entry.update({k: str(v) for k, v in extras.items()})
-            await redis.xadd("relais:logs", entry)
+            await redis.xadd(STREAM_LOGS, entry)
         except Exception:  # noqa: BLE001
             pass  # Log emission must never crash the pipeline
 

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.envelope import Envelope
-from common.contexts import CTX_PORTAIL, CTX_ATELIER
+from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, CTX_ATELIER
 from atelier.agent_executor import AgentExecutionError, AgentResult
 
 
@@ -402,7 +402,7 @@ async def test_streaming_signal_published_for_telegram_channel() -> None:
     signal before invoking SDK execute.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram")
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -496,7 +496,7 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
     call stream_pub.finalize() once after sdk_executor.execute() completes.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram")
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -543,7 +543,7 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
     JSONDecodeError in the Aiguilleur subscriber.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram")
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -606,7 +606,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
     context["atelier"]["streamed"] == True so the Aiguilleur can edit instead of re-send.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram")
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[

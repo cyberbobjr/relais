@@ -272,10 +272,11 @@ Il n'existe pas de `audit.db` prise en charge par l'Archiviste dans l'implément
 Le chemin recommandé est :
 
 ```bash
-./supervisor.sh start all
+./supervisor.sh start all              # Démarrer le système
+./supervisor.sh --verbose start all    # Démarrer + suivre les logs en temps réel
 ```
 
-Cela démarre Redis local puis les briques Python via `launcher.py`.
+Cela démarre Redis local puis les briques Python via `launcher.py`. Le flag `--verbose` affiche les logs de toutes les briques après le démarrage (Ctrl+C pour détacher sans arrêter supervisord).
 
 ### Manuel
 

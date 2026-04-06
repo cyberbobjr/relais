@@ -88,6 +88,14 @@ from common.config_reload import safe_reload, watch_and_reload
 from common.contexts import CTX_PORTAIL, PortailCtx
 from common.envelope import Envelope
 from common.redis_client import RedisClient  # noqa: F401 — kept for test-namespace patching
+from common.streams import (
+    STREAM_COMMANDS,
+    STREAM_LOGS,
+    STREAM_OUTGOING_PENDING,
+    STREAM_SECURITY,
+    STREAM_TASKS,
+    stream_outgoing,
+)
 from common.user_record import UserRecord
 from sentinelle.acl import ACLManager
 
@@ -106,9 +114,9 @@ class Sentinelle(BrickBase):
     def __init__(self) -> None:
         """Initialise Sentinelle with stream, group and ACL configuration."""
         super().__init__("sentinelle")
-        self.stream_in: str = "relais:security"
-        self.stream_out: str = "relais:tasks"
-        self.stream_commands: str = "relais:commands"
+        self.stream_in: str = STREAM_SECURITY
+        self.stream_out: str = STREAM_TASKS
+        self.stream_commands: str = STREAM_COMMANDS
         self.group_name: str = "sentinelle_group"
         self.consumer_name: str = "sentinelle_1"
         self.outgoing_group_name: str = "sentinelle_outgoing_group"
@@ -117,6 +125,11 @@ class Sentinelle(BrickBase):
         _initial_acl = ACLManager()
         self._config_path: Path | None = _initial_acl._config_path
         self._acl: ACLManager = _initial_acl
+        self._config_loaded_once: bool = not _initial_acl.is_permissive
+        if _initial_acl.is_permissive:
+            logger.warning(
+                "Sentinelle: starting in permissive mode — sentinelle.yaml not found"
+            )
 
     # ------------------------------------------------------------------
     # BrickBase abstract interface
@@ -145,6 +158,7 @@ class Sentinelle(BrickBase):
         raw = self._config_path.read_text(encoding="utf-8")
         yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
         self._acl = ACLManager(config_path=self._config_path)
+        self._config_loaded_once = True
         logger.info("Sentinelle: ACL config loaded from %s", self._config_path)
 
     def stream_specs(self) -> list[StreamSpec]:
@@ -159,14 +173,14 @@ class Sentinelle(BrickBase):
         # Defaults here match the values that __init__ would have assigned.
         return [
             StreamSpec(
-                stream=getattr(self, "stream_in", "relais:security"),
+                stream=getattr(self, "stream_in", STREAM_SECURITY),
                 group=getattr(self, "group_name", "sentinelle_group"),
                 consumer=getattr(self, "consumer_name", "sentinelle_1"),
                 handler=self._handle_incoming,
                 ack_mode="always",
             ),
             StreamSpec(
-                stream="relais:messages:outgoing_pending",
+                stream=STREAM_OUTGOING_PENDING,
                 group=getattr(self, "outgoing_group_name", "sentinelle_outgoing_group"),
                 consumer=getattr(self, "outgoing_consumer_name", "sentinelle_outgoing_1"),
                 handler=self._handle_outgoing,
@@ -199,12 +213,23 @@ class Sentinelle(BrickBase):
             yaml.YAMLError: If the config file cannot be parsed as valid YAML.
         """
         if self._config_path is None or not self._config_path.exists():
+            if self._config_loaded_once:
+                raise RuntimeError(
+                    "ACLManager: regression to permissive mode refused "
+                    "(config was loaded once — fail-closed on reload)"
+                )
             raise FileNotFoundError(
                 f"Sentinelle config file not found: {self._config_path}"
             )
         raw = self._config_path.read_text(encoding="utf-8")
         yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
-        return ACLManager(config_path=self._config_path)
+        candidate = ACLManager(config_path=self._config_path)
+        if self._config_loaded_once and candidate.is_permissive:
+            raise RuntimeError(
+                "ACLManager: regression to permissive mode refused "
+                "(config was loaded once — fail-closed on reload)"
+            )
+        return candidate
 
     def _apply_config(self, acl: ACLManager) -> None:
         """Swap in a freshly loaded ACLManager atomically.
@@ -213,6 +238,8 @@ class Sentinelle(BrickBase):
             acl: The new ACLManager instance to install.
         """
         self._acl = acl
+        if not acl.is_permissive:
+            self._config_loaded_once = True
         logger.info("Sentinelle: ACL config applied")
 
     # ------------------------------------------------------------------
@@ -342,7 +369,7 @@ class Sentinelle(BrickBase):
             else:
                 await asyncio.gather(
                     redis_conn.xadd(self.stream_out, {"payload": envelope.to_json()}),
-                    redis_conn.xadd("relais:logs", {
+                    redis_conn.xadd(STREAM_LOGS, {
                         "level": "INFO",
                         "brick": "sentinelle",
                         "correlation_id": envelope.correlation_id,
@@ -355,7 +382,7 @@ class Sentinelle(BrickBase):
             logger.warning(
                 "Unauthorized message %s dropped.", envelope.correlation_id
             )
-            await redis_conn.xadd("relais:logs", {
+            await redis_conn.xadd(STREAM_LOGS, {
                 "level": "WARN",
                 "brick": "sentinelle",
                 "correlation_id": envelope.correlation_id,
@@ -382,7 +409,7 @@ class Sentinelle(BrickBase):
         Returns:
             Always True (ack_mode="always" — errors are logged and dropped).
         """
-        stream_out = f"relais:messages:outgoing:{envelope.channel}"
+        stream_out = stream_outgoing(envelope.channel)
         logger.debug(
             "Outgoing pass-through: %s → %s",
             envelope.correlation_id,
@@ -407,7 +434,7 @@ class Sentinelle(BrickBase):
             message: Plain-text reply content.
         """
         reply = Envelope.create_response_to(envelope, message)
-        out_stream = f"relais:messages:outgoing:{envelope.channel}"
+        out_stream = stream_outgoing(envelope.channel)
         await redis_conn.xadd(out_stream, {"payload": reply.to_json()})
 
     async def _handle_command(
@@ -454,7 +481,7 @@ class Sentinelle(BrickBase):
         if cmd_authorized:
             await asyncio.gather(
                 redis_conn.xadd(self.stream_commands, {"payload": envelope.to_json()}),
-                redis_conn.xadd("relais:logs", {
+                redis_conn.xadd(STREAM_LOGS, {
                     "level": "INFO",
                     "brick": "sentinelle",
                     "correlation_id": envelope.correlation_id,

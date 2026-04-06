@@ -34,7 +34,6 @@ def _make_atelier_minimal():
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
         patch("atelier.main.load_progress_config", return_value=fake_progress),
-        patch("atelier.main.load_channels_config", return_value={"telegram": MagicMock(streaming=True)}),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.ToolRegistry") as mock_tool_registry_cls,

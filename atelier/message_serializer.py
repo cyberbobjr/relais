@@ -56,7 +56,7 @@ def serialize_messages(messages: list["BaseMessage"]) -> list[dict]:
             result.append({
                 "role": "tool",
                 "content": content,
-                "tool_call_id": msg.tool_call_id,
+                "tool_call_id": getattr(msg, "tool_call_id", ""),
                 "name": getattr(msg, "name", ""),
             })
 

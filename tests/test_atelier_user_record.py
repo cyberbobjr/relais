@@ -102,7 +102,6 @@ def _make_atelier():
     with (
         patch("atelier.main.load_profiles", return_value={"default": _default_profile_mock()}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_channels_config", return_value={}),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp")),
         patch("atelier.main.RedisClient"),
     ):

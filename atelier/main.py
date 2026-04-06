@@ -101,10 +101,19 @@ from pathlib import Path
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
+from common.streams import (
+    STREAM_LOGS,
+    STREAM_MEMORY_REQUEST,
+    STREAM_OUTGOING_PENDING,
+    STREAM_TASKS,
+    STREAM_TASKS_FAILED,
+)
 from common.contexts import (
+    CTX_AIGUILLEUR,
     CTX_ATELIER,
     CTX_PORTAIL,
     CTX_SOUVENIR_REQUEST,
+    AiguilleurCtx,
     AtelierCtx,
     PortailCtx,
     ensure_ctx,
@@ -124,7 +133,6 @@ from atelier.stream_publisher import StreamPublisher
 from atelier.progress_config import load_progress_config, ProgressConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
-from aiguilleur.channel_config import load_channels_config
 from atelier.tool_policy import ToolPolicy
 from atelier.subagents import SubagentRegistry
 from atelier.tools._registry import ToolRegistry
@@ -155,7 +163,7 @@ class Atelier(BrickBase):
         """
         super().__init__("atelier")
 
-        self.stream_in: str = "relais:tasks"
+        self.stream_in: str = STREAM_TASKS
         self.group_name: str = "atelier_group"
         self.consumer_name: str = "atelier_1"
 
@@ -164,7 +172,6 @@ class Atelier(BrickBase):
         self._profiles: dict = {}
         self._mcp_servers_default: dict = {}
         self._progress_config: ProgressConfig | None = None
-        self._streaming_capable_channels: frozenset[str] = frozenset()
         self._load()
 
         # Base directory for role-based skill resolution — resolved once at
@@ -191,6 +198,12 @@ class Atelier(BrickBase):
         self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoints_db)
         self._checkpointer: AsyncSqliteSaver | None = None
 
+        # Option A — Singleton McpSessionManager started once at brick startup.
+        # All requests share the same server connections and tool list.
+        self._mcp_manager: McpSessionManager | None = None
+        self._mcp_tools: list = []
+        self._mcp_lock = asyncio.Lock()
+
     # ------------------------------------------------------------------
     # BrickBase abstract interface implementation
     # ------------------------------------------------------------------
@@ -198,9 +211,9 @@ class Atelier(BrickBase):
     def _load(self) -> None:
         """Load Atelier's runtime configuration from disk.
 
-        Refreshes ``_profiles``, ``_mcp_servers_default``, ``_progress_config``,
-        and ``_streaming_capable_channels``.  Called once by ``__init__`` for the
-        initial load.  Hot-reload goes through ``_build_config_candidate`` →
+        Refreshes ``_profiles``, ``_mcp_servers_default``, and
+        ``_progress_config``.  Called once by ``__init__`` for the initial
+        load.  Hot-reload goes through ``_build_config_candidate`` →
         ``_apply_config`` (which holds ``_config_lock``) instead.
 
         Does not touch Redis or any async resource.
@@ -210,16 +223,9 @@ class Atelier(BrickBase):
             ``FileNotFoundError``, ``yaml.YAMLError``) propagates so that the
             caller (``__init__`` or ``safe_reload``) can handle it.
         """
-        new_profiles = load_profiles()
-        new_mcp_servers = load_for_sdk()
-        new_progress = load_progress_config()
-        new_streaming = frozenset(
-            name for name, cfg in load_channels_config().items() if cfg.streaming
-        )
-        self._profiles = new_profiles
-        self._mcp_servers_default = new_mcp_servers
-        self._progress_config = new_progress
-        self._streaming_capable_channels = new_streaming
+        self._profiles = load_profiles()
+        self._mcp_servers_default = load_for_sdk()
+        self._progress_config = load_progress_config()
         logger.info("Atelier: configuration loaded from disk")
 
     def stream_specs(self) -> list[StreamSpec]:
@@ -249,55 +255,116 @@ class Atelier(BrickBase):
     # ------------------------------------------------------------------
 
     async def _extra_lifespan(self, stack: AsyncExitStack) -> None:
-        """Enter the AsyncSqliteSaver context manager into the lifespan stack.
+        """Enter the AsyncSqliteSaver context manager and start the MCP singleton.
 
         Called by ``BrickBase.start()`` before stream loops are launched.
         Sets ``self._checkpointer`` so that ``_handle_message`` can pass it
-        to ``AgentExecutor``.
+        to ``AgentExecutor``.  Also starts the singleton ``McpSessionManager``
+        and registers its ``close()`` coroutine as a cleanup callback on
+        ``stack`` so it is torn down automatically when the brick shuts down.
 
         Args:
             stack: The ``AsyncExitStack`` used for the brick's lifespan.
         """
         self._checkpointer = await stack.enter_async_context(self._checkpointer_cm)
 
+        # Start the singleton McpSessionManager.
+        # Use the "default" profile for mcp_timeout (best-effort default).
+        # Guard against test objects created via __new__ that skip __init__.
+        profiles = getattr(self, "_profiles", {})
+        mcp_servers = getattr(self, "_mcp_servers_default", {})
+        if not hasattr(self, "_mcp_manager"):
+            self._mcp_manager = None
+        if not hasattr(self, "_mcp_tools"):
+            self._mcp_tools = []
+        if not hasattr(self, "_mcp_lock"):
+            self._mcp_lock = asyncio.Lock()
+
+        from atelier.profile_loader import resolve_profile as _resolve_profile
+        if not profiles:
+            # No profiles loaded (e.g. test objects created via __new__); skip MCP.
+            self._mcp_manager = None
+            self._mcp_tools = []
+            return
+        default_profile = _resolve_profile(profiles, "default")
+        self._mcp_manager = McpSessionManager(default_profile, mcp_servers)
+        await self._mcp_manager.start()
+        self._mcp_tools = list(self._mcp_manager.tools)
+        stack.push_async_callback(self._mcp_manager.close)  # type: ignore[union-attr]
+
+        # Cancel any pending MCP restart task on shutdown so it doesn't outlive
+        # the McpSessionManager that was just registered for cleanup above.
+        async def _cancel_mcp_restart_task() -> None:
+            task = getattr(self, "_mcp_restart_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        stack.push_async_callback(_cancel_mcp_restart_task)
+        logger.info(
+            "Atelier: MCP singleton started — %d tools available",
+            len(self._mcp_tools),
+        )
+
     def _build_config_candidate(self) -> dict:
         """Build a new configuration snapshot from disk without mutating self.
 
+        NOTE: each loader (load_profiles, load_for_sdk, load_progress_config,
+        SubagentRegistry.load) re-reads its file from disk independently.  On
+        a hot-reload triggered by a single file change this means up to four
+        separate disk reads.  Acceptable for the current reload frequency;
+        revisit if reload latency becomes a concern.
+
         Returns:
             A dict with keys ``profiles``, ``mcp_servers``, ``progress``,
-            ``streaming_channels``, ``subagent_registry``.
+            ``subagent_registry``.
 
         Raises:
             Any exception from the underlying loaders.
         """
-        new_profiles = load_profiles()
-        new_mcp_servers = load_for_sdk()
-        new_progress = load_progress_config()
-        new_streaming = frozenset(
-            name for name, cfg in load_channels_config().items() if cfg.streaming
-        )
         new_subagent_registry = SubagentRegistry.load(self._tool_registry)
         return {
-            "profiles": new_profiles,
-            "mcp_servers": new_mcp_servers,
-            "progress": new_progress,
-            "streaming_channels": new_streaming,
+            "profiles": load_profiles(),
+            "mcp_servers": load_for_sdk(),
+            "progress": load_progress_config(),
             "subagent_registry": new_subagent_registry,
         }
 
     def _apply_config(self, cfg: dict) -> None:
         """Swap in a freshly loaded configuration snapshot.
 
+        If the MCP server configuration changed, schedules an async task to
+        restart the singleton ``McpSessionManager`` atomically.  The task is
+        scheduled via ``asyncio.get_running_loop().create_task()`` because
+        ``_apply_config`` is called synchronously inside ``safe_reload``'s
+        locked applier and cannot ``await`` directly.
+
         Args:
             cfg: Dict returned by ``_build_config_candidate``.
         """
+        old_mcp = self._mcp_servers_default
         self._profiles = cfg["profiles"]
         self._mcp_servers_default = cfg["mcp_servers"]
         self._progress_config = cfg["progress"]
-        self._streaming_capable_channels = cfg["streaming_channels"]
         if "subagent_registry" in cfg:
             self._subagent_registry = cfg["subagent_registry"]
         logger.info("Atelier: configuration applied")
+
+        # Schedule MCP singleton restart if server config changed.
+        if old_mcp != cfg["mcp_servers"]:
+            logger.info("Atelier: MCP server config changed — scheduling singleton restart")
+            try:
+                loop = asyncio.get_running_loop()
+                # Cancel any in-flight restart task before scheduling a new one
+                # to avoid two concurrent McpSessionManager restarts racing.
+                existing = getattr(self, "_mcp_restart_task", None)
+                if existing is not None and not existing.done():
+                    existing.cancel()
+                self._mcp_restart_task = loop.create_task(self._restart_mcp_sessions())
+            except RuntimeError:
+                # No running event loop (e.g., during synchronous unit tests)
+                logger.warning("Atelier: could not schedule MCP restart — no running loop")
 
     def _config_watch_paths(self) -> list[Path]:
         """Return the list of config file paths and directories to watch.
@@ -411,6 +478,43 @@ class Atelier(BrickBase):
     # Properties
     # ------------------------------------------------------------------
 
+    async def _restart_mcp_sessions(self) -> None:
+        """Atomically replace the singleton McpSessionManager with a fresh one.
+
+        Acquires ``_mcp_lock`` to prevent concurrent tool calls from racing
+        with the replacement.  On failure, degrades gracefully by setting
+        ``_mcp_manager`` to ``None`` and ``_mcp_tools`` to ``[]`` so that
+        subsequent requests receive an empty tool list rather than crashing.
+        """
+        async with self._mcp_lock:
+            # Close old manager if running.
+            if self._mcp_manager is not None:
+                try:
+                    await self._mcp_manager.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Atelier: error closing old MCP manager: %s", exc)
+
+            try:
+                from atelier.profile_loader import resolve_profile as _resolve_profile
+                default_profile = _resolve_profile(self._profiles, "default")
+                new_mgr = McpSessionManager(default_profile, self._mcp_servers_default)
+                await new_mgr.start()
+                self._mcp_manager = new_mgr
+                self._mcp_tools = list(new_mgr.tools)
+                logger.info(
+                    "Atelier: MCP singleton restarted — %d tools available",
+                    len(self._mcp_tools),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.critical(
+                    "Atelier: failed to restart MCP singleton — degrading to no MCP tools: %s",
+                    exc,
+                )
+                self._mcp_manager = None
+                self._mcp_tools = []
+
+    # ------------------------------------------------------------------
+
     @property
     def _tool_policy(self) -> ToolPolicy:
         """Return a ToolPolicy rooted at the current _skills_base_dir.
@@ -467,21 +571,7 @@ class Atelier(BrickBase):
                 channel_prompt_path=portail_ctx.get("channel_prompt_path"),
             )
 
-            # 3. Select MCP servers for this profile.
-            # Re-use the pre-loaded default set unless a non-default profile is
-            # requested — profile-specific contextual servers require a fresh load.
-            if profile_name == "default":
-                mcp_servers = self._mcp_servers_default
-            else:
-                mcp_servers = load_for_sdk(profile=profile_name)
-
-            # 5. Start MCP sessions and assemble tools for this request.
-            # McpSessionManager is bound to the AsyncExitStack so all MCP
-            # sub-processes are terminated when the stack exits.
-            stream_pub: StreamPublisher | None = None
-            stream_callback = None
-
-            # 5a. Resolve per-user skills and MCP tool policy from user_record
+            # 3. Resolve per-user skills and MCP tool policy from user_record
             # dict stamped by Portail (consolidated identity envelope).
             skills = self._tool_policy.resolve_skills(
                 ur.get("skills_dirs")
@@ -490,56 +580,61 @@ class Atelier(BrickBase):
                 ur.get("allowed_mcp_tools")
             )
 
-            session_manager = McpSessionManager(profile, mcp_servers)
-            async with contextlib.AsyncExitStack() as stack:
-                if mcp_patterns:
-                    await session_manager.start_all(stack)
+            # 4. Read MCP tools from the singleton — no per-request session creation.
+            # Option A: all profiles share the single global McpSessionManager.
+            # The lock ensures we snapshot _mcp_tools safely during a hot-reload restart.
+            # list() copies the reference list before releasing the lock so that a
+            # concurrent _restart_mcp_sessions() cannot mutate self._mcp_tools under us.
+            async with self._mcp_lock:
+                if mcp_patterns and self._mcp_manager and self._mcp_manager.is_running:
                     mcp_tools = self._tool_policy.filter_mcp_tools(
-                        await make_mcp_tools(session_manager),
+                        list(self._mcp_tools),
                         ur.get("allowed_mcp_tools"),
                     )
                 else:
                     mcp_tools = []
 
-                # Resolve subagents and delegation prompt from the registry,
-                # filtered by the user's allowed_subagents patterns.
-                # Pass mcp_tools as request_tools so mcp:<glob> and inherit
-                # tokens resolve against the per-request ToolPolicy-filtered pool.
-                subagents = self._subagent_registry.specs_for_user(ur, request_tools=mcp_tools)
-                delegation_prompt = self._subagent_registry.delegation_prompt_for_user(ur)
+            # 5. Resolve subagents and delegation prompt from the registry,
+            # filtered by the user's allowed_subagents patterns.
+            # Pass mcp_tools as request_tools so mcp:<glob> and inherit
+            # tokens resolve against the per-request ToolPolicy-filtered pool.
+            stream_pub: StreamPublisher | None = None
 
-                agent_executor = AgentExecutor(
-                    profile=profile,
-                    soul_prompt=soul_prompt,
-                    tools=mcp_tools,
-                    skills=skills,
-                    backend=SouvenirBackend(user_id=user_id),
-                    checkpointer=self._checkpointer,
-                    subagents=subagents,
-                    delegation_prompt=delegation_prompt,
+            subagents = self._subagent_registry.specs_for_user(ur, request_tools=mcp_tools)
+            delegation_prompt = self._subagent_registry.delegation_prompt_for_user(ur)
+
+            agent_executor = AgentExecutor(
+                profile=profile,
+                soul_prompt=soul_prompt,
+                tools=mcp_tools,
+                skills=skills,
+                backend=SouvenirBackend(user_id=user_id),
+                checkpointer=self._checkpointer,
+                subagents=subagents,
+                delegation_prompt=delegation_prompt,
+            )
+
+            # 6. Execute — streaming only for capable channels; progress for all.
+            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
+            streaming = aig_ctx.get("streaming", False)
+            stream_pub = StreamPublisher(
+                redis_conn,
+                channel=envelope.channel,
+                correlation_id=envelope.correlation_id,
+                source_envelope=envelope,
+                progress_config=self._progress_config,
+            )
+            if streaming:
+                await redis_conn.publish(
+                    f"relais:streaming:start:{envelope.channel}",
+                    envelope.to_json(),
                 )
 
-                # 7. Execute — streaming only for capable channels; progress for all.
-                streaming = envelope.channel in self._streaming_capable_channels
-                stream_pub = StreamPublisher(
-                    redis_conn,
-                    channel=envelope.channel,
-                    correlation_id=envelope.correlation_id,
-                    source_envelope=envelope,
-                    progress_config=self._progress_config,
-                )
-                if streaming:
-                    await redis_conn.publish(
-                        f"relais:streaming:start:{envelope.channel}",
-                        envelope.to_json(),
-                    )
-
-                agent_result = await agent_executor.execute(
-                    envelope=envelope,
-                    stream_callback=stream_pub.push_chunk if streaming else None,
-                    progress_callback=stream_pub.push_progress,
-                )
-            # MCP sessions closed; finalize stream and publish response.
+            agent_result = await agent_executor.execute(
+                envelope=envelope,
+                stream_callback=stream_pub.push_chunk if streaming else None,
+                progress_callback=stream_pub.push_progress,
+            )
             reply_text = agent_result.reply_text
 
             # 8. Build and publish response envelope.
@@ -551,7 +646,7 @@ class Atelier(BrickBase):
                 atelier_ctx["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
-            out_stream = "relais:messages:outgoing_pending"
+            out_stream = STREAM_OUTGOING_PENDING
             await redis_conn.xadd(out_stream, {"payload": response_env.to_json()})
 
             # Archive the turn directly to Souvenir via relais:memory:request.
@@ -573,11 +668,11 @@ class Atelier(BrickBase):
                 }},
             )
             await redis_conn.xadd(
-                "relais:memory:request",
+                STREAM_MEMORY_REQUEST,
                 {"payload": archive_env.to_json()},
             )
 
-            await redis_conn.xadd("relais:logs", {
+            await redis_conn.xadd(STREAM_LOGS, {
                 "level": "INFO",
                 "brick": "atelier",
                 "correlation_id": envelope.correlation_id,
@@ -601,8 +696,8 @@ class Atelier(BrickBase):
             }
             if exc.response_body:
                 dlq_entry["error_detail"] = exc.response_body[:4000]
-            await redis_conn.xadd("relais:tasks:failed", dlq_entry)
-            await redis_conn.xadd("relais:logs", {
+            await redis_conn.xadd(STREAM_TASKS_FAILED, dlq_entry)
+            await redis_conn.xadd(STREAM_LOGS, {
                 "level": "ERROR",
                 "brick": "atelier",
                 "correlation_id": envelope.correlation_id,
@@ -617,7 +712,7 @@ class Atelier(BrickBase):
             logger.error(
                 "[%s] Unhandled exception, leaving in PEL: %s", envelope.correlation_id, exc, exc_info=True
             )
-            await redis_conn.xadd("relais:logs", {
+            await redis_conn.xadd(STREAM_LOGS, {
                 "level": "ERROR",
                 "brick": "atelier",
                 "correlation_id": envelope.correlation_id,

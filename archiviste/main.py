@@ -9,7 +9,8 @@ console visibility.
 
 Technical overview
 ------------------
-``Archiviste`` runs two concurrent asyncio consumer loops:
+``Archiviste`` extends :class:`~common.brick_base.BrickBase` and runs two
+concurrent asyncio consumer loops:
 
 * ``_process_stream`` — subscribes to the three event streams
   (relais:logs, relais:events:system, relais:events:messages).  Each message
@@ -19,6 +20,12 @@ Technical overview
   (``_PIPELINE_STREAMS``).  Each message is deserialized as an ``Envelope``
   (best-effort) and logged via the ``archiviste.pipeline`` logger for
   end-to-end traceability.
+
+Both loops use a shared ``asyncio.Event`` (``shutdown_event``) provided by
+``BrickBase.start()`` so they exit cleanly on SIGTERM/SIGINT.  The event
+streams contain raw dicts (not Envelopes), so they are handled outside the
+standard BrickBase ``_run_stream_loop``; the pipeline streams contain full
+Envelope payloads which are deserialized inline.
 
 Output files:
   - ``~/.relais/logs/events.jsonl``  — all event stream entries
@@ -64,39 +71,65 @@ import os
 import sys
 from datetime import datetime
 
-# Configure local simple logging for the archivist itself
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format='%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s',
-    stream=sys.stdout
-)
-
-from common.redis_client import RedisClient
+from common.brick_base import BrickBase, StreamSpec, configure_logging_once
 from common.config_loader import get_relais_home
-from common.shutdown import GracefulShutdown
 from common.envelope import Envelope
+from common.redis_client import RedisClient
+from common.shutdown import GracefulShutdown
+from common.streams import (
+    STREAM_EVENTS_MESSAGES,
+    STREAM_EVENTS_SYSTEM,
+    STREAM_LOGS,
+    STREAM_INCOMING,
+    STREAM_SECURITY,
+    STREAM_TASKS,
+    STREAM_TASKS_FAILED,
+    stream_outgoing,
+)
 logger = logging.getLogger("archiviste")
 
 # Pipeline streams observed by archiviste_pipeline_group.
 # Add new channel outgoing streams here as they are introduced.
 _PIPELINE_STREAMS: list[str] = [
-    "relais:messages:incoming",
-    "relais:security",
-    "relais:tasks",
-    "relais:tasks:failed",
-    "relais:messages:outgoing:discord",
+    STREAM_INCOMING,
+    STREAM_SECURITY,
+    STREAM_TASKS,
+    STREAM_TASKS_FAILED,
+    stream_outgoing("discord"),
 ]
 
 
-class Archiviste:
+class Archiviste(BrickBase):
     def __init__(self):
-        self.client = RedisClient("archiviste")
+        super().__init__("archiviste")
         self.base_dir = get_relais_home() / "logs"
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
         self.events_log = self.base_dir / "events.jsonl"
         self.system_log = self.base_dir / "system.log"
+        self._load()
+
+    # ------------------------------------------------------------------
+    # BrickBase abstract interface
+    # ------------------------------------------------------------------
+
+    def _load(self) -> None:
+        """No-op: Archiviste has no YAML configuration."""
+
+    def stream_specs(self) -> list[StreamSpec]:
+        """Archiviste uses raw-message loops; no standard StreamSpecs required."""
+        return []
+
+    # ------------------------------------------------------------------
+    # BrickBase lifecycle hooks
+    # ------------------------------------------------------------------
+
+    def _create_shutdown(self) -> GracefulShutdown:
+        return GracefulShutdown()
+
+    # ------------------------------------------------------------------
+    # Raw-message consumer loops
+    # ------------------------------------------------------------------
 
     def _write_event(self, timestamp: str, stream: bytes, message: dict):
         """Append event to the JSONL ledger."""
@@ -111,25 +144,23 @@ class Archiviste:
         except Exception as e:
             logger.error(f"Failed to write event: {e}")
 
-    async def _process_stream(self, redis_conn, shutdown: GracefulShutdown | None = None):
-        """Consume streams using a static consumer group.
+    async def _process_stream(
+        self, redis_conn, shutdown_event: asyncio.Event
+    ):
+        """Consume event streams (relais:logs + relais:events:*).
 
-        Exits cleanly when ``shutdown.is_stopping()`` returns True.
+        Exits cleanly when ``shutdown_event`` is set.
 
         Args:
             redis_conn: Active Redis connection.
-            shutdown: GracefulShutdown instance controlling the loop lifetime.
-                If None a new instance is created (backward-compatible).
+            shutdown_event: asyncio.Event controlling the loop lifetime.
         """
-        if shutdown is None:
-            shutdown = GracefulShutdown()
-
         group_name = "archiviste_group"
         consumer_name = "archiviste_1"
         streams = {
-            "relais:logs": ">",
-            "relais:events:system": ">",
-            "relais:events:messages": ">"
+            STREAM_LOGS: ">",
+            STREAM_EVENTS_SYSTEM: ">",
+            STREAM_EVENTS_MESSAGES: ">",
         }
 
         # Create consumer group if it doesn't exist
@@ -140,9 +171,17 @@ class Archiviste:
                 if "BUSYGROUP" not in str(e):
                     logger.warning(f"Consumer group error for {stream}: {e}")
 
+        # Emit the startup log *after* the consumer group exists so this
+        # brick's own archiviste_group will receive the message.
+        await redis_conn.xadd(STREAM_LOGS, {
+            "level": "INFO",
+            "brick": "archiviste",
+            "message": "Archiviste started",
+        })
+
         logger.info("Archiviste listening to streams...")
 
-        while not shutdown.is_stopping():
+        while not shutdown_event.is_set():
             try:
                 # Block for 2 seconds waiting for new events
                 results = await redis_conn.xreadgroup(
@@ -160,7 +199,7 @@ class Archiviste:
                         await redis_conn.xack(stream, group_name, message_id)
 
                         # Re-emit system logs via the standard logger so they use the unified format
-                        if stream == "relais:logs":
+                        if stream == STREAM_LOGS:
                             msg = data.get("message", "")
                             level = data.get("level", "INFO").upper()
                             brick = data.get("brick", "unknown")
@@ -179,7 +218,7 @@ class Archiviste:
                 await asyncio.sleep(1)
 
     async def _process_pipeline_streams(
-        self, redis_conn, shutdown: GracefulShutdown | None = None
+        self, redis_conn, shutdown_event: asyncio.Event
     ):
         """Consume pipeline streams and log Envelope fields for diagnostics.
 
@@ -189,16 +228,12 @@ class Archiviste:
         Messages that are not valid Envelopes (e.g. DLQ entries) produce a
         WARNING instead.
 
-        Exits cleanly when ``shutdown.is_stopping()`` returns True.
+        Exits cleanly when ``shutdown_event`` is set.
 
         Args:
             redis_conn: Active Redis connection.
-            shutdown: GracefulShutdown instance controlling the loop lifetime.
-                If None a new instance is created (backward-compatible).
+            shutdown_event: asyncio.Event controlling the loop lifetime.
         """
-        if shutdown is None:
-            shutdown = GracefulShutdown()
-
         pipeline_logger = logging.getLogger("archiviste.pipeline")
         group_name = "archiviste_pipeline_group"
         consumer_name = "archiviste_pipeline_1"
@@ -214,7 +249,7 @@ class Archiviste:
 
         logger.info("Archiviste pipeline observer started on %d streams", len(streams))
 
-        while not shutdown.is_stopping():
+        while not shutdown_event.is_set():
             try:
                 results = await redis_conn.xreadgroup(
                     group_name,
@@ -272,21 +307,30 @@ class Archiviste:
                 logger.error(f"Pipeline stream error: {e}")
                 await asyncio.sleep(1)
 
-    async def start(self):
-        """Start the Archiviste service and its main processing loops.
+    # ------------------------------------------------------------------
+    # Entry point — override to run raw-message loops alongside BrickBase infra
+    # ------------------------------------------------------------------
 
-        Launches ``_process_stream`` (relais:logs + events) and
-        ``_process_pipeline_streams`` (pipeline traffic) concurrently via
-        ``asyncio.gather``.  Registers SIGTERM/SIGINT handlers via
-        GracefulShutdown so both loops exit cleanly on termination signals.
+    async def start(self) -> None:
+        """Start Archiviste using BrickBase infrastructure.
+
+        Overrides ``BrickBase.start()`` because the event streams carry raw
+        dicts (not Envelopes) and cannot use ``_run_stream_loop``.  The
+        logging-configuration guard from BrickBase is honoured so that
+        ``basicConfig`` is never called twice in the same process.
         """
+        configure_logging_once()
+
         shutdown = GracefulShutdown()
         shutdown.install_signal_handlers()
+        self.client = RedisClient("archiviste")
         redis_conn = await self.client.get_connection()
+
+        shutdown_event = shutdown.stop_event
         try:
             await asyncio.gather(
-                self._process_stream(redis_conn, shutdown=shutdown),
-                self._process_pipeline_streams(redis_conn, shutdown=shutdown),
+                self._process_stream(redis_conn, shutdown_event),
+                self._process_pipeline_streams(redis_conn, shutdown_event),
             )
         except asyncio.CancelledError:
             logger.info("Archiviste shutting down...")

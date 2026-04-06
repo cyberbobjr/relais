@@ -16,7 +16,10 @@ channel's ``channel_profile`` (or ``"default"``).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,19 @@ from common.config_loader import resolve_config_path
 from common.user_record import UserRecord
 
 logger = logging.getLogger(__name__)
+
+_API_KEY_SALT: bytes = os.environ.get("RELAIS_API_KEY_SALT", "").encode()
+if not _API_KEY_SALT:
+    logger.warning(
+        "RELAIS_API_KEY_SALT is not set — REST API key hashes use an empty salt. "
+        "Set this env variable to a random secret for stronger protection."
+    )
+
+
+def _hash_api_key(raw_key: str) -> str:
+    """Hash a raw REST API key using HMAC-SHA256 with the deployment salt."""
+    return hmac.new(_API_KEY_SALT, raw_key.encode(), hashlib.sha256).hexdigest()
+
 
 
 class UserRegistry:
@@ -62,11 +78,22 @@ class UserRegistry:
         # portail.yaml top-level policy fields
         self._unknown_user_policy: str = "deny"
         self._guest_role: str = "guest"
+        self._permissive: bool = True
         self._load()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def is_permissive(self) -> bool:
+        """Return True when the registry has no loaded configuration.
+
+        Returns:
+            True if no portail.yaml was successfully loaded (permissive/pass-through
+            mode); False once a valid config has been parsed.
+        """
+        return self._permissive
 
     def resolve_user(
         self,
@@ -94,13 +121,21 @@ class UserRegistry:
 
         raw_id = sender_id.split(":", 1)[1]
 
-        # Exact (channel, context, raw_id) match — highest precision
+        # Exact (channel, context, raw_id) match — highest precision.
+        # NOTE: for channel == "rest", REST API keys are stored *only* in
+        # _sender_index (hashed via SHA-256), never in _by_identifier.
+        # This lookup will always miss for REST senders; the hash-based
+        # _sender_index fallback below is the authoritative path for REST.
+        # Do NOT "fix" this by storing plain REST keys here — they are
+        # intentionally kept hashed for security.
         record = self._by_identifier.get((channel, context, raw_id))
         if record is not None:
             return record
 
-        # sender_index fallback: works across contexts but within the channel
-        return self._sender_index.get(f"{channel}:{raw_id}")
+        # sender_index fallback: works across contexts but within the channel.
+        # REST API keys are stored hashed — hash the raw_id before lookup.
+        lookup_id = _hash_api_key(raw_id) if channel == "rest" else raw_id
+        return self._sender_index.get(f"{channel}:{lookup_id}")
 
     def build_guest_record(self) -> UserRecord:
         """Build a synthetic guest UserRecord with role data from the configured guest role.
@@ -249,7 +284,8 @@ class UserRegistry:
                 if ch == "rest":
                     for key in contexts.get("api_keys") or []:
                         if key:
-                            new_sender_index[f"rest:{key}"] = record
+                            key_hash = _hash_api_key(str(key))
+                            new_sender_index[f"rest:{key_hash}"] = record
                 else:
                     for ctx, raw_id in contexts.items():
                         if raw_id:
@@ -259,6 +295,7 @@ class UserRegistry:
 
         self._sender_index = new_sender_index
         self._by_identifier = new_by_identifier
+        self._permissive = False
 
         logger.info(
             "UserRegistry loaded: %d identifiers from %s",

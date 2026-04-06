@@ -725,3 +725,74 @@ def test_resolve_user_path_traversal_rejected(tmp_path: Path) -> None:
 
     assert result is not None
     assert result.prompt_path is None
+
+
+# ---------------------------------------------------------------------------
+# is_permissive property (fail-closed security — Phase 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_user_registry_is_permissive_when_no_file(tmp_path: Path) -> None:
+    """UserRegistry with a non-existent config file must start in permissive mode."""
+    missing = tmp_path / "portail.yaml"
+    registry = UserRegistry(config_path=missing)
+    assert registry.is_permissive is True
+
+
+@pytest.mark.unit
+def test_user_registry_not_permissive_when_loaded(tmp_path: Path) -> None:
+    """UserRegistry loaded from a valid portail.yaml must NOT be permissive."""
+    path = _write_portail_yaml(tmp_path)
+    registry = UserRegistry(config_path=path)
+    assert registry.is_permissive is False
+
+
+# ---------------------------------------------------------------------------
+# REST API key — SHA-256 round-trip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_rest_api_key_resolves_after_sha256_hashing(tmp_path: Path) -> None:
+    """REST API keys stored as SHA-256 hashes must resolve to the correct user.
+
+    The registry stores ``rest:<sha256(key)>`` in the sender index.  The
+    ``resolve_user`` method must hash the raw key before the lookup so that
+    a call with the plaintext key succeeds.
+    """
+    from textwrap import dedent
+
+    yaml_content = dedent("""\
+        unknown_user_policy: deny
+        guest_role: guest
+
+        users:
+          usr_api:
+            display_name: API User
+            role: user
+            identifiers:
+              rest:
+                api_keys: ["my-secret-key-abc"]
+
+        roles:
+          user:
+            actions: ["send"]
+            skills_dirs: []
+            allowed_mcp_tools: []
+            prompt_path: null
+          guest:
+            actions: []
+            skills_dirs: []
+            allowed_mcp_tools: []
+            prompt_path: null
+    """)
+    path = tmp_path / "portail.yaml"
+    path.write_text(yaml_content, encoding="utf-8")
+
+    registry = UserRegistry(config_path=path)
+    result = registry.resolve_user("rest:my-secret-key-abc", "rest", "dm")
+
+    assert result is not None, "resolve_user must find the user by raw REST API key"
+    assert result.user_id == "usr_api"
+

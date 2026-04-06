@@ -29,7 +29,7 @@ from atelier.agent_executor import AgentResult
 
 # Path to the shipped default YAML for relais-config
 _CONFIG_ADMIN_YAML = (
-    Path(__file__).parent.parent / "config" / "atelier" / "subagents" / "relais-config.yaml.default"
+    Path(__file__).parent.parent / "config" / "atelier" / "subagents" / "relais-config" / "subagent.yaml.default"
 )
 
 
@@ -339,7 +339,7 @@ def test_config_admin_prompt_contains_skills_dirs_reference() -> None:
 def _make_registry_with_config_admin(tmp_path: Path) -> "SubagentRegistry":
     """Build a SubagentRegistry with relais-config loaded from a tmp dir.
 
-    Copies relais-config.yaml.default → tmp/config/atelier/subagents/relais-config.yaml
+    Copies subagent.yaml.default → tmp/config/atelier/subagents/relais-config/subagent.yaml
     so that SubagentRegistry.load() can find it via CONFIG_SEARCH_PATH=[tmp].
 
     Args:
@@ -351,9 +351,9 @@ def _make_registry_with_config_admin(tmp_path: Path) -> "SubagentRegistry":
     import shutil
     from atelier.subagents import SubagentRegistry
 
-    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
-    subagents_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(_CONFIG_ADMIN_YAML, subagents_dir / "relais-config.yaml")
+    pack_dir = tmp_path / "config" / "atelier" / "subagents" / "relais-config"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_CONFIG_ADMIN_YAML, pack_dir / "subagent.yaml")
 
     mock_tool_registry = MagicMock()
     mock_tool_registry.get = lambda name: None
@@ -518,11 +518,11 @@ def _make_atelier_for_gating():
     import tempfile
     from atelier.main import Atelier
 
-    # Prepare a tmp dir with relais-config.yaml so the registry picks it up
+    # Prepare a tmp dir with relais-config pack so the registry picks it up
     tmpdir = Path(tempfile.mkdtemp())
-    subagents_dir = tmpdir / "config" / "atelier" / "subagents"
-    subagents_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(_CONFIG_ADMIN_YAML, subagents_dir / "relais-config.yaml")
+    pack_dir = tmpdir / "config" / "atelier" / "subagents" / "relais-config"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_CONFIG_ADMIN_YAML, pack_dir / "subagent.yaml")
 
     profile_mock = MagicMock()
     profile_mock.model = "test:model"

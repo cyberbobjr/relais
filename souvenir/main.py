@@ -67,6 +67,7 @@ from typing import Any
 from common.brick_base import BrickBase, StreamSpec
 from common.contexts import CTX_SOUVENIR_REQUEST, SouvenirRequest
 from common.envelope import Envelope
+from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
@@ -92,8 +93,8 @@ class Souvenir(BrickBase):
         """Initialise les streams Redis, les stores mémoire et le registre d'actions."""
         super().__init__("souvenir")
         # Preserve legacy attribute names accessed by tests and other bricks.
-        self.stream_req = "relais:memory:request"
-        self.stream_res = "relais:memory:response"
+        self.stream_req = STREAM_MEMORY_REQUEST
+        self.stream_res = STREAM_MEMORY_RESPONSE
         self.group_name = "souvenir_group"
         self.consumer_name = "souvenir_1"
         self._long_term = LongTermStore()

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import cast
 
 import certifi
 
@@ -102,7 +103,7 @@ class DiscordAiguilleur(NativeAiguilleur):
             )
             return
 
-        client = _RelaisDiscordClient(stop_event=self.stop_event, channel_config=self.config)
+        client = _RelaisDiscordClient(stop_event=cast(asyncio.Event, self.stop_event), channel_config=self.config)
         try:
             await client.start(token)
         except asyncio.CancelledError:
@@ -238,7 +239,8 @@ class _RelaisDiscordClient(discord.Client):
 
     async def on_ready(self) -> None:
         """Log successful Discord login."""
-        logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
+        if self.user is not None:
+            logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
 
     async def on_message(self, message: discord.Message) -> None:
         """Handle incoming Discord messages and publish them to the Redis bus.
@@ -249,7 +251,7 @@ class _RelaisDiscordClient(discord.Client):
         Args:
             message: The incoming Discord message event.
         """
-        if message.author.id == self.user.id:
+        if self.user is None or message.author.id == self.user.id:
             return
 
         bot_mentioned = self.user in message.mentions
@@ -283,6 +285,7 @@ class _RelaisDiscordClient(discord.Client):
                     "access_context": "dm" if is_dm else "server",
                     "channel_profile": self._llm_profile,
                     "channel_prompt_path": self._channel_prompt_path,
+                    "streaming": self._channel_config.streaming if self._channel_config is not None else False,
                 }
             },
         )
@@ -291,6 +294,11 @@ class _RelaisDiscordClient(discord.Client):
             self._typing_loop(message.channel, envelope.correlation_id)
         )
         self._typing_tasks[envelope.correlation_id] = typing_task
+
+        if self._redis_conn is None:
+            logger.error("Redis connection not available for incoming message")
+            self._cancel_typing(envelope.correlation_id)
+            return
 
         try:
             await self._redis_conn.xadd(self.stream_in, {"payload": envelope.to_json()})
@@ -313,6 +321,9 @@ class _RelaisDiscordClient(discord.Client):
             stream: Redis stream key (e.g. ``relais:messages:outgoing:discord``).
             group: Consumer group name to create.
         """
+        if self._redis_conn is None:
+            logger.warning("Redis connection not available for consumer group creation")
+            return
         try:
             await self._redis_conn.xgroup_create(stream, group, mkstream=True)
         except Exception as exc:
@@ -338,11 +349,11 @@ class _RelaisDiscordClient(discord.Client):
             if resolution fails.
         """
         try:
-            aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})
+            aiguilleur_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {}) # type: ignore[assignment]
             channel_id = int(aiguilleur_ctx.get("reply_to", 0))
             channel = self.get_channel(channel_id)
-            if channel:
-                return channel
+            if channel is not None:
+                return channel # type: ignore
             user_id = int(envelope.sender_id.split(":")[1])
             user = await self.fetch_user(user_id)
             return await user.create_dm()
@@ -370,7 +381,7 @@ class _RelaisDiscordClient(discord.Client):
                 and ``context[CTX_ATELIER]["progress_detail"]`` carry the event data.
             channel: Discord channel or DM to send the notification to.
         """
-        atelier_ctx: AtelierCtx = envelope.context.get(CTX_ATELIER, {})
+        atelier_ctx: AtelierCtx = envelope.context.get(CTX_ATELIER, {}) # type: ignore[assignment]
         event = atelier_ctx.get("progress_event", "")
         if not event:
             return
@@ -441,6 +452,9 @@ class _RelaisDiscordClient(discord.Client):
         On outer Redis errors (connection loss, stream errors) the loop sleeps
         1 second before retrying.
         """
+        if self._redis_conn is None:
+            logger.error("Redis connection not available for outgoing stream consumer")
+            return
         await self._ensure_consumer_group(self.stream_out, self.group_name)
         logger.info("Listening for outgoing messages targeted to Discord...")
 

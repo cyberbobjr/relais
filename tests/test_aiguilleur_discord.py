@@ -124,6 +124,7 @@ async def test_on_message_queues_envelope_on_mention():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._channel_config = ChannelConfig(name="discord")
         client._llm_profile = "default"
         client._channel_prompt_path = None
         _init_typing_mocks(client)
@@ -167,6 +168,7 @@ async def test_on_message_dm_queues_envelope():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._channel_config = ChannelConfig(name="discord")
         client._llm_profile = "default"
         client._channel_prompt_path = None
         _init_typing_mocks(client)
@@ -204,6 +206,7 @@ async def test_on_message_empty_content_defaults_to_coucou():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._channel_config = ChannelConfig(name="discord")
         client._llm_profile = "default"
         client._channel_prompt_path = None
         _init_typing_mocks(client)
@@ -243,6 +246,7 @@ async def test_on_message_xadd_failure_does_not_raise():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._channel_config = ChannelConfig(name="discord")
         client._llm_profile = "default"
         client._channel_prompt_path = None
         _init_typing_mocks(client)
@@ -493,6 +497,46 @@ async def test_on_message_stamps_default_channel_profile_when_no_channel_profile
     assert "llm_profile" not in data["context"]["aiguilleur"]
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_on_message_stamps_streaming_flag() -> None:
+    """on_message stamps context["aiguilleur"]["streaming"] from ChannelConfig.streaming."""
+    from aiguilleur.channels.discord.adapter import _RelaisDiscordClient as RelaisDiscordClient
+
+    mock_user = MagicMock()
+    mock_user.id = 100
+
+    mock_message = MagicMock()
+    mock_message.author.id = 999
+    mock_message.author.name = "TestUser"
+    mock_message.mentions = [mock_user]
+    mock_message.channel = type("TextChannel", (), {})()
+    mock_message.channel.id = 555
+    mock_message.content = f"<@{mock_user.id}> hello"
+
+    mock_redis = AsyncMock()
+
+    for streaming_value in (True, False):
+        channel_config = ChannelConfig(name="discord", streaming=streaming_value)
+
+        with patch.object(RelaisDiscordClient, "__init__", lambda s: None):
+            client = RelaisDiscordClient.__new__(RelaisDiscordClient)
+            client._redis_conn = mock_redis
+            client.stream_in = "relais:messages:incoming"
+            client._channel_config = channel_config
+            client._llm_profile = "default"
+            client._channel_prompt_path = None
+            _init_typing_mocks(client)
+
+            with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
+                await client.on_message(mock_message)
+
+        payload_json = mock_redis.xadd.call_args[0][1]["payload"]
+        data = json.loads(payload_json)
+        assert data["context"]["aiguilleur"]["streaming"] is streaming_value
+        mock_redis.reset_mock()
+
+
 # ---------------------------------------------------------------------------
 # Typing indicator tests
 # ---------------------------------------------------------------------------
@@ -529,6 +573,7 @@ async def test_typing_task_started_on_message():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._channel_config = ChannelConfig(name="discord")
         client._llm_profile = "default"
         client._channel_prompt_path = None
         client._typing_tasks = {}

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, cast
 
 from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
 from deepagents import SubAgent
@@ -241,7 +241,7 @@ class AgentExecutor:
             skills=skills or [],
             backend=composite_backend,
             checkpointer=checkpointer or MemorySaver(),
-            subagents=compiled_subagents,
+            subagents=cast(list[SubAgent | Any], compiled_subagents),
         )
 
     async def execute(

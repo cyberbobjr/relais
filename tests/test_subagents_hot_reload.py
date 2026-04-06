@@ -24,17 +24,18 @@ import yaml
 
 
 def _write_subagent_yaml(directory: Path, name: str, extra: dict | None = None) -> Path:
-    """Write a minimal valid subagent YAML to directory/name.yaml.
+    """Write a minimal valid subagent pack to directory/name/subagent.yaml.
 
     Args:
-        directory: Target directory.
-        name: Subagent name and file stem.
+        directory: Target directory (the subagents/ folder).
+        name: Subagent name; creates a subdirectory with that name.
         extra: Extra YAML fields to merge.
 
     Returns:
-        Path to the written file.
+        Path to the written subagent.yaml file.
     """
-    directory.mkdir(parents=True, exist_ok=True)
+    pack_dir = directory / name
+    pack_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "name": name,
         "description": f"Description of {name}",
@@ -42,7 +43,7 @@ def _write_subagent_yaml(directory: Path, name: str, extra: dict | None = None) 
     }
     if extra:
         data.update(extra)
-    path = directory / f"{name}.yaml"
+    path = pack_dir / "subagent.yaml"
     path.write_text(yaml.dump(data))
     return path
 
@@ -77,8 +78,6 @@ def _make_atelier_with_tmp_subagents(tmp_path: Path):
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
         patch("atelier.main.load_progress_config", return_value=fake_progress),
-        patch("atelier.main.load_channels_config",
-              return_value={"telegram": MagicMock(streaming=True)}),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
         patch("atelier.main.resolve_storage_dir", return_value=tmp_path),
@@ -197,7 +196,6 @@ async def test_reload_config_picks_up_new_subagent_yaml(tmp_path: Path) -> None:
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_progress_config", return_value=MagicMock()),
-        patch("atelier.main.load_channels_config", return_value={}),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         result = await atelier.reload_config()
@@ -218,7 +216,6 @@ async def test_reload_config_preserves_registry_when_profiles_fail(tmp_path: Pat
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_progress_config", return_value=MagicMock()),
-        patch("atelier.main.load_channels_config", return_value={}),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         await atelier.reload_config()
@@ -248,7 +245,6 @@ def test_build_config_candidate_includes_subagent_registry(tmp_path: Path) -> No
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_progress_config", return_value=MagicMock()),
-        patch("atelier.main.load_channels_config", return_value={}),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         candidate = atelier._build_config_candidate()
@@ -267,7 +263,6 @@ def test_build_config_candidate_subagent_registry_is_subagent_registry_instance(
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_progress_config", return_value=MagicMock()),
-        patch("atelier.main.load_channels_config", return_value={}),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         candidate = atelier._build_config_candidate()

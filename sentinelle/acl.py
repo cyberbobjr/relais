@@ -69,6 +69,16 @@ class ACLManager:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def is_permissive(self) -> bool:
+        """Return True when the ACL has no loaded configuration.
+
+        Returns:
+            True if no sentinelle.yaml was successfully loaded (all requests
+            pass through); False once a valid config has been parsed.
+        """
+        return self._permissive
+
     def is_allowed(
         self,
         sender_id: str,

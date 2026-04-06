@@ -38,6 +38,7 @@ import redis as redis_sync
 from common.config_loader import get_relais_home
 from common.contexts import CTX_SOUVENIR_REQUEST
 from common.envelope import Envelope
+from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from deepagents.backends import BackendProtocol
 from deepagents.backends.protocol import (
     EditResult,
@@ -50,8 +51,8 @@ from deepagents.backends.protocol import (
 
 logger = logging.getLogger(__name__)
 
-_STREAM_REQ = "relais:memory:request"
-_STREAM_RES = "relais:memory:response"
+_STREAM_REQ = STREAM_MEMORY_REQUEST
+_STREAM_RES = STREAM_MEMORY_RESPONSE
 _TIMEOUT_S = 3.0
 
 

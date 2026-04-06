@@ -47,8 +47,10 @@ Il est correct que les points d'entrée de briques l'appellent au démarrage.
 #### Option recommandée
 
 ```bash
-./supervisor.sh start all
-./supervisor.sh status
+./supervisor.sh start all           # Démarrer le système
+./supervisor.sh --verbose start all # Démarrer + suivre les logs (Ctrl+C pour détacher)
+./supervisor.sh status              # Voir l'état des bricks
+./supervisor.sh --verbose restart all # Redémarrer + suivre les logs
 ```
 
 #### Option manuelle

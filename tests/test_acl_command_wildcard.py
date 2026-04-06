@@ -243,3 +243,24 @@ class TestACLCommandWildcard:
             context="group", scope_id="group123",
             user_record=admin,
         ) is True
+
+
+# ---------------------------------------------------------------------------
+# is_permissive property (fail-closed security — Phase 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_acl_manager_is_permissive_when_no_file(tmp_path: Path) -> None:
+    """ACLManager with a non-existent config file must start in permissive mode."""
+    missing = tmp_path / "sentinelle.yaml"
+    acl = ACLManager(config_path=missing)
+    assert acl.is_permissive is True
+
+
+@pytest.mark.unit
+def test_acl_manager_not_permissive_when_loaded(tmp_path: Path) -> None:
+    """ACLManager loaded from a valid sentinelle.yaml must NOT be permissive."""
+    cfg = _write_sentinelle_yaml(tmp_path, _SENTINELLE_YAML)
+    acl = ACLManager(config_path=cfg)
+    assert acl.is_permissive is False

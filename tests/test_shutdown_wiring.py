@@ -174,9 +174,9 @@ async def test_souvenir_request_stream_exits_on_shutdown() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_archiviste_exits_on_shutdown() -> None:
-    """Archiviste._process_stream exits when GracefulShutdown.is_stopping() is True.
+    """Archiviste._process_stream exits when shutdown_event is set.
 
-    Wires a pre-set shutdown stub and asserts the coroutine completes within
+    Passes a pre-set asyncio.Event and asserts the coroutine completes within
     1 second (no infinite loop).
     """
     from archiviste.main import Archiviste
@@ -188,40 +188,21 @@ async def test_archiviste_exits_on_shutdown() -> None:
 
     redis_conn = _make_redis_mock()
 
-    class _PreSetShutdown:
-        def __init__(self):
-            self._stop_event = asyncio.Event()
-            self._stop_event.set()
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
 
-        def install_signal_handlers(self):
-            pass
-
-        def is_stopping(self):
-            return self._stop_event.is_set()
-
-        @property
-        def stop_event(self):
-            return self._stop_event
-
-        def register(self, task):
-            pass
-
-        async def wait_for_tasks(self, timeout=None):
-            pass
-
-    with patch("archiviste.main.GracefulShutdown", return_value=_PreSetShutdown()):
-        # _write_event uses open() — patch it so no filesystem access occurs
-        with patch.object(archiviste, "_write_event", return_value=None):
-            try:
-                await asyncio.wait_for(
-                    archiviste._process_stream(redis_conn),
-                    timeout=1.0,
-                )
-            except asyncio.TimeoutError:
-                pytest.fail(
-                    "Archiviste._process_stream did not exit after shutdown was requested "
-                    "(loop still running after 1 s — GracefulShutdown not wired)"
-                )
+    # _write_event uses open() — patch it so no filesystem access occurs
+    with patch.object(archiviste, "_write_event", return_value=None):
+        try:
+            await asyncio.wait_for(
+                archiviste._process_stream(redis_conn, shutdown_event),
+                timeout=1.0,
+            )
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "Archiviste._process_stream did not exit after shutdown was requested "
+                "(loop still running after 1 s — shutdown_event not checked)"
+            )
 
 
 # ---------------------------------------------------------------------------

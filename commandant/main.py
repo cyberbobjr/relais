@@ -1,20 +1,12 @@
 import asyncio
 import logging
-import os
-import sys
 from typing import Any
-
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout,
-)
 
 from commandant.commands import COMMAND_REGISTRY, parse_command
 from common.envelope import Envelope
 from common.redis_client import RedisClient
 from common.shutdown import GracefulShutdown
+from common.streams import STREAM_COMMANDS, STREAM_LOGS
 
 logger = logging.getLogger("commandant")
 
@@ -29,7 +21,7 @@ class Commandant:
 
     def __init__(self) -> None:
         self.client: RedisClient = RedisClient("commandant")
-        self.stream_in: str = "relais:commands"
+        self.stream_in: str = STREAM_COMMANDS
         self.group_name: str = "commandant_group"
         self.consumer_name: str = "commandant_1"
 
@@ -113,7 +105,7 @@ class Commandant:
         shutdown = GracefulShutdown()
         shutdown.install_signal_handlers()
         redis_conn = await self.client.get_connection()
-        await redis_conn.xadd("relais:logs", {
+        await redis_conn.xadd(STREAM_LOGS, {
             "level": "INFO",
             "brick": "commandant",
             "message": "Commandant started",

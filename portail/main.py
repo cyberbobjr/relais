@@ -77,6 +77,13 @@ from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, AiguilleurCtx, PortailC
 from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_VALIDATED
 from common.redis_client import RedisClient
+from common.streams import (
+    STREAM_ADMIN_PENDING_USERS,
+    STREAM_INCOMING,
+    STREAM_LOGS,
+    STREAM_SECURITY,
+    key_active_sessions,
+)
 from common.user_record import UserRecord
 from portail.user_registry import UserRegistry
 
@@ -100,14 +107,15 @@ class Portail(BrickBase):
     def __init__(self) -> None:
         """Initialise Le Portail with Redis stream and group configurations."""
         super().__init__("portail")
-        self.stream_in: str = "relais:messages:incoming"
-        self.stream_out: str = "relais:security"
+        self.stream_in: str = STREAM_INCOMING
+        self.stream_out: str = STREAM_SECURITY
         self.group_name: str = "portail_group"
         self.consumer_name: str = "portail_1"
         # Discover config path via a temporary registry instantiation, then
         # delegate all state initialisation to _load() so __init__ and hot-reload
         # share a single authoritative code path.
         self._config_path: Path | None = UserRegistry()._config_path
+        self._config_loaded_once: bool = False
         self._load()
 
     # ------------------------------------------------------------------
@@ -135,6 +143,8 @@ class Portail(BrickBase):
         self._user_registry = registry
         self._guest_role = registry.guest_role
         self._unknown_user_policy = registry.unknown_user_policy
+        if not registry.is_permissive:
+            self._config_loaded_once = True
         logger.info(
             "Portail: config loaded — unknown_user_policy=%s, guest_role=%s",
             self._unknown_user_policy,
@@ -189,6 +199,11 @@ class Portail(BrickBase):
             yaml.YAMLError: If the config file cannot be parsed as valid YAML.
         """
         if self._config_path is None or not self._config_path.exists():
+            if self._config_loaded_once:
+                raise RuntimeError(
+                    "UserRegistry: regression to permissive mode refused "
+                    "(config was loaded once — fail-closed on reload)"
+                )
             raise FileNotFoundError(
                 f"Portail config file not found: {self._config_path}"
             )
@@ -196,7 +211,13 @@ class Portail(BrickBase):
         # parse errors internally and falls back silently; we want hard failure here.
         raw = self._config_path.read_text(encoding="utf-8")
         yaml.safe_load(raw)  # raises yaml.YAMLError on malformed input
-        return UserRegistry(config_path=self._config_path)
+        candidate = UserRegistry(config_path=self._config_path)
+        if self._config_loaded_once and candidate.is_permissive:
+            raise RuntimeError(
+                "UserRegistry: regression to permissive mode refused "
+                "(config was loaded once — fail-closed on reload)"
+            )
+        return candidate
 
     def _apply_config(self, registry: UserRegistry) -> None:
         """Swap in a freshly loaded UserRegistry and update dependent fields.
@@ -207,6 +228,8 @@ class Portail(BrickBase):
         self._user_registry = registry
         self._guest_role = registry.guest_role
         self._unknown_user_policy = registry.unknown_user_policy
+        if not registry.is_permissive:
+            self._config_loaded_once = True
         logger.info(
             "Portail: config applied — unknown_user_policy=%s, guest_role=%s",
             self._unknown_user_policy,
@@ -306,7 +329,7 @@ class Portail(BrickBase):
             redis_conn: Active async Redis connection.
             envelope: The validated incoming envelope whose fields are persisted.
         """
-        key = f"relais:active_sessions:{envelope.sender_id}"
+        key = key_active_sessions(envelope.sender_id)
         mapping: dict[str, Any] = {
             "last_seen": str(datetime.now(timezone.utc).timestamp()),
             "channel": envelope.channel,
@@ -367,7 +390,7 @@ class Portail(BrickBase):
                     envelope.sender_id,
                 )
                 await redis_conn.xadd(
-                    "relais:admin:pending_users",
+                    STREAM_ADMIN_PENDING_USERS,
                     {
                         "sender_id": envelope.sender_id,
                         "channel": envelope.channel,
@@ -397,7 +420,7 @@ class Portail(BrickBase):
         )
 
         # Log to Redis stream
-        await redis_conn.xadd("relais:logs", {
+        await redis_conn.xadd(STREAM_LOGS, {
             "level": "INFO",
             "brick": "portail",
             "correlation_id": envelope.correlation_id,

@@ -38,7 +38,6 @@ def _make_atelier_minimal():
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
         patch("atelier.main.load_progress_config", return_value=fake_progress),
-        patch("atelier.main.load_channels_config", return_value={"telegram": MagicMock(streaming=True)}),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
@@ -105,16 +104,217 @@ def test_atelier_load_reloads_progress_config() -> None:
 
 
 @pytest.mark.unit
-def test_atelier_load_reloads_streaming_channels() -> None:
-    """_load() updates _streaming_capable_channels from load_channels_config()."""
+def test_atelier_streaming_flag_read_from_envelope_context() -> None:
+    """Atelier reads streaming capability from context["aiguilleur"]["streaming"], not from channels.yaml."""
+    from common.contexts import CTX_AIGUILLEUR
+
     atelier = _make_atelier_minimal()
 
-    new_channels = {"slack": MagicMock(streaming=True), "discord": MagicMock(streaming=False)}
-    with patch("atelier.main.load_channels_config", return_value=new_channels):
-        atelier._load()
+    # Envelope with streaming=True stamped by Aiguilleur
+    env_streaming = MagicMock()
+    env_streaming.context = {CTX_AIGUILLEUR: {"streaming": True}}
+    aig_ctx = env_streaming.context.get(CTX_AIGUILLEUR, {})
+    assert aig_ctx.get("streaming", False) is True
 
-    assert "slack" in atelier._streaming_capable_channels
-    assert "discord" not in atelier._streaming_capable_channels
+    # Envelope with streaming=False
+    env_no_stream = MagicMock()
+    env_no_stream.context = {CTX_AIGUILLEUR: {"streaming": False}}
+    aig_ctx2 = env_no_stream.context.get(CTX_AIGUILLEUR, {})
+    assert aig_ctx2.get("streaming", False) is False
+
+    # Envelope without any aiguilleur context (older adapter) → safe default
+    env_legacy = MagicMock()
+    env_legacy.context = {}
+    aig_ctx3 = env_legacy.context.get(CTX_AIGUILLEUR, {})
+    assert aig_ctx3.get("streaming", False) is False
+
+    # Atelier no longer has _streaming_capable_channels
+    assert not hasattr(atelier, "_streaming_capable_channels")
+
+
+# ---------------------------------------------------------------------------
+# Streaming flag — envelope code path in _run_stream_loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> None:
+    """When context[aiguilleur][streaming]=True, AgentExecutor.execute receives a non-None stream_callback."""
+    from pathlib import Path
+    from common.envelope import Envelope
+    from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL
+
+    with (
+        patch("atelier.main.load_profiles", return_value={}),
+        patch("atelier.main.load_for_sdk", return_value={}),
+        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
+        patch("atelier.main.SubagentRegistry") as mock_registry_cls,
+        patch("atelier.main.AsyncSqliteSaver"),
+        patch("atelier.main.resolve_storage_dir", return_value=Path("/tmp")),
+        patch("atelier.main.RedisClient"),
+    ):
+        mock_registry_cls.discover.return_value = MagicMock()
+        from atelier.main import Atelier
+        atelier = Atelier()
+
+    profile_mock = MagicMock()
+    profile_mock.model = "anthropic:claude-sonnet-4-6"
+    profile_mock.max_turns = 5
+    atelier._profiles = {"default": profile_mock}
+
+    envelope = Envelope(
+        content="hello",
+        sender_id="discord:111",
+        channel="discord",
+        session_id="sess-stream",
+        correlation_id="corr-stream-001",
+        context={
+            CTX_AIGUILLEUR: {"streaming": True, "reply_to": "999"},
+            CTX_PORTAIL: {
+                "llm_profile": "default",
+                "user_record": {
+                    "role": "user",
+                    "prompt_path": None,
+                    "skills_dirs": [],
+                    "allowed_mcp_tools": [],
+                    "display_name": "Alice",
+                    "blocked": False,
+                    "actions": ["send"],
+                },
+            },
+        },
+    )
+
+    redis_conn = AsyncMock()
+    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        [("relais:tasks", [("1234567890-0", {"payload": envelope.to_json()})])],
+        asyncio.CancelledError(),
+    ])
+    redis_conn.xack = AsyncMock()
+    redis_conn.xadd = AsyncMock(return_value="0-0")
+    redis_conn.publish = AsyncMock()
+
+    execute_kwargs: list[dict] = []
+
+    with (
+        patch("atelier.main.AgentExecutor") as MockExec,
+        patch("atelier.main.McpSessionManager"),
+        patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("atelier.main.resolve_profile", return_value=profile_mock),
+        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.load_for_sdk", return_value={}),
+    ):
+        mock_instance = AsyncMock()
+
+        async def capture_execute(**kwargs):
+            execute_kwargs.append(kwargs)
+            return MagicMock(reply_text="reply")
+
+        mock_instance.execute = capture_execute
+        MockExec.return_value = mock_instance
+
+        try:
+            await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+        except asyncio.CancelledError:
+            pass
+
+    assert execute_kwargs, "AgentExecutor.execute should have been called"
+    assert execute_kwargs[0].get("stream_callback") is not None, (
+        "stream_callback must be non-None when envelope has streaming=True"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false() -> None:
+    """When context[aiguilleur][streaming]=False, AgentExecutor.execute receives stream_callback=None."""
+    from pathlib import Path
+    from common.envelope import Envelope
+    from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL
+
+    with (
+        patch("atelier.main.load_profiles", return_value={}),
+        patch("atelier.main.load_for_sdk", return_value={}),
+        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
+        patch("atelier.main.SubagentRegistry") as mock_registry_cls,
+        patch("atelier.main.AsyncSqliteSaver"),
+        patch("atelier.main.resolve_storage_dir", return_value=Path("/tmp")),
+        patch("atelier.main.RedisClient"),
+    ):
+        mock_registry_cls.discover.return_value = MagicMock()
+        from atelier.main import Atelier
+        atelier = Atelier()
+
+    profile_mock = MagicMock()
+    profile_mock.model = "anthropic:claude-sonnet-4-6"
+    profile_mock.max_turns = 5
+    atelier._profiles = {"default": profile_mock}
+
+    envelope = Envelope(
+        content="hello",
+        sender_id="discord:111",
+        channel="discord",
+        session_id="sess-nostream",
+        correlation_id="corr-nostream-001",
+        context={
+            CTX_AIGUILLEUR: {"streaming": False, "reply_to": "999"},
+            CTX_PORTAIL: {
+                "llm_profile": "default",
+                "user_record": {
+                    "role": "user",
+                    "prompt_path": None,
+                    "skills_dirs": [],
+                    "allowed_mcp_tools": [],
+                    "display_name": "Alice",
+                    "blocked": False,
+                    "actions": ["send"],
+                },
+            },
+        },
+    )
+
+    redis_conn = AsyncMock()
+    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        [("relais:tasks", [("1234567890-0", {"payload": envelope.to_json()})])],
+        asyncio.CancelledError(),
+    ])
+    redis_conn.xack = AsyncMock()
+    redis_conn.xadd = AsyncMock(return_value="0-0")
+    redis_conn.publish = AsyncMock()
+
+    execute_kwargs: list[dict] = []
+
+    with (
+        patch("atelier.main.AgentExecutor") as MockExec,
+        patch("atelier.main.McpSessionManager"),
+        patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("atelier.main.resolve_profile", return_value=profile_mock),
+        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.load_for_sdk", return_value={}),
+    ):
+        mock_instance = AsyncMock()
+
+        async def capture_execute(**kwargs):
+            execute_kwargs.append(kwargs)
+            return MagicMock(reply_text="reply")
+
+        mock_instance.execute = capture_execute
+        MockExec.return_value = mock_instance
+
+        try:
+            await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+        except asyncio.CancelledError:
+            pass
+
+    assert execute_kwargs, "AgentExecutor.execute should have been called"
+    assert execute_kwargs[0].get("stream_callback") is None, (
+        "stream_callback must be None when envelope has streaming=False"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +332,6 @@ async def test_atelier_reload_config_returns_true_on_success() -> None:
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_progress_config", return_value=MagicMock()),
-        patch("atelier.main.load_channels_config", return_value={}),
     ):
         result = await atelier.reload_config()
 
@@ -150,7 +349,6 @@ async def test_atelier_reload_config_applies_new_profiles() -> None:
         patch("atelier.main.load_profiles", return_value=fresh_profiles),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_progress_config", return_value=MagicMock()),
-        patch("atelier.main.load_channels_config", return_value={}),
     ):
         await atelier.reload_config()
 

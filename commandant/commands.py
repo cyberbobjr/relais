@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
+from common.streams import STREAM_MEMORY_REQUEST, stream_outgoing
 from common.text_utils import strip_outer_quotes
 
 logger = logging.getLogger("commandant.commands")
@@ -78,7 +79,7 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
     )
 
     await redis_conn.xadd(
-        "relais:memory:request",
+        STREAM_MEMORY_REQUEST,
         {"payload": clear_env.to_json()},
     )
     logger.info("Clear request sent for session=%s", envelope.session_id)
@@ -101,7 +102,7 @@ async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
 
     response = Envelope.from_parent(envelope, help_text)
     await redis_conn.xadd(
-        f"relais:messages:outgoing:{envelope.channel}",
+        stream_outgoing(envelope.channel),
         {"payload": response.to_json()},
     )
 

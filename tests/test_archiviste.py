@@ -1,4 +1,4 @@
-"""Unit tests for archiviste.cleanup_retention and aiguilleur.base."""
+"""Unit tests for archiviste.cleanup_retention."""
 
 import asyncio
 import json
@@ -131,116 +131,6 @@ async def test_run_daily_on_empty_directory_does_not_raise(
 
 
 # ---------------------------------------------------------------------------
-# AiguilleurBase tests
-# ---------------------------------------------------------------------------
-
-import pytest_asyncio
-from aiguilleur.base import AiguilleurBase
-from common.envelope import Envelope
-
-
-def test_aiguilleur_base_is_abstract() -> None:
-    """AiguilleurBase est une ABC : l'instanciation directe doit lever TypeError."""
-    with pytest.raises(TypeError):
-        AiguilleurBase()  # type: ignore[abstract]
-
-
-def test_concrete_aiguilleur_can_be_instantiated() -> None:
-    """Une implémentation concrète qui implémente toutes les méthodes abstraites peut être instanciée."""
-
-    class ConcreteAiguilleur(AiguilleurBase):
-        channel_name = "test"
-
-        async def receive(self) -> Envelope:
-            return Envelope(
-                content="",
-                sender_id="u",
-                channel="test",
-                session_id="s",
-            )
-
-        async def send(self, envelope: Envelope, text: str) -> None:
-            pass
-
-        def format_for_channel(self, text: str) -> str:
-            return text
-
-    adapter = ConcreteAiguilleur()
-    assert adapter.channel_name == "test"
-
-
-@pytest.mark.asyncio
-async def test_start_is_noop_by_default() -> None:
-    """start() est un no-op par défaut et ne lève aucune exception."""
-
-    class ConcreteAiguilleur(AiguilleurBase):
-        channel_name = "noop"
-
-        async def receive(self) -> Envelope:
-            return Envelope(content="", sender_id="u", channel="noop", session_id="s")
-
-        async def send(self, envelope: Envelope, text: str) -> None:
-            pass
-
-        def format_for_channel(self, text: str) -> str:
-            return text
-
-    adapter = ConcreteAiguilleur()
-    # Should complete without raising
-    await adapter.start()
-
-
-@pytest.mark.asyncio
-async def test_stop_is_noop_by_default() -> None:
-    """stop() est un no-op par défaut et ne lève aucune exception."""
-
-    class ConcreteAiguilleur(AiguilleurBase):
-        channel_name = "noop"
-
-        async def receive(self) -> Envelope:
-            return Envelope(content="", sender_id="u", channel="noop", session_id="s")
-
-        async def send(self, envelope: Envelope, text: str) -> None:
-            pass
-
-        def format_for_channel(self, text: str) -> str:
-            return text
-
-    adapter = ConcreteAiguilleur()
-    # Should complete without raising
-    await adapter.stop()
-
-
-def test_channel_name_default_empty() -> None:
-    """AiguilleurBase.channel_name defaults to empty string on the base class."""
-    assert AiguilleurBase.channel_name == ""
-
-
-def test_concrete_subclass_requires_all_abstractmethods() -> None:
-    """A subclass that omits any abstract method raises TypeError on instantiation."""
-
-    class IncompleteAiguilleur(AiguilleurBase):
-        # Missing: receive, send, format_for_channel
-        channel_name = "incomplete"
-
-    with pytest.raises(TypeError):
-        IncompleteAiguilleur()  # type: ignore[abstract]
-
-    class MissingFormat(AiguilleurBase):
-        channel_name = "partial"
-
-        async def receive(self) -> Envelope:
-            return Envelope(content="", sender_id="u", channel="partial", session_id="s")
-
-        async def send(self, envelope: Envelope, text: str) -> None:
-            pass
-        # format_for_channel not implemented
-
-    with pytest.raises(TypeError):
-        MissingFormat()  # type: ignore[abstract]
-
-
-# ---------------------------------------------------------------------------
 # Archiviste main.py tests
 # ---------------------------------------------------------------------------
 
@@ -332,8 +222,9 @@ async def test_process_stream_creates_consumer_groups(tmp_path: Path) -> None:
     # Let the loop run one iteration then cancel.
     conn.xreadgroup.side_effect = [[], asyncio.CancelledError()]
 
+    event = asyncio.Event()
     with pytest.raises(asyncio.CancelledError):
-        await arc._process_stream(conn)
+        await arc._process_stream(conn, event)
 
     expected_streams = {"relais:logs", "relais:events:system", "relais:events:messages"}
     created_streams = {c.args[0] for c in conn.xgroup_create.await_args_list}
@@ -354,8 +245,9 @@ async def test_process_stream_busygroup_error_is_silenced(tmp_path: Path) -> Non
     conn.xreadgroup.side_effect = asyncio.CancelledError()
 
     # Should not raise despite xgroup_create always raising BUSYGROUP.
+    event = asyncio.Event()
     with pytest.raises(asyncio.CancelledError):
-        await arc._process_stream(conn)
+        await arc._process_stream(conn, event)
 
 
 @pytest.mark.unit
@@ -372,9 +264,10 @@ async def test_process_stream_non_busygroup_error_is_logged(
     conn.xgroup_create.side_effect = Exception("Some other Redis error")
     conn.xreadgroup.side_effect = asyncio.CancelledError()
 
+    event = asyncio.Event()
     with caplog.at_level(logging.WARNING, logger="archiviste"):
         with pytest.raises(asyncio.CancelledError):
-            await arc._process_stream(conn)
+            await arc._process_stream(conn, event)
 
     assert any("Consumer group error" in r.message for r in caplog.records)
 
@@ -396,8 +289,9 @@ async def test_process_stream_writes_event_and_acks(tmp_path: Path) -> None:
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with pytest.raises(asyncio.CancelledError):
-        await arc._process_stream(conn)
+        await arc._process_stream(conn, event)
 
     # JSONL written
     lines = arc.events_log.read_text().splitlines()
@@ -425,8 +319,9 @@ async def test_process_stream_logs_stream_log_to_stdout(
     ]
 
     import logging
+    event = asyncio.Event()
     with caplog.at_level(logging.DEBUG), pytest.raises(asyncio.CancelledError):
-        await arc._process_stream(conn)
+        await arc._process_stream(conn, event)
 
     assert "hello world" in caplog.text
     assert "portail" in caplog.text
@@ -447,8 +342,9 @@ async def test_process_stream_multiple_messages_in_sequence(tmp_path: Path) -> N
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with pytest.raises(asyncio.CancelledError):
-        await arc._process_stream(conn)
+        await arc._process_stream(conn, event)
 
     lines = arc.events_log.read_text().splitlines()
     assert len(lines) == 2
@@ -471,10 +367,11 @@ async def test_process_stream_xreadgroup_error_sleeps_and_continues(
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="archiviste"):
         with patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
             with pytest.raises(asyncio.CancelledError):
-                await arc._process_stream(conn)
+                await arc._process_stream(conn, event)
 
     assert any("Error reading from stream" in r.message for r in caplog.records)
     mock_sleep.assert_awaited_once_with(1)
@@ -487,19 +384,23 @@ async def test_start_calls_get_connection_and_process_stream(tmp_path: Path) -> 
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
-    arc.client = AsyncMock()
-    arc.client.get_connection = AsyncMock(return_value=conn)
-    arc.client.close = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.get_connection = AsyncMock(return_value=conn)
+    mock_client.close = AsyncMock()
 
-    # Make _process_stream return immediately (simulate CancelledError from outside).
+    mock_shutdown = MagicMock()
+    mock_shutdown.stop_event = asyncio.Event()
+
     arc._process_stream = AsyncMock(side_effect=asyncio.CancelledError())
     arc._process_pipeline_streams = AsyncMock(return_value=None)
 
-    await arc.start()
+    with patch("archiviste.main.GracefulShutdown", return_value=mock_shutdown):
+        with patch("archiviste.main.RedisClient", return_value=mock_client):
+            await arc.start()
 
-    arc.client.get_connection.assert_awaited_once()
-    arc._process_stream.assert_awaited_once_with(conn, shutdown=ANY)
-    arc.client.close.assert_awaited_once()
+    mock_client.get_connection.assert_awaited_once()
+    arc._process_stream.assert_awaited_once_with(conn, ANY)
+    mock_client.close.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -509,15 +410,21 @@ async def test_start_closes_redis_on_normal_completion(tmp_path: Path) -> None:
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
-    arc.client = AsyncMock()
-    arc.client.get_connection = AsyncMock(return_value=conn)
-    arc.client.close = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.get_connection = AsyncMock(return_value=conn)
+    mock_client.close = AsyncMock()
+
+    mock_shutdown = MagicMock()
+    mock_shutdown.stop_event = asyncio.Event()
+
     arc._process_stream = AsyncMock(return_value=None)
     arc._process_pipeline_streams = AsyncMock(return_value=None)
 
-    await arc.start()
+    with patch("archiviste.main.GracefulShutdown", return_value=mock_shutdown):
+        with patch("archiviste.main.RedisClient", return_value=mock_client):
+            await arc.start()
 
-    arc.client.close.assert_awaited_once()
+    mock_client.close.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -532,8 +439,9 @@ async def test_process_stream_empty_xreadgroup_result_does_not_write(tmp_path: P
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with pytest.raises(asyncio.CancelledError):
-        await arc._process_stream(conn)
+        await arc._process_stream(conn, event)
 
     assert not arc.events_log.exists() or arc.events_log.read_text() == ""
     conn.xack.assert_not_awaited()
@@ -585,12 +493,9 @@ async def test_process_pipeline_streams_logs_envelope_fields(
         asyncio.CancelledError(),
     ]
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.return_value = False
-
     with caplog.at_level(logging.INFO, logger="archiviste.pipeline"):
         with pytest.raises(asyncio.CancelledError):
-            await arc._process_pipeline_streams(conn, shutdown)
+            await arc._process_pipeline_streams(conn, asyncio.Event())
 
     pipeline_records = [r for r in caplog.records if r.name == "archiviste.pipeline"]
     assert pipeline_records, "archiviste.pipeline must emit at least one log record"
@@ -629,12 +534,9 @@ async def test_process_pipeline_streams_handles_non_envelope_gracefully(
         asyncio.CancelledError(),
     ]
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.return_value = False
-
     with caplog.at_level(logging.WARNING, logger="archiviste.pipeline"):
         with pytest.raises(asyncio.CancelledError):
-            await arc._process_pipeline_streams(conn, shutdown)
+            await arc._process_pipeline_streams(conn, asyncio.Event())
 
     warning_records = [
         r for r in caplog.records
@@ -650,11 +552,10 @@ async def test_process_pipeline_streams_exits_on_shutdown(tmp_path: Path) -> Non
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
-    shutdown = MagicMock()
-    # is_stopping() returns True from the very first call → loop body never executes
-    shutdown.is_stopping.return_value = True
+    event = asyncio.Event()
+    event.set()  # pre-set → loop body never executes
 
-    await arc._process_pipeline_streams(conn, shutdown)
+    await arc._process_pipeline_streams(conn, event)
 
     # xreadgroup must never have been called
     conn.xreadgroup.assert_not_awaited()
@@ -669,11 +570,12 @@ async def test_process_pipeline_streams_creates_consumer_groups(tmp_path: Path) 
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
+    # xgroup_create runs before the loop; pre-set event so loop exits immediately.
+    event = asyncio.Event()
+    event.set()
     conn.xreadgroup.return_value = []
 
-    await arc._process_pipeline_streams(conn, shutdown)
+    await arc._process_pipeline_streams(conn, event)
 
     created_streams = {c.args[0] for c in conn.xgroup_create.await_args_list}
     for stream in _PIPELINE_STREAMS:
@@ -689,15 +591,19 @@ async def test_start_runs_process_stream_and_pipeline_streams_in_parallel(
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
-    arc.client = AsyncMock()
-    arc.client.get_connection = AsyncMock(return_value=conn)
-    arc.client.close = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.get_connection = AsyncMock(return_value=conn)
+    mock_client.close = AsyncMock()
 
-    # Both coroutines return immediately (simulate clean shutdown)
+    mock_shutdown = MagicMock()
+    mock_shutdown.stop_event = asyncio.Event()
+
     arc._process_stream = AsyncMock(return_value=None)
     arc._process_pipeline_streams = AsyncMock(return_value=None)
 
-    await arc.start()
+    with patch("archiviste.main.GracefulShutdown", return_value=mock_shutdown):
+        with patch("archiviste.main.RedisClient", return_value=mock_client):
+            await arc.start()
 
     arc._process_stream.assert_awaited_once()
     arc._process_pipeline_streams.assert_awaited_once()
@@ -731,9 +637,10 @@ async def test_process_stream_reemit_includes_correlation_id(
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with caplog.at_level(logging.INFO, logger="portail"):
         with pytest.raises(asyncio.CancelledError):
-            await arc._process_stream(conn)
+            await arc._process_stream(conn, event)
 
     assert any(
         "abcd1234" in r.getMessage() for r in caplog.records if r.name == "portail"

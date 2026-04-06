@@ -370,9 +370,10 @@ async def test_archiviste_reemit_includes_correlation_id(
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with caplog.at_level(logging.INFO, logger="sentinelle"):
         with pytest.raises(asyncio.CancelledError):
-            await arc._process_stream(conn)
+            await arc._process_stream(conn, event)
 
     assert any(
         "feedcafe" in r.getMessage() for r in caplog.records if r.name == "sentinelle"
@@ -410,9 +411,10 @@ async def test_archiviste_reemit_without_correlation_id_no_prefix(
         asyncio.CancelledError(),
     ]
 
+    event = asyncio.Event()
     with caplog.at_level(logging.INFO, logger="portail"):
         with pytest.raises(asyncio.CancelledError):
-            await arc._process_stream(conn)
+            await arc._process_stream(conn, event)
 
     portail_records = [r for r in caplog.records if r.name == "portail"]
     assert portail_records, "portail logger must receive the re-emitted record"

@@ -327,7 +327,7 @@ case "$ACTION" in
         fi
         ensure_supervisord_running
         run_supervisorctl start all
-        [[ "$VERBOSE" == 1 ]] && tail_logs
+        if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
         ;;
     stop)
         if [[ "$TARGET" != "all" ]]; then
@@ -364,7 +364,7 @@ case "$ACTION" in
         supervisord -c "$CONFIG_PATH"
         wait_for_supervisord
         run_supervisorctl start all
-        [[ "$VERBOSE" == 1 ]] && tail_logs
+        if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
         ;;
     reload)
         if [[ "$TARGET" != "all" ]]; then

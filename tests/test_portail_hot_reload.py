@@ -333,3 +333,77 @@ async def test_portail_listener_subscribes_to_correct_channel(tmp_path: Path) ->
     await portail._config_reload_listener(mock_redis)
 
     assert "relais:config:reload:portail" in subscribe_calls
+
+
+# ---------------------------------------------------------------------------
+# _config_loaded_once — fail-closed guard (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_portail_config_loaded_once_set_after_valid_load(tmp_path: Path) -> None:
+    """After a successful _load() with a valid portail.yaml, _config_loaded_once is True."""
+    portail, _ = _make_portail_with_yaml(_PORTAIL_YAML_V1, tmp_path)
+    assert portail._config_loaded_once is True
+
+
+@pytest.mark.unit
+def test_portail_config_loaded_once_false_when_no_config(tmp_path: Path) -> None:
+    """When _load() is called with a missing portail.yaml, _config_loaded_once stays False."""
+    from portail.main import Portail
+
+    portail = Portail.__new__(Portail)
+    portail.client = MagicMock()
+    portail._brick_name = "portail"
+    portail._logger = logging.getLogger("portail")
+    portail.stream_in = "relais:messages:incoming"
+    portail.stream_out = "relais:security"
+    portail.group_name = "portail_group"
+    portail.consumer_name = "portail_1"
+    portail._config_lock = asyncio.Lock()
+    portail._config_loaded_once = False
+    missing = tmp_path / "portail.yaml"  # does not exist
+    portail._config_path = missing
+    portail._load()
+
+    assert portail._config_loaded_once is False
+
+
+@pytest.mark.unit
+def test_portail_build_candidate_raises_on_permissive_regression(tmp_path: Path) -> None:
+    """_build_config_candidate must raise RuntimeError when _config_loaded_once is True
+    but the candidate UserRegistry would be permissive (config file deleted)."""
+    portail, config_file = _make_portail_with_yaml(_PORTAIL_YAML_V1, tmp_path)
+    assert portail._config_loaded_once is True
+
+    config_file.unlink()
+
+    with pytest.raises((RuntimeError, FileNotFoundError), match="permissive|not found"):
+        portail._build_config_candidate()
+
+
+@pytest.mark.unit
+def test_portail_apply_config_sets_loaded_once(tmp_path: Path) -> None:
+    """_apply_config with a non-permissive UserRegistry must set _config_loaded_once."""
+    from portail.main import Portail
+    from portail.user_registry import UserRegistry
+
+    portail = Portail.__new__(Portail)
+    portail.client = MagicMock()
+    portail._brick_name = "portail"
+    portail._logger = logging.getLogger("portail")
+    portail._config_lock = asyncio.Lock()
+    portail._config_loaded_once = False
+    missing = tmp_path / "portail.yaml"
+    portail._config_path = missing
+    portail._user_registry = UserRegistry(config_path=missing)
+    portail._guest_role = "guest"
+    portail._unknown_user_policy = "deny"
+
+    config_file = tmp_path / "portail.yaml"
+    config_file.write_text(_PORTAIL_YAML_V1, encoding="utf-8")
+    fresh_registry = UserRegistry(config_path=config_file)
+
+    portail._apply_config(fresh_registry)
+
+    assert portail._config_loaded_once is True

@@ -205,11 +205,18 @@ PYTHONPATH=. uv run python atelier/main.py
 PYTHONPATH=. uv run python souvenir/main.py
 ```
 
-**Full system** (via supervisord):
+**Full system** (via supervisord wrapper):
+```bash
+./supervisor.sh start all              # Start all services
+./supervisor.sh --verbose start all    # Start + tail all logs (Ctrl+C to detach)
+./supervisor.sh status                 # Check status
+./supervisor.sh restart all            # Restart
+./supervisor.sh stop all               # Stop all services
+```
+
+Or direct supervisord:
 ```bash
 supervisord -c supervisord.conf
-
-# Monitor
 supervisorctl -c supervisord.conf status
 supervisorctl tail {service} -f  # Follow logs
 ```
