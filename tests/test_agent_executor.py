@@ -7,7 +7,9 @@ Tests validate:
 - execute() builds messages from context + envelope correctly
 - Buffer of 80 chars is respected before flushing to stream_callback
 - Remaining buffer is flushed at stream end
-- Transient errors (RateLimitError, InternalServerError, APIConnectionError) propagate unwrapped
+- Transient errors (RateLimitError, InternalServerError, APIConnectionError) raise ExhaustedRetriesError after retries
+- ValueError with rate-limit message is classified as transient by _is_transient_provider_error
+- Retry loop succeeds on second attempt when first raises a transient error
 - Permanent/unknown errors are wrapped in AgentExecutionError
 - AgentExecutionError stores optional response_body
 - skills= parameter is forwarded to create_deep_agent
@@ -19,6 +21,8 @@ from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from atelier.profile_loader import ResilienceConfig
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +50,8 @@ def _make_profile(model: str = "anthropic:claude-haiku-4-5") -> MagicMock:
     profile.model = model
     profile.base_url = None
     profile.api_key_env = None
+    # Zero retries so single-attempt tests remain valid; loop iterates exactly once.
+    profile.resilience = ResilienceConfig(retry_attempts=0, retry_delays=[])
     return profile
 
 
@@ -310,9 +316,9 @@ async def test_execute_streaming_skips_empty_content_chunks() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_propagates_rate_limit_error_unwrapped() -> None:
-    """RateLimitError (transient) must propagate without wrapping."""
-    from atelier.agent_executor import AgentExecutor
+async def test_execute_raises_exhausted_on_rate_limit() -> None:
+    """RateLimitError (transient) with no retries raises ExhaustedRetriesError."""
+    from atelier.agent_executor import AgentExecutor, ExhaustedRetriesError
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         raise RateLimitError("rate limited")
@@ -323,15 +329,15 @@ async def test_execute_propagates_rate_limit_error_unwrapped() -> None:
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        with pytest.raises(RateLimitError):
+        with pytest.raises(ExhaustedRetriesError):
             await executor.execute(_make_envelope("Hi"))
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_propagates_internal_server_error_unwrapped() -> None:
-    """InternalServerError (transient) must propagate without wrapping."""
-    from atelier.agent_executor import AgentExecutor
+async def test_execute_raises_exhausted_on_internal_server_error() -> None:
+    """InternalServerError (transient) with no retries raises ExhaustedRetriesError."""
+    from atelier.agent_executor import AgentExecutor, ExhaustedRetriesError
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         raise InternalServerError("server error")
@@ -342,15 +348,15 @@ async def test_execute_propagates_internal_server_error_unwrapped() -> None:
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        with pytest.raises(InternalServerError):
+        with pytest.raises(ExhaustedRetriesError):
             await executor.execute(_make_envelope("Hi"))
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_propagates_api_connection_error_unwrapped() -> None:
-    """APIConnectionError (transient) must propagate without wrapping."""
-    from atelier.agent_executor import AgentExecutor
+async def test_execute_raises_exhausted_on_api_connection_error() -> None:
+    """APIConnectionError (transient) with no retries raises ExhaustedRetriesError."""
+    from atelier.agent_executor import AgentExecutor, ExhaustedRetriesError
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         raise APIConnectionError("connection failed")
@@ -361,8 +367,54 @@ async def test_execute_propagates_api_connection_error_unwrapped() -> None:
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
-        with pytest.raises(APIConnectionError):
+        with pytest.raises(ExhaustedRetriesError):
             await executor.execute(_make_envelope("Hi"))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_retries_then_succeeds() -> None:
+    """Transient error on first attempt should retry and succeed on second."""
+    from atelier.agent_executor import AgentExecutor, AgentResult
+
+    call_count = 0
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RateLimitError("rate limited")
+        yield {"type": "messages", "ns": (), "data": (_ai_token("ok"), {})}
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    state = _make_agent_state()
+    mock_agent.aget_state = AsyncMock(return_value=state)
+
+    profile = _make_profile()
+    from atelier.profile_loader import ResilienceConfig
+    profile.resilience = ResilienceConfig(retry_attempts=1, retry_delays=[0])
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            executor = AgentExecutor(profile=profile, soul_prompt="...", tools=[])
+            result = await executor.execute(_make_envelope("Hi"))
+
+    assert call_count == 2
+    assert isinstance(result, AgentResult)
+    assert result.reply_text == "ok"
+
+
+@pytest.mark.unit
+def test_is_transient_provider_error_matches_rate_limit_valueerror() -> None:
+    """ValueError with a rate-limit message should be classified as transient."""
+    from atelier.agent_executor import _is_transient_provider_error
+
+    assert _is_transient_provider_error(ValueError("rate limit exceeded"))
+    assert _is_transient_provider_error(ValueError("upstream error: 502 Bad Gateway"))
+    assert _is_transient_provider_error(ValueError("model overloaded, try again"))
+    assert not _is_transient_provider_error(ValueError("unexpected schema mismatch"))
+    assert not _is_transient_provider_error(ValueError(""))
 
 
 @pytest.mark.unit

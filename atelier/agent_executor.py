@@ -6,6 +6,7 @@ native streaming (token-by-token) and multi-provider models.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -72,6 +73,19 @@ _TRANSIENT_ERROR_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Substrings matched (case-insensitive) inside a ValueError message to detect
+# upstream rate-limit or throttle errors forwarded as plain ValueError by
+# proxy layers (e.g. OpenRouter wrapping Alibaba / other upstream providers).
+_TRANSIENT_VALUE_ERROR_PATTERNS: tuple[str, ...] = (
+    "rate limit",
+    "rate increased too quickly",
+    "too many requests",
+    "upstream error",
+    "code: 502",
+    "code: 503",
+    "overloaded",
+)
+
 
 def _resolve_profile_model(
     profile: ProfileConfig,
@@ -112,9 +126,11 @@ def _resolve_profile_model(
 def _is_transient_provider_error(exc: BaseException) -> bool:
     """Return True if *exc* is a known transient provider error.
 
-    Checks the exception class name against a set of well-known transient error
-    names shared across major LLM providers (Anthropic, OpenAI, Google, …).
-    This avoids importing provider SDKs directly.
+    Two detection strategies:
+    - Class name match against ``_TRANSIENT_ERROR_NAMES`` (provider SDK errors).
+    - Substring match on ``ValueError`` messages for proxy layers (e.g.
+      OpenRouter forwarding upstream rate-limit / 502 errors as plain
+      ``ValueError`` rather than a typed SDK exception).
 
     Args:
         exc: The exception to classify.
@@ -122,7 +138,12 @@ def _is_transient_provider_error(exc: BaseException) -> bool:
     Returns:
         True if the error is transient and the caller should not ACK the message.
     """
-    return type(exc).__name__ in _TRANSIENT_ERROR_NAMES
+    if type(exc).__name__ in _TRANSIENT_ERROR_NAMES:
+        return True
+    if isinstance(exc, ValueError):
+        msg = str(exc).lower()
+        return any(pattern in msg for pattern in _TRANSIENT_VALUE_ERROR_PATTERNS)
+    return False
 
 
 def _normalise_content(raw: object) -> str:
@@ -158,8 +179,8 @@ class AgentExecutionError(Exception):
     """Raised for permanent/unknown agent execution failures.
 
     Transient errors (RateLimitError, InternalServerError, APIConnectionError)
-    are propagated unwrapped so the caller can leave the message in the PEL
-    for re-delivery.
+    are retried by ``AgentExecutor.execute()`` before being surfaced as
+    ``ExhaustedRetriesError``.  Non-transient errors are wrapped immediately.
 
     Args:
         message: Human-readable error description.
@@ -169,6 +190,14 @@ class AgentExecutionError(Exception):
     def __init__(self, message: str, response_body: str | None = None) -> None:
         super().__init__(message)
         self.response_body = response_body
+
+
+class ExhaustedRetriesError(AgentExecutionError):
+    """Raised when all retry attempts for a transient error are exhausted.
+
+    Subclasses ``AgentExecutionError`` so ``_handle_envelope`` routes it to
+    the DLQ and ACKs the message (avoids poisoning the PEL indefinitely).
+    """
 
 
 class AgentExecutor:
@@ -250,11 +279,17 @@ class AgentExecutor:
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> AgentResult:
-        """Run the agent on *envelope* with optional streaming and progress events.
+        """Run the agent on *envelope* with retry-on-transient-error logic.
 
-        After streaming completes, captures the full message list from the agent
-        graph state via ``aget_state()`` and serializes it to ``messages_raw``.
-        Conversation history is managed natively by the LangGraph checkpointer.
+        Wraps ``_run_once()`` in a retry loop driven by the profile's
+        ``resilience`` configuration.  On each transient error the coroutine
+        sleeps for the configured backoff delay before retrying.  When all
+        attempts are exhausted, raises ``ExhaustedRetriesError`` (a subclass
+        of ``AgentExecutionError``) so the caller routes the message to the DLQ
+        and ACKs it — preventing the PEL from being poisoned indefinitely.
+
+        Non-transient errors are wrapped in ``AgentExecutionError`` immediately
+        on the first attempt.
 
         Args:
             envelope: Incoming message envelope; `.content` is the user turn.
@@ -269,10 +304,62 @@ class AgentExecutor:
             message list for the completed turn.
 
         Raises:
-            Exception: Transient provider errors (RateLimitError, InternalServerError,
-                APIConnectionError, APITimeoutError, ServiceUnavailableError) are
-                propagated unwrapped so the caller can leave the message in the PEL.
-            AgentExecutionError: Wraps any other non-transient exception.
+            AgentExecutionError: Non-transient failure on the first attempt.
+            ExhaustedRetriesError: All retry attempts exhausted on a transient error.
+        """
+        resilience = self._profile.resilience
+        last_exc: BaseException | None = None
+
+        for attempt in range(resilience.retry_attempts + 1):
+            try:
+                return await self._run_once(envelope, stream_callback, progress_callback)
+            except AgentExecutionError:
+                raise
+            except Exception as exc:
+                if not _is_transient_provider_error(exc):
+                    raise AgentExecutionError(f"Agent execution failed: {exc}") from exc
+                last_exc = exc
+                if attempt < resilience.retry_attempts:
+                    delay = (
+                        resilience.retry_delays[
+                            min(attempt, len(resilience.retry_delays) - 1)
+                        ]
+                        if resilience.retry_delays
+                        else 0
+                    )
+                    logger.warning(
+                        "[%s] Transient error (attempt %d/%d), retrying in %ds: %s",
+                        envelope.correlation_id,
+                        attempt + 1,
+                        resilience.retry_attempts,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+
+        raise ExhaustedRetriesError(
+            f"All {resilience.retry_attempts} retries exhausted: {last_exc}"
+        ) from last_exc
+
+    async def _run_once(
+        self,
+        envelope: Envelope,
+        stream_callback: Callable[[str], Awaitable[None]] | None = None,
+        progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> AgentResult:
+        """Execute a single agent turn without retry logic.
+
+        Builds the RunnableConfig, runs the astream loop, captures the final
+        graph state, and returns the serialized result.  All exceptions
+        propagate to the caller (``execute()``).
+
+        Args:
+            envelope: Incoming message envelope; `.content` is the user turn.
+            stream_callback: Forwarded to ``_stream()``.
+            progress_callback: Forwarded to ``_stream()``.
+
+        Returns:
+            An ``AgentResult`` for this single attempt.
         """
         messages = [{"role": "user", "content": envelope.content}]
         logger.info(
@@ -280,33 +367,26 @@ class AgentExecutor:
             envelope.correlation_id,
             envelope.sender_id,
         )
-        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {}) # type: ignore
+        portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
         user_id = portail_ctx.get("user_id", envelope.sender_id)
         config = RunnableConfig(configurable={"thread_id": user_id})
-        try:
-            reply = await self._stream(
-                {"messages": messages}, stream_callback, progress_callback, config=config
-            )
-            # Capture full message list from the agent graph state.
-            # aget_state() must not fail — if it does, it means the agent is
-            # misconfigured (e.g. no checkpointer).  Propagate the exception
-            # to the outer handler: transient errors stay in PEL, others go to DLQ.
-            state = await self._agent.aget_state(config)
-            state_messages = state.values.get("messages", [])
-            messages_raw = serialize_messages(state_messages)
-            logger.info(
-                "agent.execute done — correlation_id=%s reply_len=%d messages=%d",
-                envelope.correlation_id,
-                len(reply),
-                len(messages_raw),
-            )
-            return AgentResult(reply_text=reply, messages_raw=messages_raw)
-        except AgentExecutionError:
-            raise
-        except Exception as exc:
-            if _is_transient_provider_error(exc):
-                raise
-            raise AgentExecutionError(f"Agent execution failed: {exc}") from exc
+        reply = await self._stream(
+            {"messages": messages}, stream_callback, progress_callback, config=config
+        )
+        # Capture full message list from the agent graph state.
+        # aget_state() must not fail — if it does, it means the agent is
+        # misconfigured (e.g. no checkpointer).  Propagate the exception
+        # to execute(): transient errors are retried, others go to DLQ.
+        state = await self._agent.aget_state(config)
+        state_messages = state.values.get("messages", [])
+        messages_raw = serialize_messages(state_messages)
+        logger.info(
+            "agent.execute done — correlation_id=%s reply_len=%d messages=%d",
+            envelope.correlation_id,
+            len(reply),
+            len(messages_raw),
+        )
+        return AgentResult(reply_text=reply, messages_raw=messages_raw)
 
     async def _stream(
         self,

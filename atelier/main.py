@@ -19,8 +19,11 @@ Key classes:
   version="v2")``; accepts an optional ``backend: BackendProtocol`` (for
   DeepAgents persistent memory) and ``progress_callback`` forwarded from
   the caller.
-* ``McpSessionManager`` (atelier.mcp_session_manager) — manages stdio/SSE MCP
-  server lifecycle across requests.
+* ``McpSessionManager`` (atelier.mcp_session_manager) — **singleton** managing
+  stdio/SSE MCP server lifecycle; started once at brick startup via ``start()``,
+  shared across all requests; per-server ``asyncio.Lock`` serializes stdio pipe
+  calls; dead sessions (``BrokenPipeError``, ``ConnectionError``, ``EOFError``)
+  evicted and re-established on next call; closed on shutdown via ``close()``.
 * ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
   and filters MCP tool definitions (enforces ``mcp_max_tools``).
 * ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
@@ -52,8 +55,7 @@ Configuration hot-reload
 Atelier watches configuration files for changes and reloads them without
 restarting the service:
 
-* Watched files: atelier/profiles.yaml, atelier/mcp_servers.yaml, atelier.yaml,
-  channels.yaml
+* Watched files: atelier/profiles.yaml, atelier/mcp_servers.yaml, atelier.yaml
 * Reload trigger: File system change detected via watchfiles library
   (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows)
 * Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
@@ -67,8 +69,8 @@ Message flow (one task at a time):
   relais:tasks
     │  (1) deserialise Envelope, resolve ProfileConfig
     │  (2) assemble soul system prompt (SoulAssembler)
-    │  (3) start MCP sessions + build LangChain tools (McpSessionManager +
-    │      ToolPolicy)
+    │  (3) read pre-built MCP tools from singleton McpSessionManager (under
+    │      _mcp_lock); apply ToolPolicy filtering
     │  (4) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
     │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
@@ -84,12 +86,14 @@ XACK contract:
   - Return False → no ACK (transient ConnectError / TimeoutException; message
     stays in PEL for automatic re-delivery)
 
-For streaming-capable channels each text chunk is also published via
-StreamPublisher for real-time rendering before the full reply is ready.
-Discord receives a final reply only, with live progress events (tool_call,
-tool_result, subagent_start) sent to ``relais:messages:outgoing:{channel}``
-as ``message_type=progress`` envelopes.  Publishing is governed by
-``ProgressConfig`` (atelier.yaml ``progress:`` section).
+Streaming mode is determined by ``context["aiguilleur"]["streaming"]`` (stamped
+by the channel adapter from ``ChannelConfig.streaming`` in channels.yaml) —
+Atelier no longer loads channels.yaml per-request.  For streaming-capable
+channels each text chunk is also published via StreamPublisher for real-time
+rendering before the full reply is ready.  Discord receives a final reply only,
+with live progress events (tool_call, tool_result, subagent_start) sent to
+``relais:messages:outgoing:{channel}`` as ``message_type=progress`` envelopes.
+Publishing is governed by ``ProgressConfig`` (atelier.yaml ``progress:`` section).
 """
 
 import asyncio
@@ -289,7 +293,7 @@ class Atelier(BrickBase):
         default_profile = _resolve_profile(profiles, "default")
         self._mcp_manager = McpSessionManager(default_profile, mcp_servers)
         await self._mcp_manager.start()
-        self._mcp_tools = list(self._mcp_manager.tools)
+        self._mcp_tools = await make_mcp_tools(self._mcp_manager)
         stack.push_async_callback(self._mcp_manager.close)  # type: ignore[union-attr]
 
         # Cancel any pending MCP restart task on shutdown so it doesn't outlive
@@ -382,7 +386,6 @@ class Atelier(BrickBase):
             resolve_config_path("atelier/profiles.yaml"),
             resolve_config_path("atelier/mcp_servers.yaml"),
             resolve_config_path("atelier.yaml"),
-            resolve_config_path("channels.yaml"),
         ]
         # Add existing subagents directories from all cascade roots
         for base in CONFIG_SEARCH_PATH:
@@ -500,7 +503,7 @@ class Atelier(BrickBase):
                 new_mgr = McpSessionManager(default_profile, self._mcp_servers_default)
                 await new_mgr.start()
                 self._mcp_manager = new_mgr
-                self._mcp_tools = list(new_mgr.tools)
+                self._mcp_tools = await make_mcp_tools(new_mgr)
                 logger.info(
                     "Atelier: MCP singleton restarted — %d tools available",
                     len(self._mcp_tools),

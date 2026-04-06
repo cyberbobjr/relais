@@ -54,8 +54,8 @@ class ProfileConfig:
         temperature: Sampling temperature controlling response randomness.
         max_tokens: Maximum number of tokens the LLM may generate.
         resilience: Retry and fallback configuration for transient failures.
-            Loaded and exposed on AgentExecutor; retry logic is not yet
-            enforced — see TODO in agent_executor.py (Phase 5).
+            Controls the retry loop in ``AgentExecutor.execute()``; fields
+            ``retry_attempts`` and ``retry_delays`` are enforced on every call.
         base_url: Override the provider's default API endpoint. Used for local
             models (Ollama, LM Studio) or custom deployments. None means use
             the provider's built-in default.
