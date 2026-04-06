@@ -212,7 +212,7 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 **Fichiers surveillés par brique** :
 - **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
-- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/channels.yaml`
+- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
 - **Aiguilleur**: `config/channels.yaml` (définitions canaux)
 

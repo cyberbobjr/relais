@@ -260,6 +260,16 @@ force_kill_launchers() {
     local killed=0
     local pid
 
+    # Stop supervisord first — otherwise autorestart will respawn killed processes immediately
+    if is_supervisord_running; then
+        echo "supervisord est actif — arrêt préalable pour éviter le respawn..." >&2
+        if ! stop_supervisord; then
+            echo "Impossible d'arrêter supervisord. Abandon." >&2
+            return 1
+        fi
+        echo "supervisord arrêté."
+    fi
+
     # Kill all python launcher processes
     while IFS= read -r pid; do
         [[ -n "$pid" ]] || continue
@@ -270,7 +280,7 @@ force_kill_launchers() {
         fi
     done < <(pgrep -f "python.*launcher" 2>/dev/null || true)
 
-    # Kill all processes holding debugpy ports (567x and 568x)
+    # Kill all processes listening on debugpy ports (5670-5689 only, LISTEN state)
     while IFS= read -r pid; do
         [[ -n "$pid" ]] || continue
         if is_pid_running "$pid"; then
@@ -278,7 +288,7 @@ force_kill_launchers() {
             kill -9 "$pid" >/dev/null 2>&1 || true
             killed=$((killed + 1))
         fi
-    done < <(lsof -i -P -n 2>/dev/null | grep -E "567[0-9]|568[0-9]" | awk '{print $2}' | sort -u)
+    done < <(lsof -i TCP:5670-5689 -sTCP:LISTEN -P -n 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
 
     # Cleanup stale artifacts
     cleanup_stale_artifacts

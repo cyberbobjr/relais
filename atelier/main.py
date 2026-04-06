@@ -82,9 +82,17 @@ Message flow (one task at a time):
     └──► relais:messages:outgoing_pending
 
 XACK contract:
-  - Return True  → ACK (success or final error routed to relais:tasks:failed)
-  - Return False → no ACK (transient ConnectError / TimeoutException; message
-    stays in PEL for automatic re-delivery)
+  - Return True  → ACK (success, or AgentExecutionError/ExhaustedRetriesError
+    routed to relais:tasks:failed)
+  - Return False → no ACK (unexpected infrastructure errors — e.g. Redis
+    ConnectError outside the executor; message stays in PEL for re-delivery)
+
+Note: LLM provider transient errors (RateLimitError, InternalServerError, etc.)
+are now retried internally by ``AgentExecutor.execute()`` using the profile's
+``resilience`` config (retry_attempts + retry_delays).  After all attempts are
+exhausted, ``ExhaustedRetriesError`` (a subclass of ``AgentExecutionError``) is
+raised — which routes the message to the DLQ and ACKs it, preventing indefinite
+PEL poisoning.
 
 Streaming mode is determined by ``context["aiguilleur"]["streaming"]`` (stamped
 by the channel adapter from ``ChannelConfig.streaming`` in channels.yaml) —
@@ -236,8 +244,9 @@ class Atelier(BrickBase):
         """Return the single StreamSpec for consuming ``relais:tasks``.
 
         Uses ``ack_mode="on_success"`` so messages stay in the PEL on
-        transient errors (ConnectError, TimeoutException) and are
-        re-delivered automatically.
+        unexpected infrastructure errors (e.g. Redis ConnectError) and are
+        re-delivered automatically.  LLM provider transient errors are retried
+        internally by ``AgentExecutor.execute()`` and never leave the PEL.
 
         Returns:
             A list containing one ``StreamSpec`` for ``relais:tasks``.

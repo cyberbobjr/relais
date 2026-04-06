@@ -47,6 +47,10 @@ restarting:
 * Reload trigger: File system change detected via watchfiles library
 * Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
   if new config is invalid YAML, previous ACL rules are preserved
+* **Fail-closed guard**: once a valid non-permissive ACL has been loaded
+  (``_config_loaded_once = True``), any reload that would result in a
+  permissive ACLManager (empty/missing sentinelle.yaml) is rejected — prevents
+  privilege escalation by config deletion or empty file
 * Redis Pub/Sub channel: relais:config:reload:sentinelle (listens for external
   reload triggers from operator)
 * Config backups: up to 5 versions stored in ~/.relais/config/backups/

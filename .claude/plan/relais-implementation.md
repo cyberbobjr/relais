@@ -22,7 +22,7 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 | `atelier/agent_executor.py` | ✅ | Wrapper DeepAgents, streaming buffer 80 chars |
 | `atelier/mcp_adapter.py` | ✅ | make_mcp_tools() — wrappers LangChain sur McpSessionManager |
 | `atelier/tool_policy.py` | ✅ | ToolPolicy — resolve_skills(), filter_mcp_tools() par rôle |
-| `atelier/mcp_session_manager.py` | ✅ | Cycle de vie MCP isolé |
+| `atelier/mcp_session_manager.py` | ✅ | Singleton MCP: `start()`/`close()` lifecycle, per-server `asyncio.Lock`, dead-session eviction (`BrokenPipeError`/`ConnectionError`/`EOFError`), atomic restart on config reload |
 | `souvenir/main.py` | ✅ | append/get, Redis List, TTL 24h |
 | `archiviste/main.py` | ✅ | JSONL, consumer group multi-streams |
 | `aiguilleur/discord/main.py` | ✅ | Bot mentions/DMs, outgoing background task |
@@ -41,7 +41,7 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 | 1 | LiteLLM : garder ou supprimer ? | **Supprimer dès la migration** — DeepAgents appelle les providers directement |
 | 2 | Async : si DeepAgents sync-only ? | **Non-bloquant** — DeepAgents est async natif (`ainvoke`/`astream`) via LangGraph |
 | 3 | MCP : `langchain-mcp-adapters` ou wrapper manuel ? | **Wrapper manuel `_McpTool(BaseTool)`** — `McpSessionManager` reste inchangé, wrappers LangChain générés par `mcp_adapter.py` |
-| 4 | Cycle de vie MCP sessions | **Session globale + reconnexion automatique** — `McpSessionManager` reste, wrappers reconnectent sur stale session |
+| 4 | Cycle de vie MCP sessions | **Singleton brick-level** — `McpSessionManager.start()` au démarrage de la brique, partagé entre toutes les requêtes; per-server locks; dead sessions évincées; restart atomique au hot-reload via `_restart_mcp_sessions()` |
 | 5 | Streaming : granularité vers Redis | **Buffer 80 chars** (`STREAM_BUFFER_CHARS = 80`) — `StreamPublisher` inchangé, buffer dans `AgentExecutor._stream()` |
 | 6 | Migration tests | **Réécriture in-place** — `test_sdk_executor.py` → `test_agent_executor.py`, mocks anthropic remplacés par mocks DeepAgents |
 

@@ -44,9 +44,9 @@ Canal Pub/Sub : `relais:config:reload`
 
 | Brique | Fichier | Scopes écoutés | Actions |
 |--------|---------|---------------|---------|
-| **Portail** | `portail/main.py` | `users`, `config` | `UserRegistry.reload()`, `RoleRegistry.reload()`, relit `unknown_user_policy`/`guest_profile` |
-| **Sentinelle** | `sentinelle/main.py` | `users` | `ACLManager.reload()` (existe déjà) |
-| **Atelier** | `atelier/main.py` | `profiles`, `mcp_servers`, `channels`, `atelier` | Remplace `_profiles` (atelier/profiles.yaml), `_mcp_servers_default` (atelier/mcp_servers.yaml), `_streaming_capable_channels`, `_progress_config` (atelier.yaml) |
+| **Portail** | `portail/main.py` | `users`, `config` | `UserRegistry.reload()`, `RoleRegistry.reload()`, relit `unknown_user_policy`/`guest_profile` — **fail-closed guard implémenté** : refuse rechargement permissif si config valide déjà chargée (`_config_loaded_once`) |
+| **Sentinelle** | `sentinelle/main.py` | `users` | `ACLManager.reload()` — **fail-closed guard implémenté** : refuse rechargement permissif si ACL valide déjà chargée (`_config_loaded_once`) |
+| **Atelier** | `atelier/main.py` | `profiles`, `mcp_servers`, `atelier` | Remplace `_profiles`, `_mcp_servers_default`, `_progress_config`; MCP restart via `_restart_mcp_sessions()` (singleton McpSessionManager remplacé atomiquement sous `_mcp_lock`) |
 | **Souvenir** | `souvenir/main.py` | `channels` | Met à jour `_channels`, boucle `_process_outgoing_streams` lit `self._channels` dynamiquement |
 
 Toutes les méthodes `_on_*_reload()` gardent l'ancienne config en cas d'erreur YAML.
@@ -102,7 +102,7 @@ PYTHONPATH=. uv run python scripts/reload_config.py --scope all
 
 | Risque | Sévérité | Mitigation |
 |--------|---------|-----------|
-| YAML invalide au reload | High | try/except, ancienne config conservée, log ERROR |
+| YAML invalide au reload | High | try/except, ancienne config conservée, log ERROR — **implémenté** |
 | Race condition Aiguilleur (`_adapters` muté depuis listener thread) | Medium | `threading.Event` — reload exécuté dans le thread principal de `_supervise()` |
 | Signal Pub/Sub perdu (fire-and-forget) | Low | Operateur peut republier ; documenter l'ordre de démarrage |
 | Nouveau canal Souvenir non détecté | Medium | Boucle outgoing check `self._channels` à chaque cycle |

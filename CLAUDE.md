@@ -39,8 +39,9 @@ The main pipeline flows through these bricks in order:
    - Consumes: `relais:tasks`
    - Loads SOUL personality + context, executes agentic loop via `AgentExecutor` (`atelier/agent_executor.py`)
    - Tool access controlled by `ToolPolicy` (`atelier/tool_policy.py`); skill dirs resolved per-role and passed as `skills=` to `create_deep_agent()`
-   - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by `McpSessionManager`
+   - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by singleton `McpSessionManager` (started once at brick startup, shared across requests; per-server locks; dead-session eviction)
    - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
+   - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `channels.yaml` per-request
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
    - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
@@ -73,8 +74,9 @@ The main pipeline flows through these bricks in order:
   - `contexts.py`: Namespace constants (CTX_*) and TypedDicts for per-brick contexts
   - `redis_client.py`: Async Redis factory with per-brick ACL (password per service)
   - `config_loader.py`: YAML config cascade (user > system > project)
-  - `user_registry.py`: UserRegistry and UserRecord for user resolution from portail.yaml
+  - `user_registry.py`: UserRegistry and UserRecord for user resolution from portail.yaml; REST API keys stored as HMAC-SHA256 hashes (`_hash_api_key()`, salt from `RELAIS_API_KEY_SALT` env var)
   - `user_record.py`: UserRecord dataclass
+  - `streams.py`: Canonical Redis stream name constants (`STREAM_*`) and helpers (`stream_outgoing(channel)`, `stream_streaming(channel, corr_id)`, `key_active_sessions(sender_id)`, `stream_config_reload(brick)`); all bricks import stream names from here
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings
@@ -122,7 +124,7 @@ class Envelope:
 ```
 
 Each brick writes into its own `context` namespace and must not mutate other namespaces:
-- `context["aiguilleur"]` — `channel_profile`, `channel_prompt_path`, `reply_to`, `content_type`
+- `context["aiguilleur"]` — `channel_profile`, `channel_prompt_path`, `reply_to`, `content_type`, `streaming` (bool, stamped by adapter from `ChannelConfig.streaming`; read by Atelier to decide streaming mode)
 - `context["portail"]` — `user_id`, `user_record`, `llm_profile`, `session_start`
 - `context["sentinelle"]` — `acl_passed`, `acl_role`, `outgoing_checked`
 - `context["atelier"]` — `streamed`, `user_message`, `progress_event`, `progress_detail`
@@ -304,7 +306,10 @@ mcp_servers:
   contextual: []
 ```
 
-MCP tools are loaded via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`). The MCP server lifecycle is managed by `McpSessionManager` (`atelier/mcp_session_manager.py`).
+MCP tools are loaded via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`). The MCP server lifecycle is managed by `McpSessionManager` (`atelier/mcp_session_manager.py`) as a **singleton**: started once at Atelier brick startup via `start()`, shared across all requests, and closed on shutdown via `close()`. Key behaviors:
+- Per-server `asyncio.Lock` serializes concurrent stdio pipe calls
+- Dead sessions (`BrokenPipeError`, `ConnectionError`, `EOFError`) are evicted and re-established on the next call
+- On hot-reload when MCP server config changes, `_restart_mcp_sessions()` atomically replaces the manager; on failure degrades to empty tool list
 
 `mcp_timeout` and `mcp_max_tools` are **not** in `mcp_servers.yaml` — they are per-profile fields in `profiles.yaml`.
 

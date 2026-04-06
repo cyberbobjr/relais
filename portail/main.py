@@ -45,6 +45,10 @@ restarting:
 * Reload trigger: File system change detected via watchfiles library
 * Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
   if new config is invalid YAML, previous config is preserved
+* **Fail-closed guard**: once a valid non-permissive config has been loaded
+  (``_config_loaded_once = True``), any reload attempt that would result in a
+  permissive UserRegistry (empty/missing config) is rejected and the previous
+  config is preserved — prevents privilege escalation by config deletion
 * Redis Pub/Sub channel: relais:config:reload:portail (listens for external
   reload triggers from operator)
 * Config backups: up to 5 versions stored in ~/.relais/config/backups/
