@@ -263,16 +263,44 @@ while True:
 
 ### `relais:memory:request`
 
-**Direction**: Commandant → Souvenir
-**Consumer group**: `souvenir_group`
+**Direction**: Atelier, Commandant → Souvenir, Forgeron
+**Consumer groups**: `souvenir_group` (Souvenir), `forgeron_archive_group` (Forgeron)
 
-Carries memory action requests (session clear, file operations) from Commandant.
+Carries memory action requests. Two independent consumer groups read this stream:
+
+- **`souvenir_group`** — Souvenir brick persists turns and handles memory actions (archive, clear, file_*)
+- **`forgeron_archive_group`** — Forgeron brick reads `archive` actions only, extracts intent labels via IntentLabeler (Haiku LLM), and triggers auto-creation of SKILL.md files when a pattern recurs (Solution D)
+
+Three producers:
+- **Atelier** (`atelier/main.py`) — `archive` after each completed agent turn (fire-and-forget, no response expected)
+- **SouvenirBackend** (`atelier/souvenir_backend.py`) — `file_write`, `file_read`, `file_list` called by the agent's file tools (synchronous request-response via `relais:memory:response`)
+- **Commandant** — `clear` to erase a session (synchronous request-response)
+
+> **Fan-out**: Both consumer groups are fully independent. Forgeron's ACK on `forgeron_archive_group` does not affect Souvenir's PEL in `souvenir_group`, and vice versa.
 
 ```
-XADD relais:memory:request * payload <MemoryRequest JSON>
+XADD relais:memory:request * payload <Envelope JSON>
 ```
 
-**MemoryRequest schema**:
+The payload is a serialized `Envelope` (`Envelope.to_json()`). The `action` field and action-specific data are carried in the envelope's `metadata`.
+
+**`archive` action** (published by Atelier):
+
+```json
+{
+  "action": "archive",
+  "envelope_json": "<Envelope.to_json() of the outgoing response>",
+  "messages_raw": [...]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `action` | `string` | `"archive"` |
+| `envelope_json` | `string` | Serialized outgoing response `Envelope` |
+| `messages_raw` | `array` | Full serialized LangChain message list for the completed turn |
+
+**`clear` action** (published by Commandant) / **`file_*` actions** (published by SouvenirBackend):
 
 ```json
 {
@@ -292,7 +320,78 @@ XADD relais:memory:request * payload <MemoryRequest JSON>
 | `correlation_id` | `string` | UUID for tracing |
 | `envelope_json` | `string` (optional) | Serialized original envelope; used by `clear` to send a confirmation reply |
 
-> **Note**: Atelier no longer uses this stream. Conversation history is managed by the LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`) owned by Atelier itself.
+---
+
+### `relais:skill:trace`
+
+**Direction**: Atelier → Forgeron
+**Consumer group**: `forgeron_group`
+**XACK contract**: `ack_mode="always"` — traces are advisory; losing one is acceptable.
+
+Published by Atelier after each completed agent turn that used one or more skills.
+
+```
+XADD relais:skill:trace * payload <Envelope JSON>
+```
+
+**Context keys set by Atelier (in `context.skill_trace` / `CTX_SKILL_TRACE`)**:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `skill_names` | `list[str]` | Directory names of skills used in the turn (e.g. `["mail-agent"]`) |
+| `tool_call_count` | `int` | Total tool invocations in the agent turn |
+| `tool_error_count` | `int` | Tool invocations that returned an error |
+| `messages_raw` | `list[dict]` | Serialized LangChain message list for the turn (for LLM analysis by Forgeron) |
+
+---
+
+### `relais:events:system`
+
+**Direction**: Forgeron → Archiviste (and any other listeners)
+**Consumer group**: `archiviste_group`
+
+System lifecycle events published by Forgeron when a skill patch is applied, rolled back, or a new skill is created.
+
+```
+XADD relais:events:system * payload <Envelope JSON>
+```
+
+**Actions published by Forgeron**:
+
+| `action` | Description |
+|----------|-------------|
+| `skill_patch_applied` | A new SKILL.md has been atomically applied for a skill (Solution B) |
+| `skill_patch_rolled_back` | A previously applied patch has been reverted due to regression (Solution B) |
+| `skill.created` | A new SKILL.md has been auto-generated from recurring session patterns (Solution D) |
+
+**Context keys set by Forgeron (in `context.forgeron` / `CTX_FORGERON`)**:
+
+For `skill_patch_applied`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `skill_name` | `string` | Directory name of the patched skill |
+| `patch_id` | `string` | UUID of the `SkillPatch` record in SQLite |
+| `pre_error_rate` | `float` | Error rate that triggered the analysis (0.0–1.0) |
+| `diff_preview` | `string` | First 500 chars of the unified diff |
+
+For `skill_patch_rolled_back`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `skill_name` | `string` | Directory name of the rolled-back skill |
+| `patch_id` | `string` | UUID of the `SkillPatch` record that was reverted |
+
+For `skill.created`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `skill_created` | `bool` | Always `true` |
+| `skill_path` | `string` | Absolute path to the written SKILL.md file |
+| `intent_label` | `string` | Normalized intent label that triggered creation (e.g. `"send_email"`) |
+| `contributing_sessions` | `int` | Number of sessions that matched this intent label |
+
+> **Note**: Forgeron constructs a minimal `Envelope` (only `sender_id`, `channel`, `session_id`, `correlation_id` from the triggering trace) — it does NOT use `Envelope.from_parent()` in order to avoid leaking upstream context (portail user records, atelier state) into system events.
 
 ---
 
@@ -428,8 +527,10 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:tasks` | `atelier_group` | Atelier |
 | `relais:commands` | `commandant_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
-| `relais:messages:outgoing:{channel}` | `{channel}_relay_group`, `souvenir_outgoing_group` | Aiguilleur, Souvenir |
+| `relais:messages:outgoing:{channel}` | `{channel}_relay_group` | Aiguilleur |
 | `relais:memory:request` | `souvenir_group` | Souvenir |
+| `relais:memory:request` | `forgeron_archive_group` | Forgeron (archive action only — intent labeling + skill creation) |
+| `relais:skill:trace` | `forgeron_group` | Forgeron |
 | `relais:logs` | `archiviste_group` | Archiviste |
 | `relais:events:system` | `archiviste_group` | Archiviste |
 | `relais:events:messages` | `archiviste_group` | Archiviste |

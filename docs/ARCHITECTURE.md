@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-05
+**Dernière mise à jour :** 2026-04-06
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -17,6 +17,7 @@ Ce document décrit l'architecture effectivement implémentée dans le code du d
 | `commandant` | Commandes slash hors LLM | `commandant/main.py` |
 | `souvenir` | Mémoire Redis + SQLite | `souvenir/main.py` |
 | `archiviste` | Logs et observation partielle du pipeline | `archiviste/main.py` |
+| `forgeron` | Amélioration autonome des skills via analyse LLM des traces | `forgeron/main.py` |
 
 ---
 
@@ -33,6 +34,8 @@ Utilisateur
      -> relais:commands -> Commandant
 
 Atelier
+  -> relais:skill:trace -> Forgeron
+     -> relais:events:system (patch_applied / patch_rolled_back)
   -> relais:messages:streaming:{channel}:{correlation_id}
   -> relais:messages:outgoing_pending -> Sentinelle sortant -> relais:messages:outgoing:{channel}
   -> relais:messages:outgoing:{channel} pour certains progress events
@@ -73,6 +76,17 @@ Aiguilleur
 | `relais:memory:request` | Atelier, Commandant | Souvenir |
 | `relais:memory:response` | Souvenir | agents (via SouvenirBackend) |
 
+### Amélioration autonome (Forgeron)
+
+| Stream / clé | Producteur | Consommateur |
+|--------------|------------|--------------|
+| `relais:skill:trace` | Atelier | Forgeron (`forgeron_group`) — Solution B |
+| `relais:memory:request` | Atelier | Forgeron (`forgeron_archive_group`) — Solution D, Souvenir (`souvenir_group`) |
+| `relais:events:system` | Forgeron | Archiviste |
+| `relais:messages:outgoing_pending` | Forgeron (notifications) | Sentinelle |
+| `relais:skill:last_improved:{skill_name}` (Redis String) | Forgeron | Forgeron (cooldown B) |
+| `relais:skill:creation_cooldown:{intent_label}` (Redis String) | Forgeron | Forgeron (cooldown D) |
+
 ### Streaming et erreurs
 
 | Stream | Producteur | Consommateur |
@@ -81,7 +95,6 @@ Aiguilleur
 | `relais:tasks:failed` | Atelier | observation / diagnostic |
 | `relais:admin:pending_users` | Portail | revue manuelle |
 | `relais:logs` | toutes les briques | Archiviste |
-| `relais:events:system` | divers | Archiviste |
 | `relais:events:messages` | divers | Archiviste |
 
 ---
@@ -173,6 +186,41 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Observe aussi un sous-ensemble explicite du pipeline, pas tous les streams.
 - Écrit `logs/events.jsonl` et relaie certains logs vers le sous-système Python logging.
 
+### Forgeron
+
+Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipelines indépendants :
+
+#### Solution B — Amélioration par analyse statistique (patch)
+
+- Consomme `relais:skill:trace` (groupe `forgeron_group`, `ack_mode="always"` — les traces sont advisory).
+- Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`).
+- Forgeron accumule une ligne par trace par skill dans SQLite (`SkillTraceStore`), et calcule le taux d'erreur sur une fenêtre glissante.
+- Quand `min_traces_before_analysis` traces ont été accumulées et que le taux d'erreur dépasse `min_error_rate` (et qu'aucun cooldown Redis n'est actif sur `relais:skill:last_improved:{skill}`), `SkillAnalyzer` appelle le LLM avec les N traces les plus récentes pour produire un SKILL.md amélioré.
+- `SkillPatcher` applique le patch atomiquement (`.pending` → validation → snapshot `.bak` → rename).
+- Le patch est enregistré dans `SkillPatchStore` (états : `pending` / `applied` / `validated` / `rolled_back`).
+- `SkillValidator` surveille les nouvelles traces post-patch : si le taux d'erreur ne diminue pas, le rollback est déclenché automatiquement.
+- Les événements `ACTION_SKILL_PATCH_APPLIED` et `ACTION_SKILL_PATCH_ROLLED_BACK` sont publiés sur `relais:events:system` via une `Envelope` minimale (sans héritage du contexte upstream) avec `context["forgeron"]` (`CTX_FORGERON`).
+- Le profil LLM utilisé pour l'analyse est configuré via `llm_profile` dans `forgeron.yaml` et résolu via `common/profile_loader.py`.
+
+#### Solution D — Création automatique de skills depuis les archives de sessions
+
+- Consomme `relais:memory:request` (groupe `forgeron_archive_group`, indépendant du groupe `souvenir_group` — fan-out complet via deux consumer groups sur le même stream).
+- Pour chaque action `archive`, Forgeron extrait les messages utilisateur depuis `CTX_SOUVENIR_REQUEST["messages_raw"]` et appelle `IntentLabeler` (profil Haiku — léger) pour obtenir un label normalisé (ex. `"send_email"`).
+- `SessionStore` accumule les sessions labellisées dans SQLite (`session_summaries`) et tient un compteur par label dans `skill_proposals`.
+- Quand `min_sessions_for_creation` sessions partagent le même label (et qu'aucun cooldown Redis `relais:skill:creation_cooldown:{label}` n'est actif), `SkillCreator` génère un SKILL.md complet via LLM (profil `precise`) et l'écrit dans `skills_dir/{skill_name}/SKILL.md`.
+- La création est idempotente : si le fichier existe déjà, `SkillCreator` retourne `None` sans écraser.
+- L'événement `skill.created` (`ACTION_SKILL_CREATED`) est publié sur `relais:events:system` avec `context["forgeron"]` contenant `skill_created`, `skill_path`, `intent_label`, `contributing_sessions`.
+- Si `notify_user_on_creation` est activé, une notification est publiée sur `relais:messages:outgoing_pending` pour informer l'utilisateur de la création du skill.
+
+**Fichiers SQLite** (dans `~/.relais/storage/forgeron.db`) :
+
+| Table | Contenu |
+|-------|---------|
+| `skill_traces` | Traces d'exécution par skill (Solution B) |
+| `skill_patches` | Historique des patches appliqués (Solution B) |
+| `session_summaries` | Sessions archivées avec leur label d'intention (Solution D) |
+| `skill_proposals` | Propositions de skills agrégées par label (Solution D) |
+
 ---
 
 ## Configuration réellement utilisée
@@ -196,6 +244,7 @@ La résolution suit :
 | `config/atelier/profiles.yaml` | profils LLM |
 | `config/atelier/mcp_servers.yaml` | serveurs MCP |
 | `config/aiguilleur.yaml` | canaux Aiguilleur si fichier présent ; sinon fallback Discord |
+| `config/forgeron.yaml` | seuils d'analyse, profils LLM (`llm_profile`, `annotation_profile`), `skills_dir`, `patch_mode` |
 
 `initialize_user_dir()` ne copie pas `aiguilleur.yaml` actuellement.
 
@@ -213,7 +262,8 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 - **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
 - **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
-- **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
+- **Souvenir**: aucun fichier surveillé — pas de config rechargeable (Souvenir ne fait pas d'appels LLM)
+- **Forgeron**: `config/forgeron.yaml` (seuils, profils LLM, `skills_dir`, `patch_mode`)
 - **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
 
 **Flux de rechargement** :
@@ -299,6 +349,7 @@ uv run python portail/main.py
 uv run python sentinelle/main.py
 uv run python atelier/main.py
 uv run python souvenir/main.py
+uv run python forgeron/main.py
 uv run python commandant/main.py
 uv run python archiviste/main.py
 uv run python aiguilleur/main.py

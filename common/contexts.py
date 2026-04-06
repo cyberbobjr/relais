@@ -39,7 +39,9 @@ CTX_AIGUILLEUR = "aiguilleur"
 CTX_PORTAIL = "portail"
 CTX_SENTINELLE = "sentinelle"
 CTX_ATELIER = "atelier"
+CTX_FORGERON = "forgeron"
 CTX_SOUVENIR_REQUEST = "souvenir_request"
+CTX_SKILL_TRACE = "skill_trace"
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +79,38 @@ class AtelierCtx(TypedDict, total=False):
     user_message: str   # Original user content (for Souvenir archival)
     progress_event: str         # Progress event type (e.g. "thinking")
     progress_detail: str        # Human-readable progress description
+    skills_used: list[str]      # Names of skill directories used (e.g. ["mail-agent"])
+
+
+class ForgeronCtx(TypedDict, total=False):
+    """Context stamped by Forgeron on skill lifecycle event envelopes.
+
+    Published on ``relais:events:system`` when a patch is applied, rolled back,
+    or when a new skill is auto-created from recurring sessions (Solution D).
+    """
+
+    skill_name: str       # Skill directory name (e.g. "mail-agent")
+    patch_id: str         # UUID of the SkillPatch record
+    pre_error_rate: float # Error rate that triggered the patch
+    diff_preview: str     # First 500 chars of the unified diff
+    # Champs pour la création automatique de skills (Solution D)
+    skill_created: bool         # True when this event is for a new skill (vs patch)
+    skill_path: str             # Absolute path to the created SKILL.md
+    intent_label: str           # Intent label that triggered creation (e.g. "send_email")
+    contributing_sessions: int  # Number of sessions that contributed to this creation
+
+
+class SkillTraceCtx(TypedDict, total=False):
+    """Payload written by Atelier on skill trace envelopes (Atelier → Forgeron).
+
+    This is NOT a brick context — it is a typed request payload.
+    Forgeron reads it via ``envelope.context[CTX_SKILL_TRACE]``.
+    """
+
+    skill_names: list[str]   # skill directory names used in the turn
+    tool_call_count: int     # total tool invocations
+    tool_error_count: int    # tool invocations that returned an error
+    messages_raw: list[dict] # full serialized LangChain message list
 
 
 class SouvenirRequest(TypedDict, total=False):

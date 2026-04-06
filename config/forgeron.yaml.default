@@ -1,0 +1,67 @@
+forgeron:
+  # Minimum number of traces to accumulate before triggering an LLM analysis.
+  # Prevents over-fitting to a single fluke execution.
+  min_traces_before_analysis: 5
+
+  # Minimum tool error rate (fraction) to trigger analysis.
+  # e.g. 0.3 means at least 30% of tool calls must have errored.
+  min_error_rate: 0.3
+
+  # Minimum interval between two analyses of the same skill (seconds).
+  # Redis TTL key: relais:skill:last_improved:{skill_name}
+  min_improvement_interval_seconds: 3600
+
+  # Auto-rollback threshold: if post-patch error_rate exceeds pre-patch
+  # error_rate by this margin, the patch is automatically rolled back.
+  rollback_error_rate_threshold: 0.2
+
+  # Number of post-patch traces to collect before evaluating rollback.
+  rollback_window_traces: 3
+
+  # LLM profile for batch analysis and skill rewrite (Solution B).
+  # References a named profile from atelier/profiles.yaml (config cascade).
+  llm_profile: "precise"
+
+  # LLM profile for quick inline annotations (Solution D).
+  annotation_profile: "fast"
+
+  # Enable Solution D: fast inline annotations (## LESSONS LEARNED) written
+  # by Atelier directly after a turn with errors. Visible on next message.
+  annotation_mode: true
+
+  # Enable Solution B: full statistical batch rewrite by Forgeron brick.
+  patch_mode: true
+
+  # Minimum tool errors in a turn to trigger an annotation (Solution D).
+  annotation_min_tool_errors: 1
+
+  # Cooldown for annotations per skill (seconds).
+  # Redis TTL key: relais:skill:annotated:{skill_name}
+  annotation_cooldown_seconds: 300
+
+  # skills_dir: null means resolved from the config cascade
+  # (~/.relais/skills/ > /opt/relais/skills/ > ./skills/)
+  skills_dir: null
+
+  # --- Création automatique de skills (Solution D) ---
+
+  # Enable automatic skill creation from recurring session patterns.
+  # Forgeron consumes relais:memory:request (forgeron_archive_group) to detect
+  # sessions with the same intent_label and create a new SKILL.md.
+  creation_mode: true
+
+  # Minimum number of sessions sharing the same intent_label before creating a skill.
+  min_sessions_for_creation: 3
+
+  # Minimum interval between two creation attempts for the same intent label (seconds).
+  # Redis TTL key: relais:skill:creation_cooldown:{intent_label}
+  creation_cooldown_seconds: 86400
+
+  # Number of representative sessions passed to SkillCreator LLM.
+  max_sessions_for_labeling: 5
+
+  # Notify the user when Forgeron applies a patch to an existing skill.
+  notify_user_on_patch: true
+
+  # Notify the user when Forgeron creates a new skill.
+  notify_user_on_creation: true

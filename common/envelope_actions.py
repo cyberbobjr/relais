@@ -32,3 +32,12 @@ ACTION_MEMORY_CLEAR = "memory.clear"
 ACTION_MEMORY_FILE_WRITE = "memory.file_write"
 ACTION_MEMORY_FILE_READ = "memory.file_read"
 ACTION_MEMORY_FILE_LIST = "memory.file_list"
+
+# Skill execution trace (Atelier → Forgeron)
+ACTION_SKILL_TRACE = "skill.trace"
+
+# Forgeron lifecycle events (Forgeron → relais:events:system)
+ACTION_SKILL_PATCH_APPLIED = "skill.patch_applied"
+ACTION_SKILL_PATCH_ROLLED_BACK = "skill.patch_rolled_back"
+# Forgeron — auto-création d'un nouveau skill depuis sessions récurrentes (Solution D)
+ACTION_SKILL_CREATED = "skill.created"

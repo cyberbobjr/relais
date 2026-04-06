@@ -54,6 +54,10 @@ STREAM_EVENTS_MESSAGES: str = "relais:events:messages"
 STREAM_ADMIN_PENDING_USERS: str = "relais:admin:pending_users"
 """Unknown-sender identifiers awaiting manual approval."""
 
+STREAM_SKILL_TRACE: str = "relais:skill:trace"
+"""Skill execution traces published by Atelier after each turn using skills.
+Consumed by Forgeron for statistical analysis and skill improvement."""
+
 # ---------------------------------------------------------------------------
 # Dynamic stream name helpers
 # ---------------------------------------------------------------------------
