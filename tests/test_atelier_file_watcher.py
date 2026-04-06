@@ -109,9 +109,9 @@ def test_atelier_watch_paths_uses_resolve_config_path() -> None:
     with patch("atelier.main.resolve_config_path", side_effect=capture_resolve):
         atelier._config_watch_paths()
 
-    # Should have resolved 4 config files
-    assert len(resolved_names) == 4, (
-        f"Expected 4 resolve_config_path calls, got {len(resolved_names)}: {resolved_names}"
+    # Should have resolved 3 config files (profiles.yaml, mcp_servers.yaml, atelier.yaml)
+    assert len(resolved_names) == 3, (
+        f"Expected 3 resolve_config_path calls, got {len(resolved_names)}: {resolved_names}"
     )
 
 

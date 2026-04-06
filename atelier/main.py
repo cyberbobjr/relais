@@ -117,6 +117,7 @@ Publishing is governed by ``ProgressConfig`` (atelier.yaml ``progress:`` section
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from contextlib import AsyncExitStack
@@ -128,6 +129,7 @@ from common.streams import (
     STREAM_LOGS,
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
+    STREAM_SKILL_TRACE,
     STREAM_TASKS,
     STREAM_TASKS_FAILED,
 )
@@ -135,17 +137,18 @@ from common.contexts import (
     CTX_AIGUILLEUR,
     CTX_ATELIER,
     CTX_PORTAIL,
+    CTX_SKILL_TRACE,
     CTX_SOUVENIR_REQUEST,
     AiguilleurCtx,
     AtelierCtx,
     PortailCtx,
     ensure_ctx,
 )
-from common.envelope_actions import ACTION_MEMORY_ARCHIVE
+from common.envelope_actions import ACTION_MEMORY_ARCHIVE, ACTION_SKILL_TRACE
 from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
 from common.config_reload import watch_and_reload
-from atelier.profile_loader import load_profiles, resolve_profile
+from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
 from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult
@@ -304,7 +307,7 @@ class Atelier(BrickBase):
         if not hasattr(self, "_mcp_lock"):
             self._mcp_lock = asyncio.Lock()
 
-        from atelier.profile_loader import resolve_profile as _resolve_profile
+        from common.profile_loader import resolve_profile as _resolve_profile
         if not profiles:
             # No profiles loaded (e.g. test objects created via __new__); skip MCP.
             self._mcp_manager = None
@@ -518,7 +521,7 @@ class Atelier(BrickBase):
                     logger.warning("Atelier: error closing old MCP manager: %s", exc)
 
             try:
-                from atelier.profile_loader import resolve_profile as _resolve_profile
+                from common.profile_loader import resolve_profile as _resolve_profile
                 default_profile = _resolve_profile(self._profiles, "default")
                 new_mgr = McpSessionManager(default_profile, self._mcp_servers_default)
                 await new_mgr.start()
@@ -599,6 +602,7 @@ class Atelier(BrickBase):
             skills = self._tool_policy.resolve_skills(
                 ur.get("skills_dirs")
             )
+            skills_used = [Path(s).name for s in skills]
             mcp_patterns = self._tool_policy.parse_mcp_patterns(
                 ur.get("allowed_mcp_tools")
             )
@@ -660,10 +664,60 @@ class Atelier(BrickBase):
             )
             reply_text = agent_result.reply_text
 
+            # 7. Publish skill trace for Forgeron analysis (fire-and-forget side channel).
+            # Only published when skills were used and at least one tool call was made,
+            # to avoid polluting the trace stream with skill-less turns.
+            if skills_used and agent_result.tool_call_count > 0:
+                trace_env = Envelope(
+                    content="",
+                    sender_id=f"atelier:{envelope.sender_id}",
+                    channel="internal",
+                    session_id=envelope.session_id,
+                    correlation_id=envelope.correlation_id,
+                    action=ACTION_SKILL_TRACE,
+                    context={CTX_SKILL_TRACE: {
+                        "skill_names": skills_used,
+                        "tool_call_count": agent_result.tool_call_count,
+                        "tool_error_count": agent_result.tool_error_count,
+                        "messages_raw": agent_result.messages_raw,
+                    }},
+                )
+                await redis_conn.xadd(
+                    STREAM_SKILL_TRACE, {"payload": trace_env.to_json()}
+                )
+
+                # 7b. Inline annotation — Solution D (fast path, fires per turn).
+                # Loaded lazily so Atelier starts even without forgeron installed.
+                if agent_result.tool_error_count > 0:
+                    try:
+                        from forgeron.config import load_forgeron_config  # noqa: PLC0415
+                        from atelier.skill_annotator import SkillAnnotator  # noqa: PLC0415
+                        _fgn_cfg = load_forgeron_config()
+                        if _fgn_cfg.annotation_mode:
+                            _ann_profile = resolve_profile(
+                                self._profiles, _fgn_cfg.annotation_profile
+                            )
+                            annotator = SkillAnnotator(
+                                profile=_ann_profile,
+                                skills_dir=_fgn_cfg.skills_dir,
+                            )
+                            for _skill in skills_used:
+                                await annotator.maybe_annotate(
+                                    skill_name=_skill,
+                                    tool_error_count=agent_result.tool_error_count,
+                                    messages_raw=agent_result.messages_raw,
+                                    config=_fgn_cfg,
+                                    redis_conn=redis_conn,
+                                )
+                    except ImportError:
+                        pass  # forgeron not yet available — skip annotation
+
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)
             atelier_ctx = ensure_ctx(response_env, CTX_ATELIER)
             atelier_ctx["user_message"] = envelope.content
+            if skills_used:
+                atelier_ctx["skills_used"] = skills_used
             if streaming:
                 await stream_pub.finalize()
                 atelier_ctx["streamed"] = True

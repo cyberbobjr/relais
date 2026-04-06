@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from atelier.profile_loader import ProfileConfig, ResilienceConfig
+from common.profile_loader import ProfileConfig, ResilienceConfig
 
 
 # ---------------------------------------------------------------------------

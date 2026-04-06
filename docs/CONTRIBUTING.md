@@ -138,33 +138,35 @@ uv run pytest tests/ --cov=common,portail,sentinelle,atelier,souvenir,aiguilleur
 
 ### Pattern minimal
 
-Le dépôt n’a pas aujourd’hui de classe abstraite unique pour toutes les briques. Le pattern réel ressemble plutôt à :
+Toutes les briques héritent de `common.brick_base.BrickBase`. Le patron minimal :
 
 ```python
 import asyncio
 
-from common.init import initialize_user_dir
-from common.redis_client import RedisClient
-from common.shutdown import GracefulShutdown
+from common.brick_base import BrickBase, StreamSpec
+from common.shutdown import GracefulShutdown  # noqa: F401 — point de patch pour les tests
 
 
-class MyBrick:
+class MyBrick(BrickBase):
     def __init__(self) -> None:
-        self.client = RedisClient("mybrick")
+        super().__init__("mybrick")
 
-    async def start(self) -> None:
-        shutdown = GracefulShutdown()
-        shutdown.install_signal_handlers()
-        redis_conn = await self.client.get_connection()
-        try:
-            while not shutdown.is_stopping():
-                await asyncio.sleep(1)
-        finally:
-            await self.client.close()
+    def _create_shutdown(self) -> GracefulShutdown:
+        return GracefulShutdown()
+
+    def _load(self) -> None:
+        pass  # charger le YAML dans les attributs self ici
+
+    def stream_specs(self) -> list[StreamSpec]:
+        return [StreamSpec(stream="relais:my:stream", group="mybrick_group",
+                           consumer="mybrick_1", handler=self._handle)]
+
+    async def _handle(self, envelope, redis_conn) -> bool:
+        ...
+        return True  # True = XACK, False = laisser dans le PEL
 
 
 if __name__ == "__main__":
-    initialize_user_dir()
     asyncio.run(MyBrick().start())
 ```
 

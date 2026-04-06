@@ -44,7 +44,7 @@ The main pipeline flows through these bricks in order:
    - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `aiguilleur.yaml` per-request
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
-   - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `atelier/profile_loader.py`)
+   - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `common/profile_loader.py`)
    - **Subagent registry**: YAML files in `config/atelier/subagents/*.yaml` loaded by `SubagentRegistry.load()` from the config cascade (user > system > project); user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `relais-config` (configuration CRUD); tool tokens support `mcp:<glob>` (MCP pool filter), `inherit` (all request_tools), or `<static_name>` (ToolRegistry lookup); hot-reload swaps the registry atomically when the `config/atelier/subagents/` directory changes
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
 
@@ -53,8 +53,7 @@ The main pipeline flows through these bricks in order:
    - Archive action: Atelier publishes completed turns with full `messages_raw` list (serialized LangChain messages); Souvenir persists to SQLite
    - Short-term: Redis List `relais:context:{session_id}` (max 20 turn blobs, each blob = full serialized LangChain message list for one turn, TTL 24h)
    - Long-term: SQLite `~/.relais/storage/memory.db`; one row per turn (upsert on `correlation_id`), fields `user_content`, `assistant_content`, `messages_raw` JSON
-   - Memory extractor: `MemoryExtractor` uses `langchain.chat_models.init_chat_model` (provider:model-id format) to call the LLM directly — no LiteLLM proxy required; confidence threshold 0.7
-   - Handlers: `ArchiveHandler` (persist turn), `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`
+   - Handlers: `ArchiveHandler` (persist turn), `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler` — no LLM calls inside Souvenir (memory extraction removed)
 
 ### Observer & Support Services
 

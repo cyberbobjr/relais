@@ -14,8 +14,8 @@ lorsqu'un fichier YAML de configuration est modifié.
 | **Aiguilleur** | `aiguilleur.yaml` | `AiguilleurManager.run()` avant `start()` | `self._adapters` (dict d'adaptateurs actifs) |
 | **Portail** | `portail.yaml` | `Portail.__init__` → `UserRegistry._load()` | `self._user_registry._sender_index` / `_by_identifier` |
 | **Sentinelle** | `sentinelle.yaml` | `Sentinelle.__init__` → `ACLManager._load()` | `self._acl._groups` / `_access_control` |
-| **Atelier** | `atelier/profiles.yaml`, `mcp_servers.yaml`, `atelier.yaml`, `aiguilleur.yaml` | `Atelier.__init__` (4 appels) | `self._profiles`, `self._mcp_servers_default`, `self._progress_config`, `self._streaming_capable_channels` |
-| **Souvenir** | `souvenir/profiles.yaml` (MemoryExtractor uniquement) | À l'appel, pas au démarrage | Aucune state durée |
+| **Atelier** | `atelier/profiles.yaml`, `mcp_servers.yaml`, `atelier.yaml` | `Atelier.__init__` | `self._profiles`, `self._mcp_servers_default`, `self._progress_config` |
+| **Souvenir** | aucun fichier | — | Souvenir ne fait pas d'appels LLM, pas de config rechargeable |
 
 **Pattern commun** : chaque brick appelle `resolve_config_path(filename)` → lit le YAML → peuple des structures en mémoire. `_load()` est déjà une fonction séparable, ce qui facilite le rechargement.
 
@@ -351,13 +351,9 @@ pytest tests/test_portail_hot_reload.py -v
 
 ---
 
-### Étape 5 — Souvenir : reload optionnel
+### Étape 5 — Souvenir : N/A
 
-**Contexte** : Souvenir n'a pas de config critique rechargeable à chaud — le `MemoryExtractor` relit le profil à chaque appel. Aucune action requise en Phase 1.
-
-**Tâches** :
-- [ ] Vérifier que `MemoryExtractor` n'a pas de config en cache qui deviendrait stale
-- [ ] Si besoin : ajouter un reload sur `souvenir/profiles.yaml` en suivant le même pattern
+**Contexte** : Souvenir ne fait pas d'appels LLM (le `MemoryExtractor` a été supprimé). Il n'y a pas de fichier de configuration Souvenir à surveiller. Aucune action requise.
 
 ---
 

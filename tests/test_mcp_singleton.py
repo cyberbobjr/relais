@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from atelier.mcp_session_manager import McpSessionManager
-from atelier.profile_loader import ProfileConfig
+from common.profile_loader import ProfileConfig
 
 
 # ---------------------------------------------------------------------------

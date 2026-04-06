@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from atelier.profile_loader import ResilienceConfig
+from common.profile_loader import ResilienceConfig
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +392,7 @@ async def test_execute_retries_then_succeeds() -> None:
     mock_agent.aget_state = AsyncMock(return_value=state)
 
     profile = _make_profile()
-    from atelier.profile_loader import ResilienceConfig
+    from common.profile_loader import ResilienceConfig
     profile.resilience = ResilienceConfig(retry_attempts=1, retry_delays=[0])
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):

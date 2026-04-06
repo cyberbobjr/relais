@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from atelier.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
+from common.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
 from atelier.agent_executor import _resolve_profile_model
 
 # Path to the actual project default profiles file (used for integration-style tests
@@ -302,7 +302,7 @@ def test_load_profiles_raises_when_cascade_empty(monkeypatch: pytest.MonkeyPatch
     Args:
         monkeypatch: Pytest fixture for safe attribute patching.
     """
-    import atelier.profile_loader as _mod
+    import common.profile_loader as _mod
 
     monkeypatch.setattr(
         _mod,
@@ -337,7 +337,7 @@ def test_load_profiles_delegates_to_resolve_config_path(
         monkeypatch: Pytest fixture for safe attribute patching.
         tmp_path: Pytest-provided temporary directory.
     """
-    import atelier.profile_loader as _mod
+    import common.profile_loader as _mod
 
     controlled_yaml = tmp_path / "profiles.yaml"
     controlled_yaml.write_text(

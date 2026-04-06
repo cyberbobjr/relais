@@ -26,10 +26,10 @@ def test_load_profiles_delegates_to_resolve_config_path(tmp_path: "pytest.TempPa
     propagate that same error — proving that it called resolve_config_path
     rather than its own lookup logic.
     """
-    from atelier.profile_loader import load_profiles
+    from common.profile_loader import load_profiles
 
     with patch(
-        "atelier.profile_loader.resolve_config_path",
+        "common.profile_loader.resolve_config_path",
         side_effect=FileNotFoundError("mocked cascade — no profiles.yaml found"),
     ) as mock_resolve:
         with pytest.raises(FileNotFoundError, match="mocked cascade"):

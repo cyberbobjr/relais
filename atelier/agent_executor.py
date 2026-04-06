@@ -22,7 +22,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from deepagents import create_deep_agent
 from common.config_loader import get_relais_home
-from atelier.profile_loader import ProfileConfig
+from common.profile_loader import ProfileConfig
 from atelier.message_serializer import serialize_messages
 from common.contexts import CTX_PORTAIL, PortailCtx
 from common.envelope import Envelope
@@ -40,10 +40,15 @@ class AgentResult:
         messages_raw: Serialized flat list of all LangChain messages captured
             from the agent graph state after the turn completes.  Each element
             is a JSON-serializable dict as produced by ``serialize_messages()``.
+        tool_call_count: Total number of tool invocations during the turn.
+        tool_error_count: Number of tool invocations that returned
+            ``status="error"`` during the turn.
     """
 
     reply_text: str
     messages_raw: list[dict]
+    tool_call_count: int = 0
+    tool_error_count: int = 0
 
 
 STREAM_BUFFER_CHARS = 80
@@ -377,7 +382,7 @@ class AgentExecutor:
         portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
         user_id = portail_ctx.get("user_id", envelope.sender_id)
         config = RunnableConfig(configurable={"thread_id": user_id})
-        reply = await self._stream(
+        reply, tool_call_count, tool_error_count = await self._stream(
             {"messages": messages}, stream_callback, progress_callback, config=config
         )
         # Capture full message list from the agent graph state.
@@ -388,12 +393,20 @@ class AgentExecutor:
         state_messages = state.values.get("messages", [])
         messages_raw = serialize_messages(state_messages)
         logger.info(
-            "agent.execute done — correlation_id=%s reply_len=%d messages=%d",
+            "agent.execute done — correlation_id=%s reply_len=%d messages=%d "
+            "tool_calls=%d tool_errors=%d",
             envelope.correlation_id,
             len(reply),
             len(messages_raw),
+            tool_call_count,
+            tool_error_count,
         )
-        return AgentResult(reply_text=reply, messages_raw=messages_raw)
+        return AgentResult(
+            reply_text=reply,
+            messages_raw=messages_raw,
+            tool_call_count=tool_call_count,
+            tool_error_count=tool_error_count,
+        )
 
     async def _stream(
         self,
@@ -401,7 +414,7 @@ class AgentExecutor:
         stream_callback: Callable[[str], Awaitable[None]] | None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
         config: RunnableConfig | None = None,
-    ) -> str:
+    ) -> tuple[str, int, int]:
         """Stream tokens and events from the agent, logging all operations.
 
         Uses the v2 streaming format with ``stream_mode=["updates", "messages"]``
@@ -431,8 +444,11 @@ class AgentExecutor:
                 pipeline progress pairs, or ``None`` to skip progress events.
 
         Returns:
-            The complete reply assembled from all streamed text tokens, or
-            a fallback string when no AI text was emitted.
+            A 3-tuple of ``(reply, tool_call_count, tool_error_count)`` where
+            *reply* is the complete text assembled from all streamed tokens (or
+            a fallback string when no AI text was emitted), *tool_call_count*
+            is the total number of tool invocations, and *tool_error_count* is
+            the number of invocations that returned ``status="error"``.
         """
         buf = ""
         full_reply = ""
@@ -441,6 +457,8 @@ class AgentExecutor:
         _consecutive_tool_error_name: str = ""
         _consecutive_tool_error_count: int = 0
         _TOOL_ERROR_LOOP_LIMIT: int = 5
+        _tool_call_count: int = 0
+        _tool_error_count: int = 0
 
         stream_kwargs: dict = {
             "stream_mode": ["updates", "messages"],
@@ -496,6 +514,7 @@ class AgentExecutor:
                     normalised = _normalise_content(token.content)
                     last_tool_result = normalised
                     result_preview = normalised[:300]
+                    _tool_call_count += 1
                     logger.info(
                         "[%s] tool_result [%s]: %s",
                         source,
@@ -512,6 +531,7 @@ class AgentExecutor:
                     # could trigger a false abort when different tools all lack a name.
                     named_tool = tool_name if tool_name != "?" else None
                     if getattr(token, "status", None) == "error":
+                        _tool_error_count += 1
                         if named_tool is not None and named_tool == _consecutive_tool_error_name:
                             _consecutive_tool_error_count += 1
                         elif named_tool is not None:
@@ -562,7 +582,7 @@ class AgentExecutor:
                 )
                 full_reply = REPLY_PLACEHOLDER
 
-        return full_reply
+        return full_reply, _tool_call_count, _tool_error_count
 
 
 def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> str:

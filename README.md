@@ -15,6 +15,7 @@ Les briques actives du repo sont :
 - `commandant` : commandes slash hors LLM
 - `souvenir` : mémoire court terme Redis + archivage SQLite
 - `archiviste` : logs et observation partielle du pipeline
+- `forgeron` : amélioration autonome des skills via analyse LLM des traces d'exécution
 
 L'implémentation locale inclut surtout un adaptateur Discord complet. La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
 
@@ -41,6 +42,9 @@ flowchart TD
     MEM_RES[relais:memory:response]
     DLQ[(relais:tasks:failed)]
     ARCHIVISTE["ARCHIVISTE<br/>observe logs events<br/>et une partie du pipeline"]
+    FORGERON["FORGERON<br/>amélioration autonome skills<br/>analyse LLM traces"]
+    SKILL_TRACE[relais:skill:trace]
+    EVENTS_SYS[relais:events:system]
 
     USERS --> AIG
     AIG -->|"relais:messages:incoming"| PORTAIL
@@ -66,12 +70,18 @@ flowchart TD
     OUT --> AIG
     AIG --> USERS
 
+    ATELIER -->|"relais:skill:trace"| SKILL_TRACE
+    SKILL_TRACE --> FORGERON
+    FORGERON -->|"relais:events:system<br/>patch_applied / rolled_back"| EVENTS_SYS
+
     PORTAIL -. logs .-> ARCHIVISTE
     SENT_IN -. logs .-> ARCHIVISTE
     ATELIER -. logs .-> ARCHIVISTE
     COMMANDANT -. logs .-> ARCHIVISTE
     SOUVENIR -. logs .-> ARCHIVISTE
+    FORGERON -. logs .-> ARCHIVISTE
     OUT -. pipeline observe partiel .-> ARCHIVISTE
+    EVENTS_SYS -. events .-> ARCHIVISTE
 ```
 
 ### Streams Redis importants
@@ -88,6 +98,8 @@ flowchart TD
 | `relais:messages:streaming:{channel}:{correlation_id}` | Atelier | adaptateur de canal streaming |
 | `relais:tasks:failed` | Atelier | observateurs / diagnostics |
 | `relais:admin:pending_users` | Portail | revue manuelle |
+| `relais:skill:trace` | Atelier | Forgeron |
+| `relais:events:system` | Forgeron | Archiviste |
 | `relais:logs` | toutes les briques | Archiviste |
 
 ### Comportement des briques
@@ -98,6 +110,7 @@ flowchart TD
 - `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents déclarés dans `config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels et `skills/` optionnels) ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
 - `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
+- `Forgeron` consomme `relais:skill:trace` (groupe `forgeron_group`, ack_mode `always`). Pour chaque tour agent, Atelier publie les noms de skills utilisés, le nombre d'appels d'outils et le nombre d'erreurs. Forgeron accumule ces traces par skill dans SQLite, calcule le taux d'erreur sur une fenêtre glissante, et déclenche une analyse LLM (`SkillAnalyzer`) quand le seuil est dépassé. Si l'analyse produit un SKILL.md amélioré, `SkillPatcher` l'applique atomiquement. `SkillValidator` surveille ensuite les nouvelles traces pour détecter une régression et déclenche un rollback automatique si le taux d'erreur remonte. Les événements `skill_patch_applied` et `skill_patch_rolled_back` sont publiés sur `relais:events:system`.
 
 ---
 
@@ -199,8 +212,8 @@ Toutes les briques supportent le rechargement de leur configuration sans redéma
 **Fichiers surveillés par brique:**
 - **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
-- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/aiguilleur.yaml`
-- **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
+- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
+- **Souvenir**: aucun fichier surveillé — pas de config rechargeable
 - **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux)
 
 **Cas d'usage:**
@@ -417,6 +430,7 @@ Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](/Use
 - `REDIS_PASS_SOUVENIR`
 - `REDIS_PASS_COMMANDANT`
 - `REDIS_PASS_ARCHIVISTE`
+- `REDIS_PASS_FORGERON`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`
 - `RELAIS_DB_PATH`
@@ -447,7 +461,7 @@ Le wrapper :
 
 - démarre `supervisord` si nécessaire
 - lance Redis local via `config/redis.conf`
-- démarre les briques `portail`, `sentinelle`, `atelier`, `souvenir`, `commandant`, `archiviste`, `aiguilleur`
+- démarre les briques `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
 
 ### Démarrage manuel
 
@@ -460,6 +474,7 @@ uv run python portail/main.py
 uv run python sentinelle/main.py
 uv run python atelier/main.py
 uv run python souvenir/main.py
+uv run python forgeron/main.py
 uv run python commandant/main.py
 uv run python archiviste/main.py
 uv run python aiguilleur/main.py
@@ -508,6 +523,7 @@ Les ports configurés dans `supervisord.conf` sont :
 | `souvenir` | `5682` |
 | `commandant` | `5683` |
 | `aiguilleur` | `5684` |
+| `forgeron` | `5685` |
 
 ---
 

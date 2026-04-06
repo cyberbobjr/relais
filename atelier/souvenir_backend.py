@@ -7,9 +7,10 @@ de SOUVENIR plutôt que sur le système de fichiers local.
 Protocole Redis
 ---------------
 Requête (stream ``relais:memory:request``) :
-    Envelope sérialisée (``Envelope.to_json()``) dont le champ ``metadata``
-    contient ``action``, ``user_id``, ``correlation_id`` et tous les kwargs
-    propres à chaque action (``path``, ``content``, ``overwrite``, …).
+    Envelope sérialisée (``Envelope.to_json()``).  L'``action`` est portée
+    par le champ ``Envelope.action`` ; les paramètres de l'action
+    (``user_id``, ``path``, ``content``, ``overwrite``, …) sont dans
+    ``context["souvenir_request"]`` (``CTX_SOUVENIR_REQUEST``).
 
 Réponse (stream ``relais:memory:response``) :
     ``{"correlation_id": str, "ok": bool, "error": str|null, ...}``
