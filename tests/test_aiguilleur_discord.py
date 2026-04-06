@@ -124,9 +124,8 @@ async def test_on_message_queues_envelope_on_mention():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = ChannelConfig(name="discord")
-        client._llm_profile = "default"
-        client._channel_prompt_path = None
         _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -168,9 +167,8 @@ async def test_on_message_dm_queues_envelope():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = ChannelConfig(name="discord")
-        client._llm_profile = "default"
-        client._channel_prompt_path = None
         _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -206,9 +204,8 @@ async def test_on_message_empty_content_defaults_to_coucou():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = ChannelConfig(name="discord")
-        client._llm_profile = "default"
-        client._channel_prompt_path = None
         _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -246,9 +243,8 @@ async def test_on_message_xadd_failure_does_not_raise():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = ChannelConfig(name="discord")
-        client._llm_profile = "default"
-        client._channel_prompt_path = None
         _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -436,9 +432,8 @@ async def test_on_message_stamps_channel_profile_from_channel_config():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = channel_config
-        client._llm_profile = "fast"   # pre-resolved at init time
-        client._channel_prompt_path = None
         _init_typing_mocks(client)
 
         with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -482,12 +477,14 @@ async def test_on_message_stamps_default_channel_profile_when_no_channel_profile
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = channel_config
-        client._llm_profile = "default"  # resolved at init to config fallback
-        client._channel_prompt_path = None
+        # profile=None → dynamic read falls back to get_default_llm_profile()
+        # Patch the fallback so the test is not sensitive to the local config.yaml value.
         _init_typing_mocks(client)
 
-        with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
+        with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user), \
+             patch("aiguilleur.channels.discord.adapter.get_default_llm_profile", return_value="default"):
             await client.on_message(mock_message)
 
     mock_redis.xadd.assert_called_once()
@@ -523,9 +520,8 @@ async def test_on_message_stamps_streaming_flag() -> None:
             client = RelaisDiscordClient.__new__(RelaisDiscordClient)
             client._redis_conn = mock_redis
             client.stream_in = "relais:messages:incoming"
+            client._adapter = None
             client._channel_config = channel_config
-            client._llm_profile = "default"
-            client._channel_prompt_path = None
             _init_typing_mocks(client)
 
             with patch.object(type(client), "user", new_callable=PropertyMock, return_value=mock_user):
@@ -573,9 +569,8 @@ async def test_typing_task_started_on_message():
         client = RelaisDiscordClient.__new__(RelaisDiscordClient)
         client._redis_conn = mock_redis
         client.stream_in = "relais:messages:incoming"
+        client._adapter = None
         client._channel_config = ChannelConfig(name="discord")
-        client._llm_profile = "default"
-        client._channel_prompt_path = None
         client._typing_tasks = {}
         mock_loop = MagicMock()
         created_coros = []

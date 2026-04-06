@@ -41,15 +41,18 @@ channels:
     enabled: true
     streaming: false
     # profile not set → falls back to config.yaml > llm.default_profile
+    # prompt_path: "channels/discord_default.md"   # uncomment to load channel overlay
 
   telegram:
     enabled: false
     streaming: true
     profile: fast
+    # prompt_path: "channels/telegram_default.md"  # uncomment to load channel overlay
 
   slack:
     enabled: false
     streaming: false
+    # prompt_path: "channels/slack_default.md"     # uncomment to load channel overlay
 
   rest:
     enabled: false

@@ -103,7 +103,7 @@ class DiscordAiguilleur(NativeAiguilleur):
             )
             return
 
-        client = _RelaisDiscordClient(stop_event=cast(asyncio.Event, self.stop_event), channel_config=self.config)
+        client = _RelaisDiscordClient(stop_event=cast(asyncio.Event, self.stop_event), adapter=self)
         try:
             await client.start(token)
         except asyncio.CancelledError:
@@ -134,14 +134,20 @@ class _RelaisDiscordClient(discord.Client):
         self,
         stop_event: asyncio.Event | None = None,
         channel_config: ChannelConfig | None = None,
+        adapter: "DiscordAiguilleur | None" = None,
     ) -> None:
         """Initialise the Discord client.
 
         Args:
             stop_event: Optional event to signal the adapter should stop.
-            channel_config: Optional channel configuration for this adapter.
-                Used to resolve the LLM profile stamped on every incoming
-                envelope. When None, falls back to the system default profile.
+            channel_config: Optional channel configuration snapshot. Only used
+                when ``adapter`` is ``None``; prefer passing ``adapter`` so
+                that hot-reloaded config (``prompt_path``, ``streaming``, …)
+                is always read from the live ``adapter.config``.
+            adapter: The owning ``DiscordAiguilleur`` instance. When provided,
+                ``_get_channel_config()`` delegates to ``adapter.config`` so
+                that soft-field changes (``prompt_path``, ``streaming``) take
+                effect immediately without restarting the Discord client.
         """
         intents = discord.Intents.default()
         intents.message_content = True
@@ -155,19 +161,29 @@ class _RelaisDiscordClient(discord.Client):
         self._redis_conn = None
         # threading.Event or asyncio.Event — we only call is_set()
         self._stop_event = stop_event
+        # _adapter is the live source of truth; _channel_config is a fallback.
+        self._adapter = adapter
         self._channel_config = channel_config
-        # Resolve LLM profile once at init: channel config > system default
-        self._llm_profile: str = (
-            channel_config.profile
-            if channel_config is not None and channel_config.profile is not None
-            else get_default_llm_profile()
-        )
-        # Channel prompt path — None when not configured in channels.yaml
-        self._channel_prompt_path: str | None = (
-            channel_config.prompt_path if channel_config is not None else None
-        )
         # Active typing indicator tasks keyed by correlation_id
         self._typing_tasks: dict[str, asyncio.Task] = {}
+
+    def _get_channel_config(self) -> ChannelConfig | None:
+        """Return the current channel config, always using the live adapter.config.
+
+        When ``_adapter`` is set (normal runtime path), reads ``adapter.config``
+        so that hot-reloaded soft fields (``prompt_path``, ``streaming``) are
+        immediately visible to the next ``on_message`` call without restarting
+        the Discord client.
+
+        Falls back to the ``_channel_config`` snapshot when ``_adapter`` is
+        ``None`` (e.g. unit tests that construct the client directly).
+
+        Returns:
+            The current ``ChannelConfig``, or ``None`` if neither source is set.
+        """
+        if self._adapter is not None:
+            return self._adapter.config
+        return self._channel_config
 
     async def _typing_loop(
         self, channel: discord.abc.Messageable, correlation_id: str
@@ -272,6 +288,20 @@ class _RelaisDiscordClient(discord.Client):
             preview,
         )
 
+        # Read config dynamically so hot-reloaded soft fields (profile,
+        # prompt_path, streaming) take effect immediately without restarting.
+        cfg = self._get_channel_config()
+        if cfg is not None:
+            current_profile: str | None = cfg.profile_ref.profile
+            if current_profile is None:
+                current_profile = get_default_llm_profile()
+            current_prompt_path: str | None = cfg.prompt_path
+            current_streaming: bool = cfg.streaming
+        else:
+            current_profile = get_default_llm_profile()
+            current_prompt_path = None
+            current_streaming = False
+
         envelope = Envelope(
             channel="discord",
             sender_id=f"discord:{message.author.id}",
@@ -283,9 +313,9 @@ class _RelaisDiscordClient(discord.Client):
                     "content_type": "text",
                     "reply_to": str(message.channel.id),
                     "access_context": "dm" if is_dm else "server",
-                    "channel_profile": self._llm_profile,
-                    "channel_prompt_path": self._channel_prompt_path,
-                    "streaming": self._channel_config.streaming if self._channel_config is not None else False,
+                    "channel_profile": current_profile,
+                    "channel_prompt_path": current_prompt_path,
+                    "streaming": current_streaming,
                 }
             },
         )

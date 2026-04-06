@@ -448,7 +448,7 @@ class Atelier(BrickBase):
             "atelier",
             self._build_config_candidate,
             self._apply_config,
-            checkpoint_paths=self._config_watch_paths(),
+            checkpoint_paths=[p for p in self._config_watch_paths() if p.is_file()],
         )
 
     async def _config_reload_listener(

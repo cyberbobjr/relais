@@ -28,6 +28,10 @@ Each adapter stamps context keys under ``CTX_AIGUILLEUR`` on every outbound enve
   ``ChannelConfig.prompt_path`` (channels.yaml).  ``None`` when the channel
   has no ``prompt_path`` configured; in that case no channel formatting
   overlay is loaded by Atelier.
+* ``envelope.context[CTX_AIGUILLEUR]["streaming"]`` — ``bool`` from
+  ``ChannelConfig.streaming`` (channels.yaml); read by Atelier to decide
+  whether to stream tokens to ``relais:messages:streaming:{channel}:{corr_id}``
+  or publish a single outgoing envelope after the full reply is assembled.
 
 Redis channels
 --------------

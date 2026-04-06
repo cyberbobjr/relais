@@ -222,6 +222,9 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 3. Validation YAML échouée → configuration précédente préservée (fallback sûr)
 4. Déclenchement externe : opérateur envoie `"reload"` sur `relais:config:reload:{brick}` (Pub/Sub) → déclenchement manuel sans changement fichier
 
+**Garde fail-closed** (Portail et Sentinelle) :
+Une fois qu'une configuration valide et non-permissive a été chargée (`_config_loaded_once = True`), tout rechargement qui aboutirait à un `UserRegistry` vide (Portail) ou un `ACLManager` vide (Sentinelle) est rejeté — la configuration précédente est conservée. Cela empêche une escalade de privilèges par suppression ou vidage du fichier de configuration en production.
+
 **Sauvegarde des configurations** :
 - À chaque rechargement réussi, la configuration précédente est archivée dans `~/.relais/config/backups/{brick}_{timestamp}.yaml`
 - Rétention : max 5 versions par brique
