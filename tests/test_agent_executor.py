@@ -560,3 +560,62 @@ def test_executor_passes_explicit_checkpointer_to_create_deep_agent() -> None:
 
     call_kwargs = mock_create.call_args.kwargs
     assert call_kwargs.get("checkpointer") is explicit_checkpointer
+
+
+# ---------------------------------------------------------------------------
+# Loop guard — repeated consecutive tool errors raise AgentExecutionError
+# ---------------------------------------------------------------------------
+
+
+def _tool_error_token(tool_name: str, error_msg: str = "Error invoking tool") -> MagicMock:
+    """Build a mock ToolMessage chunk with status='error'.
+
+    Args:
+        tool_name: The name of the failing tool.
+        error_msg: The error content string.
+
+    Returns:
+        MagicMock resembling a LangChain ToolMessage with type='tool' and status='error'.
+    """
+    token = MagicMock()
+    token.type = "tool"
+    token.name = tool_name
+    token.content = error_msg
+    token.status = "error"
+    token.tool_call_chunks = []
+    return token
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_raises_on_repeated_consecutive_tool_errors() -> None:
+    """execute() raises AgentExecutionError when the same tool errors 5 times in a row.
+
+    This guards against infinite tool-error loops where the model keeps calling
+    the same tool with broken arguments, exhausting max_turns with no progress.
+    The loop guard must fire after 5 consecutive errors for the same tool name,
+    before the stream would otherwise continue.
+    """
+    from atelier.agent_executor import AgentExecutor, AgentExecutionError
+
+    failing_tool = "write_todos"
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        # Simulate the Mistral parallel-tool-call bug: write_todos errors 5 times (= limit)
+        for _ in range(5):
+            yield _v2_chunk("messages", (), (_tool_error_token(failing_tool), {}))
+        # The 5th error should trigger the guard — this token should never be reached
+        yield _v2_chunk("messages", (), (_ai_token("should not reach here"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="You are helpful.",
+            tools=[],
+        )
+        with pytest.raises(AgentExecutionError, match="write_todos"):
+            await executor.execute(_make_envelope("Do something"))

@@ -214,7 +214,7 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
 - **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - **Souvenir**: `config/souvenir/profiles.yaml` (config extracteur mémoire)
-- **Aiguilleur**: `config/channels.yaml` (définitions canaux)
+- **Aiguilleur**: `config/channels.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
 
 **Flux de rechargement** :
 1. Surveillance fichier système via `watchfiles` (inotify sur Linux, FSEvents sur macOS, ReadDirectoryChangesW sur Windows)
@@ -230,11 +230,21 @@ Une fois qu'une configuration valide et non-permissive a été chargée (`_confi
 - Rétention : max 5 versions par brique
 - Permet audit et rollback manuel si nécessaire
 
+**Hot-reload Aiguilleur — champs souples vs durs** :
+Le rechargement de `channels.yaml` par l'Aiguilleur distingue deux catégories de champs :
+
+| Catégorie | Champs | Effet |
+|-----------|--------|-------|
+| **Souples** | `profile`, `prompt_path`, `streaming` | Mis à jour en direct sans redémarrer l'adaptateur. `profile` est mis à jour via `ProfileRef.update()` (thread-safe) ; les adaptateurs lisent `adapter.config` à chaque message entrant. |
+| **Durs** | `type`, `class_path`, `enabled`, `command` | Changement détecté → WARNING loggé. Redémarrage du process requis pour appliquer. L'ajout/suppression de canaux nécessite également un redémarrage. |
+
+Le mécanisme repose sur un thread daemon `aiguilleur-config-watcher` qui surveille le fichier via `watchfiles` et appelle `_reload_channel_profiles()` à chaque changement. Le thread est arrêté proprement par `_shutdown_event` lors du SIGTERM.
+
 **Cas d'usage** :
 - Modification des ACL (Sentinelle) sans redémarrage
 - Ajout/suppression de profils LLM (Atelier) en direct
 - Changement de politique utilisateur (Portail)
-- Activation/désactivation de canaux (Aiguilleur)
+- Changement de profil LLM ou de chemin d'overlay de prompt (Aiguilleur) en direct, sans redémarrer l'adaptateur Discord/Telegram
 
 ---
 

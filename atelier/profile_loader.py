@@ -70,6 +70,9 @@ class ProfileConfig:
         mcp_max_tools: Maximum number of MCP tool definitions passed to the model.
             0 means no MCP tools are exposed. Internal tools are not counted.
             Default 20.
+        parallel_tool_calls: When False, disables parallel tool calls via the
+            OpenAI-compatible API parameter. When None (default), the parameter
+            is not forwarded and the provider default applies.
     """
 
     model: str
@@ -82,6 +85,7 @@ class ProfileConfig:
     fallback_model: str | None = None
     mcp_timeout: int = 10
     mcp_max_tools: int = 20
+    parallel_tool_calls: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +149,14 @@ def load_profiles(
 
         api_key_env: str | None = cfg["api_key_env"]
 
+        raw_ptc = cfg.get("parallel_tool_calls")
+        if raw_ptc is not None and not isinstance(raw_ptc, bool):
+            raise ValueError(
+                f"parallel_tool_calls for profile '{name}' must be a boolean, "
+                f"got {type(raw_ptc).__name__!r}"
+            )
+        parallel_tool_calls: bool | None = raw_ptc
+
         result[name] = ProfileConfig(
             model=str(cfg["model"]),
             temperature=float(cfg["temperature"]),
@@ -156,6 +168,7 @@ def load_profiles(
             fallback_model=fallback_model,
             mcp_timeout=int(cfg.get("mcp_timeout", 10)),
             mcp_max_tools=int(cfg.get("mcp_max_tools", 20)),
+            parallel_tool_calls=parallel_tool_calls,
         )
 
     return result

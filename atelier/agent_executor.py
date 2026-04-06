@@ -107,7 +107,12 @@ def _resolve_profile_model(
     Raises:
         KeyError: api_key_env is set but the environment variable is absent.
     """
-    if profile.base_url is None and profile.api_key_env is None:
+    needs_init = (
+        profile.base_url is not None
+        or profile.api_key_env is not None
+        or profile.parallel_tool_calls is not None
+    )
+    if not needs_init:
         return profile.model
     kwargs: dict[str, Any] = {}
     if profile.base_url is not None:
@@ -120,6 +125,8 @@ def _resolve_profile_model(
                 f"'{profile.model}') is not set."
             )
         kwargs["api_key"] = api_key
+    if profile.parallel_tool_calls is not None:
+        kwargs.setdefault("model_kwargs", {})["parallel_tool_calls"] = profile.parallel_tool_calls
     return init_chat_model(profile.model, **kwargs)
 
 
@@ -431,6 +438,9 @@ class AgentExecutor:
         full_reply = ""
         last_tool_result: str = ""
         pending_tool_name: str = ""
+        _consecutive_tool_error_name: str = ""
+        _consecutive_tool_error_count: int = 0
+        _TOOL_ERROR_LOOP_LIMIT: int = 5
 
         stream_kwargs: dict = {
             "stream_mode": ["updates", "messages"],
@@ -497,6 +507,25 @@ class AgentExecutor:
                             "tool_result",
                             f"{tool_name}: {normalised[:100]}",
                         )
+                    # Loop guard: abort on repeated consecutive errors for the same tool.
+                    # Unnamed tools (name == "?") are excluded — grouping them together
+                    # could trigger a false abort when different tools all lack a name.
+                    named_tool = tool_name if tool_name != "?" else None
+                    if getattr(token, "status", None) == "error":
+                        if named_tool is not None and named_tool == _consecutive_tool_error_name:
+                            _consecutive_tool_error_count += 1
+                        elif named_tool is not None:
+                            _consecutive_tool_error_name = named_tool
+                            _consecutive_tool_error_count = 1
+                        if _consecutive_tool_error_count >= _TOOL_ERROR_LOOP_LIMIT:
+                            raise AgentExecutionError(
+                                f"Tool '{tool_name}' errored {_consecutive_tool_error_count} "
+                                f"consecutive times — aborting to prevent infinite loop. "
+                                f"Last error: {normalised[:200]}"
+                            )
+                    else:
+                        _consecutive_tool_error_name = ""
+                        _consecutive_tool_error_count = 0
 
                 # Text tokens from the LLM.
                 # AIMessageChunk.type is "AIMessageChunk" in streaming (not "ai"),

@@ -783,3 +783,197 @@ def test_resolve_profile_model_raises_key_error_for_missing_env(
 
     with pytest.raises(KeyError):
         _resolve_profile_model(profile)
+
+
+# ---------------------------------------------------------------------------
+# 37. ProfileConfig — parallel_tool_calls defaults to None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_profile_config_parallel_tool_calls_defaults_to_none() -> None:
+    """ProfileConfig.parallel_tool_calls defaults to None when not supplied.
+
+    None means the parameter is not forwarded to init_chat_model, preserving
+    backward compatibility with profiles that do not set it.
+    """
+    profile = ProfileConfig(
+        model="anthropic:claude-haiku-4-5",
+        temperature=0.7,
+        max_tokens=512,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url=None,
+        api_key_env=None,
+    )
+
+    assert profile.parallel_tool_calls is None
+
+
+# ---------------------------------------------------------------------------
+# 38. load_profiles — parallel_tool_calls: false parsed correctly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_profiles_parallel_tool_calls_false(tmp_path: Path) -> None:
+    """parallel_tool_calls: false in YAML is loaded as False on ProfileConfig.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+    """
+    yaml_content = textwrap.dedent(
+        """\
+        profiles:
+          default:
+            model: mistralai/mistral-medium-3.1
+            temperature: 0.7
+            max_tokens: 2048
+            base_url: null
+            api_key_env: null
+            parallel_tool_calls: false
+            resilience:
+              retry_attempts: 2
+              retry_delays: [2, 4]
+        """
+    )
+    cfg = tmp_path / "profiles.yaml"
+    cfg.write_text(yaml_content)
+
+    profiles = load_profiles(config_path=cfg)
+
+    assert profiles["default"].parallel_tool_calls is False
+
+
+# ---------------------------------------------------------------------------
+# 39. load_profiles — parallel_tool_calls: true parsed correctly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_profiles_parallel_tool_calls_true(tmp_path: Path) -> None:
+    """parallel_tool_calls: true in YAML is loaded as True on ProfileConfig.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+    """
+    yaml_content = textwrap.dedent(
+        """\
+        profiles:
+          default:
+            model: anthropic:claude-haiku-4-5
+            temperature: 0.5
+            max_tokens: 1024
+            base_url: null
+            api_key_env: null
+            parallel_tool_calls: true
+            resilience:
+              retry_attempts: 1
+              retry_delays: [1]
+        """
+    )
+    cfg = tmp_path / "profiles.yaml"
+    cfg.write_text(yaml_content)
+
+    profiles = load_profiles(config_path=cfg)
+
+    assert profiles["default"].parallel_tool_calls is True
+
+
+# ---------------------------------------------------------------------------
+# 40. _resolve_profile_model — model_kwargs passed when parallel_tool_calls set
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_passes_model_kwargs_when_parallel_tool_calls_set() -> None:
+    """_resolve_profile_model passes model_kwargs={"parallel_tool_calls": False} to init_chat_model.
+
+    When parallel_tool_calls is False and base_url is set, init_chat_model must
+    receive model_kwargs to forward the flag to the OpenAI-compatible API.
+    """
+    profile = ProfileConfig(
+        model="openai:mistral-medium-3.1",
+        temperature=0.7,
+        max_tokens=2048,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url="http://openrouter.ai/api/v1",
+        api_key_env=None,
+        parallel_tool_calls=False,
+    )
+
+    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+        _resolve_profile_model(profile)
+
+    mock_init.assert_called_once_with(
+        "openai:mistral-medium-3.1",
+        base_url="http://openrouter.ai/api/v1",
+        model_kwargs={"parallel_tool_calls": False},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 41. _resolve_profile_model — forces init_chat_model when only parallel_tool_calls set
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_calls_init_when_only_parallel_tool_calls_set() -> None:
+    """_resolve_profile_model calls init_chat_model even with no base_url/api_key_env.
+
+    When parallel_tool_calls is not None (regardless of base_url/api_key_env),
+    we must call init_chat_model to pass model_kwargs — returning the string
+    directly would bypass the flag entirely.
+    """
+    profile = ProfileConfig(
+        model="openai:mistral-medium-3.1",
+        temperature=0.7,
+        max_tokens=2048,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url=None,
+        api_key_env=None,
+        parallel_tool_calls=False,
+    )
+
+    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+        _resolve_profile_model(profile)
+
+    mock_init.assert_called_once_with(
+        "openai:mistral-medium-3.1",
+        model_kwargs={"parallel_tool_calls": False},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 42. _resolve_profile_model — backward compat: no model_kwargs when parallel_tool_calls is None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_profile_model_no_model_kwargs_when_parallel_tool_calls_none(
+    tmp_path: Path,
+) -> None:
+    """_resolve_profile_model does NOT pass model_kwargs when parallel_tool_calls is None.
+
+    Existing profiles without parallel_tool_calls must continue to work as before:
+    no model_kwargs key in the init_chat_model call when base_url is set.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+    """
+    profile = ProfileConfig(
+        model="openai:my-local-model",
+        temperature=0.2,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
+        base_url="http://localhost:1234/v1",
+        api_key_env=None,
+        parallel_tool_calls=None,
+    )
+
+    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+        _resolve_profile_model(profile)
+
+    mock_init.assert_called_once_with(
+        "openai:my-local-model",
+        base_url="http://localhost:1234/v1",
+    )

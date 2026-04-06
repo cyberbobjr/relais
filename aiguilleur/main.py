@@ -48,8 +48,27 @@ Processing flow
   (2) For each enabled channel: instantiate NativeAiguilleur or
       ExternalAiguilleur depending on the adapter type.
   (3) Start all adapters (threads / subprocesses) concurrently.
-  (4) Monitor adapter health; restart with exponential backoff on crash.
-  (5) On SIGTERM / SIGINT: signal all adapters to stop, await clean exit.
+  (4) Start background config-watcher daemon thread (watchfiles) that
+      monitors channels.yaml for filesystem changes and calls
+      ``_reload_channel_profiles()`` on every change.
+  (5) Monitor adapter health; restart with exponential backoff on crash.
+  (6) On SIGTERM / SIGINT: signal the config-watcher thread to stop,
+      then stop all adapters and await clean exit.
+
+Hot-reload — soft vs hard fields
+---------------------------------
+channels.yaml changes are classified into two categories:
+
+* **Soft fields** (``profile``, ``prompt_path``, ``streaming``): applied
+  live without restarting the adapter.  ``profile`` is updated through
+  the ``ProfileRef`` object embedded in ``ChannelConfig`` so that all
+  concurrent reader threads see the new value atomically.  Adapters read
+  ``adapter.config`` on every inbound message so ``prompt_path`` and
+  ``streaming`` are also effective immediately.
+
+* **Hard fields** (``type``, ``class_path``, ``enabled``, ``command``):
+  changing these emits a WARNING and requires a full process restart to
+  take effect.  Adding or removing channels also requires a restart.
 """
 
 import logging
