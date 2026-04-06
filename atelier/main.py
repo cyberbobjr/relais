@@ -29,7 +29,11 @@ Key classes:
 * ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
   system prompt from soul / role / user / channel / policy prompt files.
 * ``ProfileConfig`` — loaded from atelier/profiles.yaml; selects model, temperature,
-  max_tokens, mcp_timeout, mcp_max_tools per request.
+  max_tokens, mcp_timeout, mcp_max_tools per request.  Optional field
+  ``parallel_tool_calls: bool | None`` forwards the OpenAI-compatible
+  ``parallel_tool_calls`` parameter to the model (useful to disable it for
+  providers like Mistral that emit broken parallel calls).  When ``None``
+  (default) the parameter is not forwarded and the provider default applies.
 * ``StreamPublisher`` — publishes streaming entries to
   ``relais:messages:streaming:{channel}:{corr_id}`` (type ``token`` for text
   chunks) and progress events (type ``progress``) to both the streaming stream
@@ -80,6 +84,13 @@ Message flow (one task at a time):
     │  (6) publish archive action to relais:memory:request with envelope + messages_raw
     │      (Souvenir processes this to persist the full LangChain message history)
     └──► relais:messages:outgoing_pending
+
+Loop guard (AgentExecutor):
+  If the same named tool returns ``status="error"`` 5 consecutive times,
+  ``AgentExecutor.execute()`` raises ``AgentExecutionError`` to abort the
+  request and prevent infinite tool-error loops (e.g. Mistral parallel-tool-
+  call bug with ``write_todos``).  Unnamed tools (name == "?") are excluded
+  from grouping to avoid false positives.
 
 XACK contract:
   - Return True  → ACK (success, or AgentExecutionError/ExhaustedRetriesError
