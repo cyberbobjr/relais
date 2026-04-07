@@ -495,7 +495,7 @@ class Sentinelle(BrickBase):
             )
         else:
             await self._reply_inline(
-                redis_conn, envelope, f"Vous n'avez pas la permission d'exécuter /{cmd_name}"
+                redis_conn, envelope, f"You do not have permission to execute /{cmd_name}"
             )
             logger.warning(
                 "Unauthorised command /%s from %s — replied inline", cmd_name, envelope.sender_id

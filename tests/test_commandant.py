@@ -247,13 +247,13 @@ async def test_handle_help_lists_all_command_names(mock_redis):
     # Extract the JSON sent to the outgoing stream
     outgoing_calls = [c for c in mock_redis.xadd.call_args_list
                       if "relais:messages:outgoing" in str(c)]
-    assert outgoing_calls, "Aucun message publié sur outgoing"
+    assert outgoing_calls, "No message published to outgoing"
     payload_arg = outgoing_calls[0].args[1]  # {"payload": "<json>"}
     response_envelope = Envelope.from_json(payload_arg["payload"])
 
     for name in COMMAND_REGISTRY:
         assert f"/{name}" in response_envelope.content, (
-            f"/{name} absent de la réponse /help: {response_envelope.content!r}"
+            f"/{name} missing from /help response: {response_envelope.content!r}"
         )
 
 
@@ -278,7 +278,7 @@ async def test_handle_help_includes_descriptions(mock_redis):
 
     for name, spec in COMMAND_REGISTRY.items():
         assert spec.description in response_envelope.content, (
-            f"Description de '{name}' absente de la réponse /help"
+            f"Description of '{name}' missing from /help response"
         )
 
 

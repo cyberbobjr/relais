@@ -69,6 +69,6 @@ def initialize_user_dir(system_install_path: Path | None = None):
     if not claude_md.exists():
         claude_md.write_text(
             "# RELAIS Skills Registry\n\n"
-            "## Skills actifs\n"
-            "# Ajoutez vos skills ici — Le Forgeron met à jour automatiquement\n"
+            "## Active skills\n"
+            "# Add your skills here — Forgeron updates this file automatically\n"
         )

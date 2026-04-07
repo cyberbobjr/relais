@@ -48,7 +48,7 @@ CONFIG_MD_DEFAULTS = [
 def test_config_yaml_default_exists(rel_path: str) -> None:
     """Each default YAML file must exist on disk."""
     assert _project_file(rel_path).exists(), (
-        f"Fichier manquant : {rel_path}"
+        f"Missing file: {rel_path}"
     )
 
 
@@ -58,7 +58,7 @@ def test_config_yaml_default_is_valid_yaml(rel_path: str) -> None:
     content = _project_file(rel_path).read_text(encoding="utf-8")
     # Must not raise an exception
     parsed = yaml.safe_load(content)
-    assert parsed is not None, f"{rel_path} est vide ou nul"
+    assert parsed is not None, f"{rel_path} is empty or null"
 
 
 @pytest.mark.parametrize("rel_path", CONFIG_MD_DEFAULTS)
@@ -71,7 +71,7 @@ def test_config_md_default_exists(rel_path: str) -> None:
 def test_config_md_default_is_non_empty(rel_path: str) -> None:
     """Each default Markdown file must contain non-empty content."""
     content = _project_file(rel_path).read_text(encoding="utf-8").strip()
-    assert len(content) > 0, f"{rel_path} est vide"
+    assert len(content) > 0, f"{rel_path} is empty"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -95,15 +95,15 @@ def test_soul_md_default_exists(rel_path: str) -> None:
 def test_soul_md_default_is_non_empty(rel_path: str) -> None:
     """Each default SOUL file must contain text."""
     content = _project_file(rel_path).read_text(encoding="utf-8").strip()
-    assert len(content) > 0, f"{rel_path} est vide"
+    assert len(content) > 0, f"{rel_path} is empty"
 
 
 def test_soul_md_default_has_substantial_system_prompt() -> None:
     """SOUL.md.default must contain a non-trivial personality prompt (>100 chars)."""
     content = _project_file("prompts/soul/SOUL.md.default").read_text(encoding="utf-8").strip()
     assert len(content) > 100, (
-        f"SOUL.md.default trop court ({len(content)} chars) — "
-        "doit contenir un prompt de personnalité complet"
+        f"SOUL.md.default too short ({len(content)} chars) — "
+        "must contain a complete personality prompt"
     )
 
 
@@ -130,7 +130,7 @@ def test_prompt_file_exists(rel_path: str) -> None:
 def test_prompt_file_is_non_empty(rel_path: str) -> None:
     """Each prompt file must contain content."""
     content = _project_file(rel_path).read_text(encoding="utf-8").strip()
-    assert len(content) > 0, f"{rel_path} est vide"
+    assert len(content) > 0, f"{rel_path} is empty"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -155,7 +155,7 @@ def test_initialize_user_dir_creates_directory_structure(tmp_path: Path) -> None
             "media", "logs", "backup",
         ]
         for d in expected_dirs:
-            assert (home / d).is_dir(), f"Répertoire manquant : {d}"
+            assert (home / d).is_dir(), f"Missing directory: {d}"
     finally:
         del os.environ["RELAIS_HOME"]
 
@@ -175,7 +175,7 @@ def test_initialize_user_dir_copies_all_default_files(tmp_path: Path) -> None:
             if src.exists():
                 dest = home / dest_rel
                 assert dest.exists(), (
-                    f"Fichier non copié : {dest_rel} (source : {src_rel})"
+                    f"File not copied: {dest_rel} (source: {src_rel})"
                 )
     finally:
         del os.environ["RELAIS_HOME"]
@@ -193,14 +193,14 @@ def test_initialize_user_dir_does_not_overwrite_existing_files(tmp_path: Path) -
 
         # Pre-existing user file with custom content
         existing = home / "config" / "config.yaml"
-        existing.write_text("# fichier utilisateur custom\nversion: custom\n")
+        existing.write_text("# custom user file\nversion: custom\n")
         original_content = existing.read_text()
 
         initialize_user_dir(system_install_path=PROJECT_ROOT)
 
         # Content must not have changed
         assert existing.read_text() == original_content, (
-            "initialize_user_dir() a écrasé un fichier utilisateur existant !"
+            "initialize_user_dir() overwrote an existing user file!"
         )
     finally:
         del os.environ["RELAIS_HOME"]
@@ -217,8 +217,8 @@ def test_initialize_user_dir_creates_skills_claude_md(tmp_path: Path) -> None:
 
         home = tmp_path / "relais_home"
         claude_md = home / "skills" / "CLAUDE.md"
-        assert claude_md.exists(), "skills/CLAUDE.md non créé"
-        assert len(claude_md.read_text().strip()) > 0, "skills/CLAUDE.md est vide"
+        assert claude_md.exists(), "skills/CLAUDE.md not created"
+        assert len(claude_md.read_text().strip()) > 0, "skills/CLAUDE.md is empty"
     finally:
         del os.environ["RELAIS_HOME"]
 
@@ -248,6 +248,6 @@ def test_all_prompt_files_registered_in_default_files(rel_path: str) -> None:
     from common.init import DEFAULT_FILES
     destinations = {dest for dest, _src in DEFAULT_FILES}
     assert rel_path in destinations, (
-        f"{rel_path} existe sur disque mais n'est pas dans DEFAULT_FILES — "
-        "il ne sera pas copié lors de initialize_user_dir()"
+        f"{rel_path} exists on disk but is not in DEFAULT_FILES — "
+        "it will not be copied during initialize_user_dir()"
     )

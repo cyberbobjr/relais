@@ -37,7 +37,7 @@ class ClearHandler(BaseActionHandler):
                 orig = Envelope.from_json(envelope_json)
                 confirmation = Envelope.from_parent(
                     orig,
-                    "✓ Historique de conversation effacé.",
+                    "✓ Conversation history cleared.",
                 )
                 await ctx.redis_conn.xadd(
                     f"relais:messages:outgoing:{orig.channel}",

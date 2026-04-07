@@ -1383,15 +1383,15 @@ retention:
 
 **Taxonomie :** BrickBase long-running — deux boucles consommateurs Redis ; `autostart=true`, `autorestart=true`.
 
-**Rôle :** Améliore les skills existants par analyse statistique des traces d'exécution (Solution B) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (Solution D). Publie des notifications utilisateur quand un patch est appliqué ou un nouveau skill créé.
+**Rôle :** Améliore les skills existants par analyse statistique des traces d'exécution (trace analysis pipeline) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (auto-creation pipeline). Publie des notifications utilisateur quand un patch est appliqué ou un nouveau skill créé.
 
-**Pipeline trace analysis (Solution B) :**
+**Pipeline trace analysis (patch mode) :**
 
-Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. Quand un skill dépasse un seuil d'erreurs persistant, `SkillAnalyzer` (LLM précis) génère une `SkillPatchProposal`. `SkillPatcher` applique le patch atomiquement (`.pending` → snapshot `.bak`). `SkillValidator` monitore la régression post-patch et peut déclencher un rollback.
+Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. Quand un skill dépasse un seuil d'erreurs persistant, `SkillAnalyzer` (LLM précis, structured output) génère une `SkillPatchProposal`. `SkillPatcher` applique le patch atomiquement (`.pending` → snapshot `.bak`). `SkillValidator` monitore la régression post-patch et peut déclencher un rollback.
 
-**Pipeline auto-création (Solution D) :**
+**Pipeline auto-création (session archives) :**
 
-Consomme `relais:memory:request` via groupe dédié `forgeron_archive_group` (indépendant du groupe de Souvenir). `IntentLabeler` (Haiku LLM) extrait un label d'intention normalisé (snake_case) de chaque session. Quand N sessions partagent le même label, `SkillCreator` (LLM précis) génère un nouveau `SKILL.md` automatiquement.
+Consomme `relais:memory:request` via groupe dédié `forgeron_archive_group` (indépendant du groupe de Souvenir). `IntentLabeler` (Haiku LLM, structured output) extrait un label d'intention normalisé (snake_case) de chaque session. Quand N sessions partagent le même label, `SkillCreator` (LLM précis, structured output) génère un nouveau `SKILL.md` automatiquement.
 
 **Classes clés :**
 
@@ -1422,7 +1422,7 @@ Produits :
 XACK : ack_mode="always" sur les deux streams (consumer advisory — perte acceptable).
 ```
 
-**Solution D fast path (SkillAnnotator inline dans Atelier) :**
+**Inline annotation (SkillAnnotator inline dans Atelier) :**
 
 Si `tool_error_count > 0` après un tour, `SkillAnnotator.maybe_annotate()` est appelé inline dans Atelier (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé). Cela ajoute une section `LESSONS LEARNED` directement dans le `SKILL.md` concerné sans attendre le pipeline asynchrone de Forgeron.
 

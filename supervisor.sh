@@ -20,15 +20,15 @@ Usage:
   ./supervisor.sh force-kill
 
 Options:
-  --verbose   Après démarrage, suit les logs de toutes les briques en temps réel.
-              Ctrl+C détache les logs sans arrêter supervisord.
+  --verbose   After startup, follows logs of all bricks in real time.
+              Ctrl+C detaches logs without stopping supervisord.
 
 Notes:
-  - start all démarre supervisord si nécessaire puis lance tous les programmes.
-  - reload all correspond à supervisorctl reload.
-  - stop all arrête les programmes supervisés et coupe le démon supervisord.
-  - clear supprime tous les fichiers présents dans .relais/logs.
-  - force-kill tue tous les processus launcher orphelins qui bloquent les ports debugpy.
+  - start all starts supervisord if needed then launches all programs.
+  - reload all corresponds to supervisorctl reload.
+  - stop all stops supervised programs and shuts down the supervisord daemon.
+  - clear removes all files in .relais/logs.
+  - force-kill kills all orphan launcher processes blocking debugpy ports.
 EOF
 }
 
@@ -112,13 +112,13 @@ force_stop_pid() {
         return 0
     fi
 
-    echo "supervisord n'a pas quitté après shutdown; envoi SIGTERM..." >&2
+    echo "supervisord did not exit after shutdown; sending SIGTERM..." >&2
     kill "$pid" >/dev/null 2>&1 || true
     if wait_for_pid_exit "$pid" 20 0.25; then
         return 0
     fi
 
-    echo "supervisord résiste à SIGTERM; envoi SIGKILL..." >&2
+    echo "supervisord resists SIGTERM; sending SIGKILL..." >&2
     kill -9 "$pid" >/dev/null 2>&1 || true
     wait_for_pid_exit "$pid" 20 0.25
 }
@@ -134,16 +134,16 @@ stop_orphaned_supervisords() {
             continue
         fi
 
-        echo "Arrêt du supervisord orphelin (PID $pid)..." >&2
+        echo "Stopping orphan supervisord (PID $pid)..." >&2
         kill "$pid" >/dev/null 2>&1 || true
         if wait_for_pid_exit "$pid" 20 0.25; then
             continue
         fi
 
-        echo "supervisord orphelin (PID $pid) résiste à SIGTERM; envoi SIGKILL..." >&2
+        echo "Orphan supervisord (PID $pid) resists SIGTERM; sending SIGKILL..." >&2
         kill -9 "$pid" >/dev/null 2>&1 || true
         if ! wait_for_pid_exit "$pid" 20 0.25; then
-            echo "Timeout: le supervisord orphelin (PID $pid) n'a pas pu être arrêté." >&2
+            echo "Timeout: orphan supervisord (PID $pid) could not be stopped." >&2
             failed=1
         fi
     done < <(list_supervisord_pids)
@@ -168,13 +168,13 @@ stop_supervisord() {
 
         active_pid="$(get_active_supervisord_pid 2>/dev/null || true)"
 
-        echo "Arrêt de supervisord..."
+        echo "Stopping supervisord..."
         run_supervisorctl shutdown || true
 
         if [[ -n "$active_pid" ]]; then
             if ! wait_for_pid_exit "$active_pid" 40 0.25; then
                 if ! force_stop_pid "$active_pid"; then
-                    echo "Timeout: supervisord (PID $active_pid) n'a pas quitté dans les temps." >&2
+                    echo "Timeout: supervisord (PID $active_pid) did not exit in time." >&2
                     return 1
                 fi
             fi
@@ -191,7 +191,7 @@ stop_supervisord() {
         fi
     done
 
-    echo "Timeout: supervisord reste joignable après plusieurs tentatives d'arrêt." >&2
+    echo "Timeout: supervisord still reachable after multiple stop attempts." >&2
     return 1
 }
 
@@ -208,9 +208,9 @@ wait_for_supervisord() {
         sleep 0.25
     done
 
-    echo "supervisord n'a pas créé de socket utilisable: $SOCKET_PATH" >&2
+    echo "supervisord did not create a usable socket: $SOCKET_PATH" >&2
     if [[ -f "$PID_PATH" ]]; then
-        echo "PID file détecté: $PID_PATH" >&2
+        echo "PID file detected: $PID_PATH" >&2
     fi
     exit 1
 }
@@ -239,7 +239,7 @@ ensure_supervisord_running() {
     cleanup_stale_artifacts
 
     load_dotenv
-    echo "Démarrage de supervisord..."
+    echo "Starting supervisord..."
     supervisord -c "$CONFIG_PATH"
     wait_for_supervisord
 }
@@ -253,7 +253,7 @@ clear_logs() {
 
     mkdir -p "$logs_dir"
     find "$logs_dir" -mindepth 1 \( -type f -o -type l \) -delete
-    echo "Logs supprimés dans $logs_dir."
+    echo "Logs deleted in $logs_dir."
 }
 
 force_kill_launchers() {
@@ -262,19 +262,19 @@ force_kill_launchers() {
 
     # Stop supervisord first — otherwise autorestart will respawn killed processes immediately
     if is_supervisord_running; then
-        echo "supervisord est actif — arrêt préalable pour éviter le respawn..." >&2
+        echo "supervisord is active — stopping first to prevent respawn..." >&2
         if ! stop_supervisord; then
-            echo "Impossible d'arrêter supervisord. Abandon." >&2
+            echo "Unable to stop supervisord. Aborting." >&2
             return 1
         fi
-        echo "supervisord arrêté."
+        echo "supervisord stopped."
     fi
 
     # Kill all python launcher processes
     while IFS= read -r pid; do
         [[ -n "$pid" ]] || continue
         if is_pid_running "$pid"; then
-            echo "Terminaison forcée du processus launcher (PID $pid)..."
+            echo "Force-killing launcher process (PID $pid)..."
             kill -9 "$pid" >/dev/null 2>&1 || true
             killed=$((killed + 1))
         fi
@@ -284,7 +284,7 @@ force_kill_launchers() {
     while IFS= read -r pid; do
         [[ -n "$pid" ]] || continue
         if is_pid_running "$pid"; then
-            echo "Terminaison forcée du processus sur port debugpy (PID $pid)..."
+            echo "Force-killing process on debugpy port (PID $pid)..."
             kill -9 "$pid" >/dev/null 2>&1 || true
             killed=$((killed + 1))
         fi
@@ -294,10 +294,10 @@ force_kill_launchers() {
     cleanup_stale_artifacts
 
     if [[ $killed -gt 0 ]]; then
-        echo "$killed processus orphelins ont été terminés. Ports debugpy libérés."
+        echo "$killed orphan processes terminated. Debugpy ports freed."
         sleep 1
     else
-        echo "Aucun processus orphelin détecté."
+        echo "No orphan processes detected."
     fi
 }
 
@@ -316,13 +316,13 @@ TARGET="${POSITIONAL[1]:-}"
 
 tail_logs() {
     local logs_dir="$REPO_ROOT/.relais/logs"
-    echo "Mode verbose — suivi des logs (Ctrl+C pour détacher)..."
+    echo "Verbose mode — following logs (Ctrl+C to detach)..."
     sleep 0.5
     # shellcheck disable=SC2012
     if ls "$logs_dir"/*.log >/dev/null 2>&1; then
         tail -f "$logs_dir"/*.log
     else
-        echo "Aucun fichier .log trouvé dans $logs_dir." >&2
+        echo "No .log files found in $logs_dir." >&2
     fi
 }
 
@@ -350,13 +350,13 @@ case "$ACTION" in
                 exit 1
             fi
             cleanup_stale_artifacts
-            echo "supervisord n'est pas lancé. Rien à arrêter."
+            echo "supervisord is not running. Nothing to stop."
             exit 0
         fi
         if ! stop_supervisord; then
             exit 1
         fi
-        echo "supervisord arrêté."
+        echo "supervisord stopped."
         ;;
     restart)
         if [[ "$TARGET" != "all" ]]; then
@@ -370,7 +370,7 @@ case "$ACTION" in
             fi
         fi
         load_dotenv
-        echo "Démarrage de supervisord..."
+        echo "Starting supervisord..."
         supervisord -c "$CONFIG_PATH"
         wait_for_supervisord
         run_supervisorctl start all
@@ -390,7 +390,7 @@ case "$ACTION" in
             exit 1
         fi
         if ! is_supervisord_running; then
-            echo "supervisord n'est pas lancé. Lancez: ./supervisor.sh start all"
+            echo "supervisord is not running. Run: ./supervisor.sh start all"
             exit 1
         fi
         run_supervisorctl status

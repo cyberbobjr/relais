@@ -213,7 +213,7 @@ def test_stop_all_cleans_stale_socket_after_shutdown(tmp_path: Path) -> None:
         result = _run_script(script_path, fake_bin, state_path, "stop", "all")
 
         assert result.returncode == 0, result.stderr
-        assert "supervisord arrêté." in result.stdout
+        assert "supervisord stopped." in result.stdout
         assert "Timeout:" not in result.stderr
         assert not socket_path.exists()
         assert not pid_path.exists()
@@ -275,7 +275,7 @@ def test_stop_all_kills_orphaned_supervisord_without_socket(tmp_path: Path) -> N
         result = _run_script(script_path, fake_bin, state_path, "stop", "all")
 
         assert result.returncode == 0, result.stderr
-        assert f"Arrêt du supervisord orphelin (PID {orphan_pid})..." in result.stderr
+        assert f"Stopping orphan supervisord (PID {orphan_pid})..." in result.stderr
         with pytest.raises(ProcessLookupError):
             os.kill(orphan_pid, 0)
     finally:

@@ -83,7 +83,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         shutdown_event.set()
 
     security_msgs = await redis_conn.xrange("relais:security", "-", "+")
-    assert len(security_msgs) == 1, "Portail doit publier 1 message dans relais:security"
+    assert len(security_msgs) == 1, "Portail should publish 1 message to relais:security"
 
     # ── STEP 2: Sentinelle ────────────────────────────────────────────────────
     # Use permissive ACL so the test user (discord:111222333) is allowed through.
@@ -99,7 +99,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         shutdown_event2.set()
 
     tasks_msgs = await redis_conn.xrange("relais:tasks", "-", "+")
-    assert len(tasks_msgs) == 1, "Sentinelle doit publier 1 message dans relais:tasks"
+    assert len(tasks_msgs) == 1, "Sentinelle should publish 1 message to relais:tasks"
 
     # ── STEP 3: Atelier (mocked SDK) ──────────────────────────────────────────
     mock_profile = MagicMock()
@@ -150,7 +150,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         shutdown_event4.set()
 
     outgoing_msgs = await redis_conn.xrange("relais:messages:outgoing:discord", "-", "+")
-    assert len(outgoing_msgs) == 1, "Atelier doit publier 1 réponse dans relais:messages:outgoing:discord"
+    assert len(outgoing_msgs) == 1, "Atelier should publish 1 response to relais:messages:outgoing:discord"
 
     response_env = Envelope.from_json(outgoing_msgs[0][1]["payload"])
     assert response_env.content == "Je suis RELAIS, comment puis-je t'aider ?"
@@ -188,7 +188,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
 
     await engine.dispose()
 
-    assert len(archived) >= 1, "Souvenir doit archiver au moins 1 message dans SQLite"
+    assert len(archived) >= 1, "Souvenir should archive at least 1 message in SQLite"
     assert any(
         m.session_id == "sess-smoke-e2e-001" for m in archived
-    ), "L'archive SQLite doit contenir le session_id du message initial"
+    ), "SQLite archive should contain the session_id of the initial message"
