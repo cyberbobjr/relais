@@ -2,9 +2,40 @@
 
 **Objectif** : Un brick dédié `Forgeron` accumule les traces d'exécution de skills, analyse statistiquement les patterns d'erreur, et réécrit les fichiers skill quand il a suffisamment de données pour être sûr de l'amélioration. Validation empirique post-patch + rollback automatique si régression.
 
-**Solution retenue** : B (Forgeron) comme moteur principal + D (annotations immédiates) comme couche complémentaire légère.
+**Solution retenue** : S3 (Changelog séparé + Consolidation périodique) — évolution de B+D.
 
-**Status** : IMPLÉMENTÉ — Solutions B et D en production
+**Status** : IMPLÉMENTÉ — S3 en production (remplace A0/SkillAnnotator)
+
+### S3 — Changelog séparé + Consolidation périodique
+
+**Mécanisme en deux phases** :
+
+- **Phase 1** (cheap, chaque trigger) : `ChangelogWriter` (LLM fast) extrait 1-3 observations
+  et les écrit dans `CHANGELOG.md`. Le SKILL.md n'est jamais touché.
+- **Phase 2** (cher, périodique) : quand `CHANGELOG.md` dépasse `consolidation_line_threshold`
+  lignes (défaut 80), `SkillConsolidator` (LLM precise) relit les deux fichiers, réécrit
+  SKILL.md en absorbant les learnings, produit un `CHANGELOG_DIGEST.md` (audit), et vide
+  le changelog.
+
+**Évolution du skill** : SKILL.md reste propre entre les consolidations. Le changelog est la
+"mémoire de travail". Consolidation = "sommeil réparateur".
+
+**Fichiers** :
+- `forgeron/changelog_writer.py` — Phase 1
+- `forgeron/skill_consolidator.py` — Phase 2
+- `forgeron/main.py` — câblage (remplace `SkillAnnotator`)
+
+**Configuration** (`forgeron.yaml`) :
+- `annotation_profile` — profil LLM pour Phase 1 (recommandé : fast/haiku)
+- `consolidation_profile` — profil LLM pour Phase 2 (recommandé : precise/sonnet)
+- `consolidation_line_threshold` — seuil de lignes pour déclencher Phase 2 (défaut : 80)
+- `consolidation_cooldown_seconds` — cooldown entre deux consolidations (défaut : 604800 = 7j)
+- `annotation_cooldown_seconds` — cooldown entre deux observations Phase 1 (défaut : 300)
+- `annotation_call_threshold` — nombre d'appels cumulés avant observation sans erreur (défaut : 10)
+- `notify_user_on_consolidation` — notifier l'utilisateur après consolidation (défaut : true)
+
+**Risque** : très faible — le SKILL.md est intouché en Phase 1. Une consolidation échouée
+ne perd aucune information (le changelog est préservé).
 
 ---
 

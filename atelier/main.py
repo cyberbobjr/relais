@@ -76,23 +76,25 @@ restarting the service:
 Message flow (one task at a time):
 
   relais:tasks
-    │  (1) deserialise Envelope, resolve ProfileConfig
+    │  (1) deserialise Envelope, resolve ProfileConfig from CTX_PORTAIL
     │  (2) assemble soul system prompt (SoulAssembler)
-    │  (3) read pre-built MCP tools from singleton McpSessionManager (under
-    │      _mcp_lock); apply ToolPolicy filtering
-    │  (4) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
-    │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
-    │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
+    │  (3) resolve per-user skills dirs and MCP patterns via ToolPolicy
+    │  (4) read pre-built MCP tools from singleton McpSessionManager (under
+    │      _mcp_lock); apply ToolPolicy.filter_mcp_tools() per allowed_mcp_tools
+    │  (5) resolve subagents + delegation prompt from SubagentRegistry,
+    │      filtered by user's allowed_subagents patterns (fnmatch)
+    │  (6) AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
+    │      backend=SouvenirBackend, checkpointer, subagents, delegation_prompt,
+    │      progress_callback=…)
+    │      ├── token chunks    ──► relais:messages:streaming:{channel}:{corr_id}
+    │      ├── progress events ──► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count)
     │          ← full turn captured via aget_state()
-    │  (5) publish archive action to relais:memory:request with envelope + messages_raw
-    │      (Souvenir processes this to persist the full LangChain message history)
-    │  (6) if skill_used and tool_call_count > 0 → publish CTX_SKILL_TRACE envelope to
-    │      relais:skill:trace (fire-and-forget → Forgeron trace analysis pipeline)
-    │  (6b) if tool_error_count > 0 and forgeron.annotation_mode enabled →
-    │       SkillAnnotator.maybe_annotate() appends LESSONS LEARNED inline to the
-    │       SKILL.md (inline annotation path; lazy import — no crash if forgeron absent)
-    │  (7) build response Envelope; stamp context["atelier"]["skills_used"] if any
+    │  (7) if skills_used and tool_call_count > 0 → publish ACTION_SKILL_TRACE envelope
+    │      to relais:skill:trace (fire-and-forget → Forgeron stores the trace)
+    │      └── Forgeron handles changelog + consolidation autonomously
+    │  (8) build response Envelope; stamp context["atelier"]["skills_used"] if any;
+    │      publish archive to relais:memory:request (Souvenir persists full LangChain history)
     └──► relais:messages:outgoing_pending
 
 Loop guard (AgentExecutor):
@@ -150,7 +152,6 @@ from common.contexts import (
     CTX_SKILL_TRACE,
     CTX_SOUVENIR_REQUEST,
     AiguilleurCtx,
-    AtelierCtx,
     PortailCtx,
     ensure_ctx,
 )
@@ -696,31 +697,6 @@ class Atelier(BrickBase):
                     STREAM_SKILL_TRACE, {"payload": trace_env.to_json()}
                 )
 
-                # 7b. Inline annotation — fires per turn when tool errors occur.
-                # Loaded lazily so Atelier starts even without forgeron installed.
-                if agent_result.tool_error_count > 0:
-                    try:
-                        from forgeron.config import load_forgeron_config  # noqa: PLC0415
-                        from atelier.skill_annotator import SkillAnnotator  # noqa: PLC0415
-                        _fgn_cfg = load_forgeron_config()
-                        if _fgn_cfg.annotation_mode:
-                            _ann_profile = resolve_profile(
-                                self._profiles, _fgn_cfg.annotation_profile
-                            )
-                            annotator = SkillAnnotator(
-                                profile=_ann_profile,
-                                skills_dir=_fgn_cfg.skills_dir,
-                            )
-                            for _skill in skills_used:
-                                await annotator.maybe_annotate(
-                                    skill_name=_skill,
-                                    tool_error_count=agent_result.tool_error_count,
-                                    messages_raw=agent_result.messages_raw,
-                                    config=_fgn_cfg,
-                                    redis_conn=redis_conn,
-                                )
-                    except ImportError:
-                        pass  # forgeron not yet available — skip annotation
 
             # 8. Build and publish response envelope.
             response_env = Envelope.create_response_to(envelope, reply_text)

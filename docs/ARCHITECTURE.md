@@ -84,8 +84,9 @@ Aiguilleur
 | `relais:memory:request` | Atelier | Forgeron (`forgeron_archive_group`) — auto-skill creation pipeline, Souvenir (`souvenir_group`) |
 | `relais:events:system` | Forgeron | Archiviste |
 | `relais:messages:outgoing_pending` | Forgeron (notifications) | Sentinelle |
-| `relais:skill:last_improved:{skill_name}` (Redis String) | Forgeron | Forgeron (cooldown B) |
-| `relais:skill:creation_cooldown:{intent_label}` (Redis String) | Forgeron | Forgeron (cooldown D) |
+| `relais:skill:annotation_cooldown:{skill_name}` (Redis String) | Forgeron | Forgeron (Phase 1 changelog cooldown) |
+| `relais:skill:consolidation_cooldown:{skill_name}` (Redis String) | Forgeron | Forgeron (Phase 2 consolidation cooldown) |
+| `relais:skill:creation_cooldown:{intent_label}` (Redis String) | Forgeron | Forgeron (auto-creation cooldown) |
 
 ### Streaming et erreurs
 
@@ -164,7 +165,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide **et** `tool_call_count > 0`) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`
   - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
   - les erreurs finales sur `relais:tasks:failed`
-- **Inline annotation** : si `tool_error_count > 0` et `annotation_mode` activé dans `forgeron.yaml`, `SkillAnnotator.maybe_annotate()` est appelé inline après l'exécution (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé).
+- **Note** : l'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
 
 ### Commandant
 
@@ -192,17 +193,31 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 
 Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipelines indépendants :
 
-#### Pipeline trace analysis — Amélioration par analyse statistique (patch)
+#### Pipeline changelog + consolidation (S3) — Amélioration progressive des skills
 
 - Consomme `relais:skill:trace` (groupe `forgeron_group`, `ack_mode="always"` — les traces sont advisory).
 - Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`).
-- Forgeron accumule une ligne par trace par skill dans SQLite (`SkillTraceStore`), et calcule le taux d'erreur sur une fenêtre glissante.
-- Quand `min_traces_before_analysis` traces ont été accumulées et que le taux d'erreur dépasse `min_error_rate` (et qu'aucun cooldown Redis n'est actif sur `relais:skill:last_improved:{skill}`), `SkillAnalyzer` appelle le LLM avec les N traces les plus récentes pour produire un SKILL.md amélioré.
-- `SkillPatcher` applique le patch atomiquement (`.pending` → validation → snapshot `.bak` → rename).
-- Le patch est enregistré dans `SkillPatchStore` (états : `pending` / `applied` / `validated` / `rolled_back`).
-- `SkillValidator` surveille les nouvelles traces post-patch : si le taux d'erreur ne diminue pas, le rollback est déclenché automatiquement.
-- Les événements `ACTION_SKILL_PATCH_APPLIED` et `ACTION_SKILL_PATCH_ROLLED_BACK` sont publiés sur `relais:events:system` via une `Envelope` minimale (sans héritage du contexte upstream) avec `context["forgeron"]` (`CTX_FORGERON`).
-- Le profil LLM utilisé pour l'analyse est configuré via `llm_profile` dans `forgeron.yaml` et résolu via `common/profile_loader.py`.
+- Forgeron accumule une ligne par trace par skill dans SQLite (`SkillTraceStore`).
+
+**Phase 1 — Changelog (chaque trigger, LLM fast)** :
+- `ChangelogWriter` (profil `annotation_profile`, LLM rapide) extrait 1-3 observations concrètes et les écrit dans un `CHANGELOG.md` séparé du SKILL.md.
+- Déclenché par erreurs d'outils (`tool_error_count >= annotation_min_tool_errors`) ou par seuil d'appels cumulés (`annotation_call_threshold`).
+- Rate-limité par cooldown Redis `relais:skill:annotation_cooldown:{skill_name}` (TTL `annotation_cooldown_seconds`).
+- Le SKILL.md n'est **jamais touché** en Phase 1.
+
+**Phase 2 — Consolidation (périodique, LLM precise)** :
+- Déclenchée juste après une écriture Phase 1 si le CHANGELOG.md dépasse `consolidation_line_threshold` lignes (défaut 80) et que le cooldown `relais:skill:consolidation_cooldown:{skill_name}` est expiré.
+- `SkillConsolidator` (profil `consolidation_profile`, LLM precise) relit SKILL.md + CHANGELOG.md, réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail), et vide le changelog.
+- Toutes les écritures sont atomiques (`.tmp` + `Path.replace()`).
+- Le cooldown de consolidation est posé après succès (`consolidation_cooldown_seconds`, défaut 7 jours).
+- Si `notify_user_on_consolidation` est activé, une notification est publiée sur `relais:messages:outgoing_pending`.
+
+**Fichiers par skill** :
+| Fichier | Rôle |
+|---------|------|
+| `SKILL.md` | Instructions du skill — réécrit uniquement lors de la consolidation |
+| `CHANGELOG.md` | Mémoire de travail — observations accumulées entre deux consolidations |
+| `CHANGELOG_DIGEST.md` | Audit trail — résumé de chaque consolidation passée |
 
 #### Pipeline auto-création — Création automatique de skills depuis les archives de sessions
 
@@ -246,7 +261,7 @@ La résolution suit :
 | `config/atelier/profiles.yaml` | profils LLM |
 | `config/atelier/mcp_servers.yaml` | serveurs MCP |
 | `config/aiguilleur.yaml` | canaux Aiguilleur si fichier présent ; sinon fallback Discord |
-| `config/forgeron.yaml` | seuils d'analyse, profils LLM (`llm_profile`, `annotation_profile`), `skills_dir`, `patch_mode` |
+| `config/forgeron.yaml` | profils LLM (`annotation_profile`, `consolidation_profile`), seuils (`consolidation_line_threshold`, `annotation_call_threshold`), cooldowns, `skills_dir`, `creation_mode` |
 
 `initialize_user_dir()` ne copie pas `aiguilleur.yaml` actuellement.
 

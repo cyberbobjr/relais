@@ -25,37 +25,6 @@ class SkillTrace(SQLModel, table=True):
     tool_error_count: int
     messages_raw: str = Field(default="[]")  # JSON blob — full LangChain message list
     created_at: float = Field(default_factory=time.time)
-    # ID of the patch that was active at the time this trace was captured.
-    # None = trace captured before any patch was applied.
-    patch_id: str | None = Field(default=None, index=True)
-
-
-class SkillPatch(SQLModel, table=True):
-    """A versioned improvement patch applied to a skill file.
-
-    Tracks the full lifecycle of a patch: pending → applied → validated or
-    rolled_back.  The original_content field is the rollback source of truth
-    (the .bak file is a filesystem-level backup; this is the DB-level backup).
-    """
-
-    __tablename__ = "skill_patches"
-
-    id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()), primary_key=True
-    )
-    skill_name: str = Field(index=True)
-    original_content: str            # snapshot before patch (rollback source)
-    patched_content: str             # improved version proposed by the LLM
-    diff: str                        # unified diff string (human-readable)
-    rationale: str                   # LLM explanation of the changes
-    trigger_correlation_id: str      # correlation_id that triggered this analysis
-    created_at: float = Field(default_factory=time.time)
-    applied_at: float | None = Field(default=None)
-    rolled_back_at: float | None = Field(default=None)
-    pre_patch_error_rate: float      # error_rate on the N traces used for analysis
-    post_patch_error_rate: float | None = Field(default=None)  # updated by validator
-    # pending | applied | rolled_back | validated
-    status: str = Field(default="pending")
 
 
 class SessionSummary(SQLModel, table=True):

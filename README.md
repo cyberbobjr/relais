@@ -15,7 +15,7 @@ Les briques actives du repo sont :
 - `commandant` : commandes slash hors LLM
 - `souvenir` : mémoire court terme Redis + archivage SQLite
 - `archiviste` : logs et observation partielle du pipeline
-- `forgeron` : amélioration autonome des skills via analyse LLM des traces d'exécution
+- `forgeron` : amélioration autonome des skills (changelog + consolidation périodique) et création automatique de skills depuis les archives
 
 L'implémentation locale inclut surtout un adaptateur Discord complet. La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
 
@@ -42,7 +42,7 @@ flowchart TD
     MEM_RES[relais:memory:response]
     DLQ[(relais:tasks:failed)]
     ARCHIVISTE["ARCHIVISTE<br/>observe logs events<br/>et une partie du pipeline"]
-    FORGERON["FORGERON<br/>amélioration autonome skills<br/>analyse traces + création auto skills"]
+    FORGERON["FORGERON<br/>changelog + consolidation skills (S3)<br/>+ création auto skills"]
     SKILL_TRACE[relais:skill:trace]
     EVENTS_SYS[relais:events:system]
 
@@ -73,7 +73,7 @@ flowchart TD
     ATELIER -->|"relais:skill:trace"| SKILL_TRACE
     SKILL_TRACE --> FORGERON
     MEM_REQ -->|"forgeron_archive_group<br/>intent labeling + skill creation"| FORGERON
-    FORGERON -->|"relais:events:system<br/>patch_applied / rolled_back / skill.created"| EVENTS_SYS
+    FORGERON -->|"relais:events:system<br/>skill.created"| EVENTS_SYS
     FORGERON -->|"relais:messages:outgoing_pending<br/>notifications utilisateur"| SENT_OUT
 
     PORTAIL -. logs .-> ARCHIVISTE
@@ -112,9 +112,9 @@ flowchart TD
 - `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents déclarés dans `config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels et `skills/` optionnels) ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
 - `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
-- `Forgeron` dispose de deux pipelines d'auto-amélioration :
-  - **Trace analysis pipeline** : consomme `relais:skill:trace` (`forgeron_group`). Accumule les traces d'exécution par skill dans SQLite, calcule le taux d'erreur sur une fenêtre glissante, déclenche `SkillAnalyzer` (LLM) quand le seuil est dépassé, puis applique le patch atomiquement via `SkillPatcher`. `SkillValidator` surveille les traces post-patch et déclenche un rollback automatique si régression. Les événements `skill_patch_applied` et `skill_patch_rolled_back` sont publiés sur `relais:events:system`.
-  - **Auto-creation pipeline** : consomme `relais:memory:request` (`forgeron_archive_group`, fan-out indépendant de Souvenir). Pour chaque session archivée, `IntentLabeler` (LLM Haiku) extrait un label d'intention normalisé. Quand `min_sessions_for_creation` sessions partagent le même label, `SkillCreator` (LLM precise) génère un `SKILL.md` complet. L'événement `skill.created` est publié sur `relais:events:system`. Si `notify_user_on_creation` ou `notify_user_on_patch` est activé, une notification est publiée sur `relais:messages:outgoing_pending` pour informer l'utilisateur.
+- `Forgeron` dispose de deux mécanismes d'amélioration des skills :
+  - **Changelog + consolidation (S3)** : consomme `relais:skill:trace` (`forgeron_group`). À chaque tour avec des erreurs d'outils ou après N appels cumulés, `ChangelogWriter` (LLM rapide) extrait 1-3 observations et les écrit dans un `CHANGELOG.md` séparé (le SKILL.md n'est jamais touché en Phase 1). Quand le changelog dépasse un seuil de lignes (`consolidation_line_threshold`, défaut 80), `SkillConsolidator` (LLM precise) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail) et vide le changelog. Un cooldown Redis par skill empêche les consolidations trop fréquentes (`consolidation_cooldown_seconds`, défaut 7 jours). Si `notify_user_on_consolidation` est activé, une notification est publiée.
+  - **Auto-création de skills** : consomme `relais:memory:request` (`forgeron_archive_group`, fan-out indépendant de Souvenir). Pour chaque session archivée, `IntentLabeler` (LLM Haiku) extrait un label d'intention normalisé. Quand `min_sessions_for_creation` sessions partagent le même label, `SkillCreator` (LLM precise) génère un `SKILL.md` complet. L'événement `skill.created` est publié sur `relais:events:system`. Si `notify_user_on_creation` est activé, une notification est publiée sur `relais:messages:outgoing_pending`.
 
 ---
 

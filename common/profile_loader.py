@@ -208,7 +208,7 @@ def build_chat_model(profile: ProfileConfig) -> "BaseChatModel":
     ``parallel_tool_calls`` (as a model kwarg) when present on the profile.
     Unlike ``_resolve_profile_model`` in ``agent_executor``, this function
     always returns a ``BaseChatModel`` — suitable for direct ``ainvoke()``
-    calls in Forgeron and SkillAnnotator.
+    calls in Forgeron (ChangelogWriter, SkillConsolidator, IntentLabeler).
 
     Args:
         profile: The profile whose parameters drive the LLM instantiation.

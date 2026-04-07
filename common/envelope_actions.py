@@ -36,8 +36,5 @@ ACTION_MEMORY_FILE_LIST = "memory.file_list"
 # Skill execution trace (Atelier → Forgeron)
 ACTION_SKILL_TRACE = "skill.trace"
 
-# Forgeron lifecycle events (Forgeron → relais:events:system)
-ACTION_SKILL_PATCH_APPLIED = "skill.patch_applied"
-ACTION_SKILL_PATCH_ROLLED_BACK = "skill.patch_rolled_back"
 # Forgeron — automatic creation of a new skill from recurring sessions (auto-creation pipeline)
 ACTION_SKILL_CREATED = "skill.created"

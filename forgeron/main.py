@@ -2,15 +2,16 @@
 
 Functional role
 ---------------
-Forgeron improves existing skills via statistical trace analysis AND
-auto-creates new skills from recurring session patterns.
+Forgeron improves existing skills via S3 (changelog + periodic consolidation)
+AND auto-creates new skills from recurring session patterns.
 
-**Trace analysis (patch mode)**:
-Consumes skill execution traces published by Atelier on ``relais:skill:trace``,
-accumulates them per skill in SQLite, and triggers an LLM-based analysis when
-a skill shows a persistently high tool error rate.  If the analysis produces
-an improved SKILL.md, the patch is applied atomically and monitored for
-regression.
+**Changelog + consolidation (S3)**:
+Consumes skill execution traces published by Atelier on ``relais:skill:trace``.
+Phase 1: ``ChangelogWriter`` (fast LLM) extracts 1-3 observations per turn and
+writes them to a per-skill ``CHANGELOG.md``.  The SKILL.md is never touched.
+Phase 2: when the changelog exceeds a line threshold, ``SkillConsolidator``
+(precise LLM) rewrites SKILL.md by absorbing the observations, produces an
+audit trail in ``CHANGELOG_DIGEST.md``, and clears the changelog.
 
 **Auto-creation from session archives**:
 Consumes Atelier session archives on ``relais:memory:request`` via a dedicated
@@ -20,9 +21,9 @@ session.  When N sessions share the same label, a ``SkillCreator`` (precise LLM)
 generates a new ``SKILL.md`` automatically.
 
 **User notifications**:
-When Forgeron applies a patch or creates a new skill, it publishes a
-human-readable notification to ``relais:messages:outgoing_pending``.
-Sentinelle picks it up and routes it to the user via the channel adapter.
+When Forgeron creates or consolidates a skill, it publishes a human-readable
+notification to ``relais:messages:outgoing_pending``.  Sentinelle picks it up
+and routes it to the user via the channel adapter.
 
 Technical overview
 ------------------
@@ -32,13 +33,10 @@ Key classes:
   ``relais:skill:trace`` and ``relais:memory:request``.
 * ``SkillTraceStore`` — SQLite accumulator; tracks one row per agent turn
   that used skills.
-* ``SkillPatchStore`` — SQLite store for versioned patches (pending / applied
-  / validated / rolled_back).
+* ``ChangelogWriter`` — Phase 1: appends observations to CHANGELOG.md (fast LLM).
+* ``SkillConsolidator`` — Phase 2: rewrites SKILL.md from changelog (precise LLM).
 * ``SessionStore`` — SQLite accumulator for per-session intent patterns;
   drives the auto-creation pipeline.
-* ``SkillAnalyzer`` — LLM analysis → ``SkillPatchProposal`` (lazy import).
-* ``SkillPatcher`` — atomic write with ``.pending`` → ``.bak`` snapshot (lazy).
-* ``SkillValidator`` — post-patch regression monitor (lazy).
 * ``IntentLabeler`` — Fast LLM, extracts snake_case intent label (lazy).
 * ``SkillCreator`` — precise LLM, generates SKILL.md from examples (lazy).
 
@@ -49,8 +47,7 @@ Consumed:
   - relais:memory:request      (consumer group: forgeron_archive_group)
 
 Produced:
-  - relais:events:system       — skill_patch_applied / skill_patch_rolled_back
-                                  / skill_created
+  - relais:events:system       — skill_created
   - relais:messages:outgoing_pending — user notifications
   - relais:logs                — operational log entries
 
@@ -63,7 +60,6 @@ XACK contract
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
@@ -74,8 +70,6 @@ from common.envelope_actions import (
     ACTION_MEMORY_ARCHIVE,
     ACTION_MESSAGE_OUTGOING_PENDING,
     ACTION_SKILL_CREATED,
-    ACTION_SKILL_PATCH_APPLIED,
-    ACTION_SKILL_PATCH_ROLLED_BACK,
 )
 from common.profile_loader import ProfileConfig, load_profiles, resolve_profile
 from common.streams import (
@@ -85,9 +79,9 @@ from common.streams import (
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
 )
+from forgeron.changelog_writer import ChangelogWriter
 from forgeron.config import ForgeonConfig, load_forgeron_config
 from forgeron.models import SkillTrace
-from forgeron.patch_store import SkillPatchStore
 from forgeron.session_store import SessionStore
 from forgeron.trace_store import SkillTraceStore
 
@@ -107,10 +101,12 @@ class Forgeron(BrickBase):
         self._config: ForgeonConfig = ForgeonConfig()
         self._llm_profile: ProfileConfig | None = None
         self._annotation_profile: ProfileConfig | None = None
+        self._consolidation_profile: ProfileConfig | None = None
         db_path = resolve_storage_dir() / "forgeron.db"
         self._trace_store = SkillTraceStore(db_path=db_path)
-        self._patch_store = SkillPatchStore(db_path=db_path)
         self._session_store = SessionStore(db_path=db_path)
+        # In-memory call counter per skill — triggers annotation every N calls.
+        self._skill_call_counts: dict[str, int] = {}
 
     def _load(self) -> None:
         """Reload Forgeron configuration from YAML.
@@ -121,15 +117,14 @@ class Forgeron(BrickBase):
         profiles = load_profiles()
         self._llm_profile = resolve_profile(profiles, self._config.llm_profile)
         self._annotation_profile = resolve_profile(profiles, self._config.annotation_profile)
+        self._consolidation_profile = resolve_profile(profiles, self._config.consolidation_profile)
         logger.info(
-            "Forgeron config loaded: min_traces=%d min_error_rate=%.0f%% "
-            "patch_mode=%s annotation_mode=%s llm_profile=%s annotation_profile=%s",
-            self._config.min_traces_before_analysis,
-            self._config.min_error_rate * 100,
-            self._config.patch_mode,
+            "Forgeron config loaded: annotation_mode=%s llm_profile=%s "
+            "annotation_profile=%s consolidation_profile=%s",
             self._config.annotation_mode,
             self._config.llm_profile,
             self._config.annotation_profile,
+            self._config.consolidation_profile,
         )
 
     def stream_specs(self) -> list[StreamSpec]:
@@ -197,26 +192,20 @@ class Forgeron(BrickBase):
             return
 
         for skill_name in skill_names:
-            # Retrieve the active patch ID (if any) to tag this trace correctly.
-            active_patch = await self._patch_store.get_applied_patch(skill_name)
-            patch_id = active_patch.id if active_patch else None
-
             trace = SkillTrace(
                 skill_name=skill_name,
                 correlation_id=correlation_id,
                 tool_call_count=tool_call_count,
                 tool_error_count=tool_error_count,
                 messages_raw=messages_raw,
-                patch_id=patch_id,
             )
             await self._trace_store.add_trace(trace)
 
             logger.info(
-                "Stored trace for skill '%s' (calls=%d errors=%d patch=%s)",
+                "Stored trace for skill '%s' (calls=%d errors=%d)",
                 skill_name,
                 tool_call_count,
                 tool_error_count,
-                patch_id or "none",
             )
             await redis_conn.xadd(STREAM_LOGS, {
                 "level": "INFO",
@@ -225,258 +214,76 @@ class Forgeron(BrickBase):
                 "sender_id": envelope.sender_id,
                 "message": (
                     f"Trace stored for skill '{skill_name}' "
-                    f"(calls={tool_call_count} errors={tool_error_count} patch={patch_id or 'none'})"
+                    f"(calls={tool_call_count} errors={tool_error_count})"
                 ),
             })
 
-            # Post-patch validation: if there is an active patch, check for
-            # regression (Step 3 — SkillValidator; loaded lazily when available).
-            if active_patch is not None and self._config.patch_mode:
-                await self._maybe_validate_patch(
-                    envelope, skill_name, active_patch, redis_conn
-                )
-
-            # Trigger full LLM analysis if thresholds are met.
-            if self._config.patch_mode:
-                should = await self._trace_store.should_analyze(
-                    skill_name, self._config, redis_conn
-                )
-                if should:
-                    await self._trigger_analysis(
-                        envelope, skill_name, correlation_id, redis_conn
+            # Write observations to CHANGELOG.md on errors or after N calls.
+            call_count = self._skill_call_counts.get(skill_name, 0) + 1
+            self._skill_call_counts[skill_name] = call_count
+            threshold_reached = call_count >= self._config.annotation_call_threshold
+            if threshold_reached:
+                self._skill_call_counts[skill_name] = 0  # reset so it fires every N calls
+            if (tool_error_count > 0 or threshold_reached) and self._config.annotation_mode:
+                if self._annotation_profile is not None:
+                    writer = ChangelogWriter(
+                        profile=self._annotation_profile,
+                        skills_dir=self._config.skills_dir,
+                    )
+                    wrote = await writer.observe(
+                        skill_name=skill_name,
+                        tool_error_count=tool_error_count,
+                        messages_raw=messages_raw_list,
+                        config=self._config,
+                        redis_conn=redis_conn,
+                        force=threshold_reached,
                     )
 
-    async def _trigger_analysis(
+                    # Check whether the changelog warrants consolidation.
+                    if wrote and self._consolidation_profile is not None:
+                        cl_path = writer.changelog_path(skill_name)
+                        if cl_path is not None and await writer.should_consolidate(
+                            cl_path, self._config, redis_conn, skill_name
+                        ):
+                            await self._maybe_consolidate(
+                                skill_name=skill_name,
+                                envelope=envelope,
+                                redis_conn=redis_conn,
+                            )
+
+    async def _maybe_consolidate(
         self,
-        envelope: Envelope,
         skill_name: str,
-        trigger_corr_id: str,
+        envelope: Envelope,
         redis_conn: Any,
     ) -> None:
-        """Trigger LLM analysis for a skill with a high error rate.
-
-        Sets the cooldown key immediately so concurrent trace messages don't
-        trigger a second analysis while the first is still running.
+        """Run periodic consolidation and optionally notify the user.
 
         Args:
-            envelope: The trace envelope that triggered this analysis (used as
-                parent for the outgoing event envelope).
-            skill_name: The skill to analyse.
-            trigger_corr_id: Correlation ID of the trace that triggered this.
+            skill_name: Skill directory name.
+            envelope: Original trace envelope (for notification routing).
             redis_conn: Active Redis connection.
         """
-        # Set cooldown immediately to prevent double-trigger.
-        cooldown_key = f"relais:skill:last_improved:{skill_name}"
-        await redis_conn.set(
-            cooldown_key, "1", ex=self._config.min_improvement_interval_seconds
+        from forgeron.skill_consolidator import SkillConsolidator  # noqa: PLC0415
+
+        consolidator = SkillConsolidator(
+            profile=self._consolidation_profile,  # type: ignore[arg-type]
+            skills_dir=self._config.skills_dir,  # type: ignore[arg-type]
         )
-
-        logger.info(
-            "Triggering LLM analysis for skill '%s' (trigger=%s)",
-            skill_name,
-            trigger_corr_id,
+        consolidated = await consolidator.consolidate(
+            skill_name, redis_conn, self._config
         )
-        await redis_conn.xadd(STREAM_LOGS, {
-            "level": "INFO",
-            "brick": "forgeron",
-            "correlation_id": trigger_corr_id,
-            "sender_id": envelope.sender_id,
-            "message": f"LLM analysis triggered for skill '{skill_name}'",
-        })
-
-        # Step 2: SkillAnalyzer — imported lazily so the brick starts even if
-        # the analyzer module is not yet implemented.
-        try:
-            from forgeron.analyzer import SkillAnalyzer  # noqa: PLC0415
-            from forgeron.patcher import SkillPatcher  # noqa: PLC0415
-        except ImportError as exc:
-            logger.warning(
-                "SkillAnalyzer/SkillPatcher not yet available (%s) — "
-                "analysis skipped.",
-                exc,
-            )
-            return
-
-        skill_path = self._resolve_skill_path(skill_name)
-        if skill_path is None:
-            logger.warning(
-                "Could not resolve path for skill '%s', skipping analysis.",
-                skill_name,
-            )
-            return
-
-        try:
-            skill_content = skill_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "Could not read skill file '%s': %s", skill_path, exc
-            )
-            return
-
-        traces = await self._trace_store.get_traces(
-            skill_name, limit=self._config.min_traces_before_analysis
-        )
-        error_rate = await self._trace_store.error_rate(
-            skill_name, window=self._config.min_traces_before_analysis
-        )
-
-        if self._llm_profile is None:
-            raise RuntimeError("llm_profile not loaded — _load() must succeed before _trigger_analysis()")
-        analyzer = SkillAnalyzer(profile=self._llm_profile)
-        try:
-            proposal = await analyzer.analyze(skill_name, skill_content, traces)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "LLM analysis failed for skill '%s': %s", skill_name, exc
-            )
-            return
-
-        from forgeron.models import SkillPatch  # noqa: PLC0415
-
-        patch = SkillPatch(
-            skill_name=skill_name,
-            original_content=skill_content,
-            patched_content=proposal.patched_content,
-            diff=proposal.diff,
-            rationale=proposal.rationale,
-            trigger_correlation_id=trigger_corr_id,
-            pre_patch_error_rate=error_rate,
-        )
-        await self._patch_store.save(patch)
-
-        patcher = SkillPatcher(skills_dir=self._config.skills_dir)
-        try:
-            patcher.apply(skill_path, patch)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Failed to apply patch %s for skill '%s': %s",
-                patch.id,
-                skill_name,
-                exc,
-            )
-            return
-
-        await self._patch_store.mark_applied(patch)
-
-        # Notify Archiviste and any listeners via a proper Envelope.
-        # Use a minimal envelope — do NOT inherit the full upstream context (portail,
-        # atelier, sentinelle) which would leak user records and internal state.
-        event_env = Envelope(
-            content=f"skill.patch_applied:{skill_name}",
-            sender_id=envelope.sender_id,
-            channel=envelope.channel,
-            session_id=envelope.session_id,
-            correlation_id=envelope.correlation_id,
-        )
-        event_env.action = ACTION_SKILL_PATCH_APPLIED
-        event_env.add_trace("forgeron", "patch_applied")
-        ensure_ctx(event_env, CTX_FORGERON).update({
-            "skill_name": skill_name,
-            "patch_id": patch.id,
-            "pre_error_rate": error_rate,
-            "diff_preview": patch.diff[:500],
-        })
-        await redis_conn.xadd(STREAM_EVENTS_SYSTEM, {"payload": event_env.to_json()})
-        logger.info(
-            "Patch %s applied for skill '%s' (pre_error_rate=%.0f%%)",
-            patch.id,
-            skill_name,
-            error_rate * 100,
-        )
-        await redis_conn.xadd(STREAM_LOGS, {
-            "level": "INFO",
-            "brick": "forgeron",
-            "correlation_id": envelope.correlation_id,
-            "sender_id": envelope.sender_id,
-            "message": (
-                f"Patch '{patch.id[:8]}' applied for skill '{skill_name}' "
-                f"(pre_error_rate={error_rate:.0%})"
-            ),
-        })
-
-        if self._config.notify_user_on_patch:
-            await self._notify_user(
-                channel=envelope.channel,
-                sender_id=envelope.sender_id,
-                session_id=envelope.session_id,
-                correlation_id=envelope.correlation_id,
-                message=(
-                    f"[Forgeron] Skill `{skill_name}` automatically improved "
-                    f"(error rate: {error_rate:.0%} → patch `{patch.id[:8]}`)"
-                ),
-                redis_conn=redis_conn,
-            )
-
-    async def _maybe_validate_patch(
-        self,
-        envelope: Envelope,
-        skill_name: str,
-        patch: Any,
-        redis_conn: Any,
-    ) -> None:
-        """Check for post-patch regression and roll back if needed.
-
-        Args:
-            envelope: The trace envelope that triggered this check (used as
-                parent for the outgoing event envelope if rollback occurs).
-            skill_name: Skill being monitored.
-            patch: The active ``SkillPatch`` record.
-            redis_conn: Active Redis connection.
-        """
-        try:
-            from forgeron.validator import SkillValidator  # noqa: PLC0415
-        except ImportError:
-            return
-
-        skill_path = self._resolve_skill_path(skill_name)
-        if skill_path is None:
-            return
-
-        validator = SkillValidator(
-            trace_store=self._trace_store,
-            patch_store=self._patch_store,
-        )
-        rolled_back = await validator.check_and_rollback_if_needed(
-            skill_name=skill_name,
-            skill_path=skill_path,
-            patch=patch,
-            config=self._config,
-        )
-        if rolled_back:
-            event_env = Envelope(
-                content=f"skill.patch_rolled_back:{skill_name}",
-                sender_id=envelope.sender_id,
-                channel=envelope.channel,
-                session_id=envelope.session_id,
-                correlation_id=envelope.correlation_id,
-            )
-            event_env.action = ACTION_SKILL_PATCH_ROLLED_BACK
-            event_env.add_trace("forgeron", "patch_rolled_back")
-            ensure_ctx(event_env, CTX_FORGERON).update({
-                "skill_name": skill_name,
-                "patch_id": patch.id,
-            })
-            await redis_conn.xadd(STREAM_EVENTS_SYSTEM, {"payload": event_env.to_json()})
-            await redis_conn.xadd(STREAM_LOGS, {
-                "level": "WARNING",
-                "brick": "forgeron",
-                "correlation_id": envelope.correlation_id,
-                "sender_id": envelope.sender_id,
-                "message": (
-                    f"Patch '{patch.id[:8]}' rolled back for skill '{skill_name}' "
-                    f"(regression detected)"
-                ),
-            })
-
-            if self._config.notify_user_on_patch:
+        if consolidated:
+            logger.info("Consolidation completed for skill '%s'.", skill_name)
+            if self._config.notify_user_on_consolidation:
                 await self._notify_user(
                     channel=envelope.channel,
                     sender_id=envelope.sender_id,
                     session_id=envelope.session_id,
                     correlation_id=envelope.correlation_id,
                     message=(
-                        f"[Forgeron] Patch `{patch.id[:8]}` on skill `{skill_name}` "
-                        f"rolled back (regression detected, reverted to previous version)."
+                        f"[Forgeron] Skill `{skill_name}` consolidated — "
+                        "SKILL.md has been rewritten with accumulated observations."
                     ),
                     redis_conn=redis_conn,
                 )
@@ -734,27 +541,6 @@ class Forgeron(BrickBase):
         logger.info(
             "Notification sent to %s/%s: %s", channel, sender_id, message[:60]
         )
-
-    def _resolve_skill_path(self, skill_name: str) -> Path | None:
-        """Resolve the SKILL.md path for a given skill directory name.
-
-        Args:
-            skill_name: Directory name of the skill (e.g. ``"mail-agent"``).
-
-        Returns:
-            ``Path`` to ``{skills_dir}/{skill_name}/SKILL.md`` if it exists,
-            otherwise ``None``.
-        """
-        if self._config.skills_dir is None:
-            logger.warning("skills_dir is None — cannot resolve skill path.")
-            return None
-
-        candidate = self._config.skills_dir / skill_name / "SKILL.md"
-        if not candidate.exists():
-            logger.debug("Skill file not found: %s", candidate)
-            return None
-        return candidate
-
 
 if __name__ == "__main__":
     from common.init import initialize_user_dir
