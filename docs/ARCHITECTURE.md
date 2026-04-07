@@ -233,8 +233,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 
 | Table | Contenu |
 |-------|---------|
-| `skill_traces` | Traces d'exécution par skill (trace analysis pipeline) |
-| `skill_patches` | Historique des patches appliqués (trace analysis pipeline) |
+| `skill_traces` | Traces d'exécution par skill (changelog pipeline) |
 | `session_summaries` | Sessions archivées avec leur label d'intention (auto-création pipeline) |
 | `skill_proposals` | Propositions de skills agrégées par label (auto-création pipeline) |
 
@@ -280,7 +279,7 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
 - **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - **Souvenir**: aucun fichier surveillé — pas de config rechargeable (Souvenir ne fait pas d'appels LLM)
-- **Forgeron**: `config/forgeron.yaml` (seuils, profils LLM, `skills_dir`, `patch_mode`)
+- **Forgeron**: `config/forgeron.yaml` (seuils, profils LLM, `skills_dir`, `annotation_call_threshold`, `consolidation_line_threshold`)
 - **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
 
 **Flux de rechargement** :

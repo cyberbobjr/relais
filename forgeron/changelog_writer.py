@@ -250,11 +250,12 @@ class ChangelogWriter:
             Raw bullet-list string from the LLM, or empty string on failure.
         """
         conversation = self._format_conversation(messages_raw)
-        context_line = (
-            f"Tool errors in this turn: {tool_error_count}."
-            if tool_error_count > 0
-            else "No tool errors — observation triggered by usage frequency."
-        )
+        if tool_error_count == -1:
+            context_line = "This turn was ABORTED before completion (agent execution error)."
+        elif tool_error_count > 0:
+            context_line = f"Tool errors in this turn: {tool_error_count}."
+        else:
+            context_line = "No tool errors — observation triggered by usage frequency."
         user_message = (
             f"# Skill: {skill_name}\n\n"
             "## Current SKILL.md\n"
@@ -313,9 +314,14 @@ class ChangelogWriter:
             except OSError:
                 existing = ""
 
-        trigger_label = "usage" if force and tool_error_count == 0 else "error"
+        if tool_error_count == -1:
+            error_display = "aborted"
+            trigger_label = "aborted"
+        else:
+            error_display = str(tool_error_count)
+            trigger_label = "usage" if force and tool_error_count == 0 else "error"
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
-        header = f"## {timestamp} (errors={tool_error_count}, trigger={trigger_label})\n"
+        header = f"## {timestamp} (errors={error_display}, trigger={trigger_label})\n"
         entry = f"{header}{observations}\n"
 
         separator = "\n" if existing and not existing.endswith("\n\n") else ""

@@ -584,6 +584,7 @@ class Atelier(BrickBase):
             remain in the PEL for re-delivery.
         """
         logger.debug("_handle_envelope correlation_id: %s", envelope.correlation_id)
+        skills_used: list[str] = []  # hoisted so the DLQ path can publish a failure trace
         try:
             logger.info(
                 "[%s] Processing task for %s",
@@ -768,6 +769,36 @@ class Atelier(BrickBase):
                 "message": f"Agent execution error for {envelope.correlation_id}: {exc}",
                 "error": str(exc),
             })
+            # Publish failure trace so Forgeron can analyze aborted turns.
+            # tool_error_count=-1 is the sentinel for turns that were aborted
+            # (DLQ-routed) rather than completing normally.
+            # Guarded in its own try/except: a Redis failure here must not
+            # propagate out of this handler and re-route the message to the PEL.
+            if skills_used:
+                try:
+                    failure_trace_env = Envelope(
+                        content="",
+                        sender_id=f"atelier:{envelope.sender_id}",
+                        channel="internal",
+                        session_id=envelope.session_id,
+                        correlation_id=envelope.correlation_id,
+                        action=ACTION_SKILL_TRACE,
+                        context={CTX_SKILL_TRACE: {
+                            "skill_names": skills_used,
+                            "tool_call_count": exc.tool_call_count,
+                            "tool_error_count": -1,  # sentinel: aborted turn
+                            "messages_raw": [],
+                        }},
+                    )
+                    await redis_conn.xadd(
+                        STREAM_SKILL_TRACE, {"payload": failure_trace_env.to_json()}
+                    )
+                except Exception as trace_exc:
+                    logger.warning(
+                        "[%s] Failed to publish failure trace: %s",
+                        envelope.correlation_id,
+                        trace_exc,
+                    )
             return True
 
         except Exception as exc:

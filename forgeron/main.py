@@ -164,7 +164,8 @@ class Forgeron(BrickBase):
         """Process a single skill trace message from the stream.
 
         Reads the trace payload from ``envelope.context[CTX_SKILL_TRACE]``,
-        persists it, and checks whether analysis should be triggered.
+        persists it to SQLite, and triggers Phase 1 changelog writing and
+        Phase 2 consolidation when thresholds are met.
 
         Args:
             envelope: Envelope with ``action=ACTION_SKILL_TRACE`` carrying
@@ -218,12 +219,15 @@ class Forgeron(BrickBase):
             )
 
             # Write observations to CHANGELOG.md on errors or after N calls.
+            # tool_error_count == -1 is the sentinel for turns aborted before completion
+            # (DLQ-routed by Atelier); these should always trigger analysis.
+            is_aborted = tool_error_count == -1
             call_count = self._skill_call_counts.get(skill_name, 0) + 1
             self._skill_call_counts[skill_name] = call_count
             threshold_reached = call_count >= self._config.annotation_call_threshold
             if threshold_reached:
                 self._skill_call_counts[skill_name] = 0  # reset so it fires every N calls
-            if (tool_error_count > 0 or threshold_reached) and self._config.annotation_mode:
+            if (tool_error_count > 0 or is_aborted or threshold_reached) and self._config.annotation_mode:
                 if self._annotation_profile is not None:
                     writer = ChangelogWriter(
                         profile=self._annotation_profile,
