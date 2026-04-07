@@ -15,8 +15,10 @@ import json
 import logging
 import textwrap
 from dataclasses import dataclass
+from typing import cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
 from common.profile_loader import ProfileConfig, build_chat_model
 from forgeron.models import SkillTrace
@@ -57,12 +59,46 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     - Keep the tone concise and imperative (this is agent instruction, not
       documentation for humans).
 
-    Respond in this EXACT JSON format (no markdown fences, raw JSON only):
-    {
-      "patched_content": "<full improved SKILL.md content>",
-      "rationale": "<1-3 sentence explanation of what was changed and why>"
-    }
+    ## SKILL.md format specification (MANDATORY — respect these when rewriting)
+
+    Frontmatter (YAML between triple dashes):
+      name:          Required. 1-64 chars. Lowercase letters, digits, hyphens only.
+                     No leading/trailing/consecutive hyphens. Must match directory name.
+      description:   Required. 1-1024 chars. Describe WHAT the skill does AND when to
+                     use it. Include specific keywords for agent discovery.
+                     Good: "Extracts text from PDFs, fills forms, merges files.
+                            Use when the user mentions PDFs, forms, or document extraction."
+                     Poor: "Helps with PDFs."
+      license:       Optional.
+      compatibility: Optional (max 500 chars). Only if env-specific requirements exist.
+      metadata:      Optional. Key-value map (author, version…).
+      allowed-tools: Optional. Space-delimited list of pre-approved tools.
+
+    Body (Markdown after frontmatter):
+      Recommended sections:
+        - Step-by-step instructions (numbered, imperative)
+        - Examples of inputs and outputs
+        - Common edge cases / mistakes to avoid
+      Keep SKILL.md under 500 lines.
+      Write for agents, not humans — concise and imperative.
+      Move detailed reference material to a references/ subdirectory if needed.
 """)
+
+
+# ---------------------------------------------------------------------------
+# LLM output schema
+# ---------------------------------------------------------------------------
+
+
+class SkillPatchLLMResponse(BaseModel):
+    """Structured output schema for the skill patch LLM call."""
+
+    patched_content: str = Field(
+        description="Full improved SKILL.md content (including frontmatter)"
+    )
+    rationale: str = Field(
+        description="1-3 sentence explanation of what was changed and why"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,15 +168,45 @@ class SkillAnalyzer:
             self._profile.model,
         )
 
-        response = await llm.ainvoke(
+        structured_llm = llm.with_structured_output(SkillPatchLLMResponse)
+        result = cast(SkillPatchLLMResponse, await structured_llm.ainvoke(
             [
                 SystemMessage(content=_SYSTEM_PROMPT),
                 HumanMessage(content=user_message),
             ]
+        ))
+
+        if not result.patched_content:
+            raise ValueError(
+                f"LLM structured output for skill '{skill_name}' returned empty patched_content."
+            )
+        if not result.rationale:
+            raise ValueError(
+                f"LLM structured output for skill '{skill_name}' returned empty rationale."
+            )
+
+        diff = "\n".join(
+            difflib.unified_diff(
+                skill_content.splitlines(),
+                result.patched_content.splitlines(),
+                fromfile=f"{skill_name}/SKILL.md (original)",
+                tofile=f"{skill_name}/SKILL.md (patched)",
+                lineterm="",
+            )
         )
 
-        raw_text: str = response.content  # type: ignore[assignment]
-        return self._parse_response(skill_name, skill_content, raw_text)
+        logger.info(
+            "LLM analysis complete for skill '%s': %d diff lines, rationale=%r",
+            skill_name,
+            len(diff.splitlines()),
+            result.rationale[:120],
+        )
+
+        return SkillPatchProposal(
+            patched_content=result.patched_content,
+            rationale=result.rationale,
+            diff=diff,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -199,77 +265,3 @@ class SkillAnalyzer:
         )
         return "\n".join(parts)
 
-    def _parse_response(
-        self,
-        skill_name: str,
-        original_content: str,
-        raw_text: str,
-    ) -> SkillPatchProposal:
-        """Parse the LLM JSON response into a SkillPatchProposal.
-
-        Args:
-            skill_name: Skill name (for error messages).
-            original_content: Original SKILL.md for diff generation.
-            raw_text: Raw LLM response text (expected to be JSON).
-
-        Returns:
-            Parsed ``SkillPatchProposal``.
-
-        Raises:
-            ValueError: If the response is not valid JSON or is missing
-                ``patched_content`` or ``rationale`` keys.
-        """
-        # Strip markdown fences if the model wrapped its output anyway
-        text = raw_text.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            # Remove opening and closing fence lines
-            text = "\n".join(
-                line for line in lines
-                if not line.startswith("```")
-            ).strip()
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"LLM response for skill '{skill_name}' is not valid JSON: {exc}\n"
-                f"Raw response (first 500 chars): {raw_text[:500]}"
-            ) from exc
-
-        patched_content = data.get("patched_content", "")
-        rationale = data.get("rationale", "")
-
-        if not patched_content:
-            raise ValueError(
-                f"LLM response for skill '{skill_name}' missing 'patched_content'. "
-                f"Keys found: {list(data.keys())}"
-            )
-        if not rationale:
-            raise ValueError(
-                f"LLM response for skill '{skill_name}' missing 'rationale'. "
-                f"Keys found: {list(data.keys())}"
-            )
-
-        diff = "\n".join(
-            difflib.unified_diff(
-                original_content.splitlines(),
-                patched_content.splitlines(),
-                fromfile=f"{skill_name}/SKILL.md (original)",
-                tofile=f"{skill_name}/SKILL.md (patched)",
-                lineterm="",
-            )
-        )
-
-        logger.info(
-            "LLM analysis complete for skill '%s': %d diff lines, rationale=%r",
-            skill_name,
-            len(diff.splitlines()),
-            rationale[:120],
-        )
-
-        return SkillPatchProposal(
-            patched_content=patched_content,
-            rationale=rationale,
-            diff=diff,
-        )

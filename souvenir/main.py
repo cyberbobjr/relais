@@ -78,19 +78,19 @@ _ALLOWED_ACTIONS: frozenset[str] = frozenset({"archive", "clear", "file_write", 
 
 
 class Souvenir(BrickBase):
-    """Brique mémoire : archivage long terme (SQLite/SQLModel) et fichiers agent.
+    """Memory brick: long-term archival (SQLite/SQLModel) and agent memory files.
 
-    Consomme ``relais:memory:request`` pour les actions ``archive`` / ``clear``
-    / ``file_write`` / ``file_read`` / ``file_list``.  L'archivage SQLite est
-    déclenché par Atelier via l'action ``archive`` — l'historique ne transite
-    plus dans les enveloppes sortantes.
+    Consumes ``relais:memory:request`` for the ``archive`` / ``clear`` /
+    ``file_write`` / ``file_read`` / ``file_list`` actions.  SQLite archival is
+    triggered by Atelier via the ``archive`` action — the history no longer
+    transits through outgoing envelopes.
 
     Inherits the full lifecycle plumbing (connection, shutdown, hot-reload,
     logging) from :class:`~common.brick_base.BrickBase`.
     """
 
     def __init__(self) -> None:
-        """Initialise les streams Redis, les stores mémoire et le registre d'actions."""
+        """Initialise Redis streams, memory stores, and the action registry."""
         super().__init__("souvenir")
         # Preserve legacy attribute names accessed by tests and other bricks.
         self.stream_req = STREAM_MEMORY_REQUEST

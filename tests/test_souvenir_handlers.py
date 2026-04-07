@@ -39,7 +39,7 @@ def _make_ctx(req: dict, mock_redis: AsyncMock, long_term_store=None, file_store
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_clear_handler_clears_long_term_store() -> None:
-    """ClearHandler vide le long_term_store (SQLite)."""
+    """ClearHandler clears the long_term_store (SQLite)."""
     mock_redis = AsyncMock()
     long_term_store = AsyncMock()
     long_term_store.clear_session = AsyncMock()
@@ -58,7 +58,7 @@ async def test_clear_handler_clears_long_term_store() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_clear_handler_sends_confirmation_envelope() -> None:
-    """ClearHandler publie une enveloppe de confirmation quand envelope_json est présent."""
+    """ClearHandler publishes a confirmation envelope when envelope_json is present."""
     from common.envelope import Envelope
 
     mock_redis = AsyncMock()
@@ -90,7 +90,7 @@ async def test_clear_handler_sends_confirmation_envelope() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_clear_handler_handles_missing_envelope_json() -> None:
-    """ClearHandler ne lève pas d'exception quand envelope_json est absent."""
+    """ClearHandler must not raise when envelope_json is absent."""
     mock_redis = AsyncMock()
     long_term_store = AsyncMock()
     long_term_store.clear_session = AsyncMock()
@@ -112,7 +112,7 @@ async def test_clear_handler_handles_missing_envelope_json() -> None:
 
 
 def test_build_registry_contains_all_actions() -> None:
-    """build_registry() retourne les 5 actions attendues."""
+    """build_registry() must return the 5 expected actions."""
     registry = build_registry()
     assert set(registry.keys()) == {"archive", "clear", "file_write", "file_read", "file_list"}
     assert isinstance(registry["clear"], ClearHandler)

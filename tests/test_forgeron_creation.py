@@ -1,4 +1,4 @@
-"""Tests for Forgeron auto-creation pipeline (Solution D).
+"""Tests for Forgeron auto-creation pipeline.
 
 Covers IntentLabeler, SessionStore, SkillCreator, and Forgeron main.py
 orchestration without making real LLM calls.
@@ -208,33 +208,6 @@ async def test_session_store_should_create_false_when_cooldown(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_skill_creator_extract_description(tmp_path: Path) -> None:
-    """_extract_description returns the first non-empty line after '## Description'."""
-    creator = SkillCreator(profile=_make_profile(), skills_dir=tmp_path)
-
-    content = """# Send Email
-
-## Description
-Sends an email to one or more recipients via SMTP.
-
-## When to use
-- User asks to send an email
-"""
-    result = creator._extract_description(content)
-    assert result == "Sends an email to one or more recipients via SMTP."
-
-
-@pytest.mark.unit
-def test_skill_creator_extract_description_missing() -> None:
-    """_extract_description returns None when '## Description' section is absent."""
-    creator = SkillCreator(profile=_make_profile(), skills_dir=Path("/tmp"))
-
-    content = "# My Skill\n\nNo description section here.\n"
-    result = creator._extract_description(content)
-    assert result is None
-
-
 # ---------------------------------------------------------------------------
 # 6. SkillCreator — skips existing skill (idempotence)
 # ---------------------------------------------------------------------------
@@ -307,11 +280,12 @@ async def test_forgeron_notify_user_publishes_to_outgoing_pending(mock_redis: As
         redis_conn=mock_redis,
     )
 
-    mock_redis.xadd.assert_called_once()
-    call_args = mock_redis.xadd.call_args
-    stream = call_args[0][0]
+    # Two xadd calls: STREAM_OUTGOING_PENDING + STREAM_LOGS
+    assert mock_redis.xadd.call_count == 2
+    outgoing_calls = [c for c in mock_redis.xadd.call_args_list if c[0][0] == STREAM_OUTGOING_PENDING]
+    assert len(outgoing_calls) == 1
+    call_args = outgoing_calls[0]
     payload_str = call_args[0][1]["payload"]
-    assert stream == STREAM_OUTGOING_PENDING
 
     from common.envelope import Envelope
     notif_env = Envelope.from_json(payload_str)

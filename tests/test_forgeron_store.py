@@ -1,4 +1,4 @@
-"""Tests for Forgeron trace store and should_analyze logic (Étape 1)."""
+"""Tests for Forgeron trace store and should_analyze logic (Step 1)."""
 
 from __future__ import annotations
 

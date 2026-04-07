@@ -13,7 +13,7 @@ from common.envelope import Envelope
 
 @pytest.fixture
 def sample_envelope() -> Envelope:
-    """Envelope typique d'un message /clear venant de Discord."""
+    """Typical Envelope for a /clear message from Discord."""
     return Envelope(
         content="/clear",
         sender_id="discord:123456",
@@ -39,7 +39,7 @@ def mock_redis() -> AsyncMock:
 
 @pytest.mark.unit
 def test_parse_clear_command():
-    """/clear retourne CommandResult(command='clear', args=[])."""
+    """/clear must return CommandResult(command='clear', args=[])."""
     from commandant.commands import parse_command
     result = parse_command("/clear")
     assert result is not None
@@ -49,7 +49,7 @@ def test_parse_clear_command():
 
 @pytest.mark.unit
 def test_parse_unknown_command_returns_none():
-    """Commande inconnue → None (pas de réponse, pas d'erreur)."""
+    """Unknown command → None (no response, no error)."""
     from commandant.commands import parse_command
     result = parse_command("/foo")
     assert result is None
@@ -57,7 +57,7 @@ def test_parse_unknown_command_returns_none():
 
 @pytest.mark.unit
 def test_parse_plain_message_returns_none():
-    """Message normal (pas de slash) → None."""
+    """Normal message (no slash) → None."""
     from commandant.commands import parse_command
     result = parse_command("bonjour")
     assert result is None
@@ -72,7 +72,7 @@ def test_parse_empty_string_returns_none():
 
 @pytest.mark.unit
 def test_parse_slash_only_returns_none():
-    """'/' seul sans nom de commande → None."""
+    """'/' alone without a command name → None."""
     from commandant.commands import parse_command
     result = parse_command("/")
     assert result is None
@@ -80,7 +80,7 @@ def test_parse_slash_only_returns_none():
 
 @pytest.mark.unit
 def test_parse_command_case_insensitive():
-    """/CLEAR et /Clear doivent être reconnus."""
+    """/CLEAR and /Clear must be recognised."""
     from commandant.commands import parse_command
     assert parse_command("/CLEAR") is not None
     assert parse_command("/Clear") is not None
@@ -88,7 +88,7 @@ def test_parse_command_case_insensitive():
 
 @pytest.mark.unit
 def test_parse_command_strips_whitespace():
-    """'  /clear  ' → reconnu (strip avant parsing)."""
+    """'  /clear  ' → recognised (stripped before parsing)."""
     from commandant.commands import parse_command
     result = parse_command("  /clear  ")
     assert result is not None
@@ -97,7 +97,7 @@ def test_parse_command_strips_whitespace():
 
 @pytest.mark.unit
 def test_command_result_is_dataclass():
-    """`CommandResult` est un dataclass avec .command et .args."""
+    """`CommandResult` is a dataclass with .command and .args."""
     from commandant.commands import parse_command
     result = parse_command("/clear")
     assert hasattr(result, "command")
@@ -106,7 +106,7 @@ def test_command_result_is_dataclass():
 
 @pytest.mark.unit
 def test_parse_help_command():
-    """/help retourne CommandResult(command='help', args=[])."""
+    """/help must return CommandResult(command='help', args=[])."""
     from commandant.commands import parse_command
     result = parse_command("/help")
     assert result is not None
@@ -116,7 +116,7 @@ def test_parse_help_command():
 
 @pytest.mark.unit
 def test_parse_command_quoted():
-    """"/help" (avec double quotes) est reconnu — contournement Discord."""
+    """"/help" (with double quotes) must be recognised — Discord workaround."""
     from commandant.commands import parse_command
     result = parse_command('"/help"')
     assert result is not None
@@ -125,7 +125,7 @@ def test_parse_command_quoted():
 
 @pytest.mark.unit
 def test_parse_command_quoted_with_whitespace():
-    """'  "/clear"  ' → reconnu après strip des espaces et des quotes."""
+    """'  "/clear"  ' → recognised after stripping whitespace and quotes."""
     from commandant.commands import parse_command
     result = parse_command('  "/clear"  ')
     assert result is not None
@@ -134,7 +134,7 @@ def test_parse_command_quoted_with_whitespace():
 
 @pytest.mark.unit
 def test_parse_command_single_quoted():
-    """'/help' (avec simple quotes) est reconnu."""
+    """'/help' (with single quotes) must be recognised."""
     from commandant.commands import parse_command
     result = parse_command("'/help'")
     assert result is not None
@@ -143,7 +143,7 @@ def test_parse_command_single_quoted():
 
 @pytest.mark.unit
 def test_parse_command_single_quote_not_stripped():
-    """Une quote ouvrante seule ne doit pas être dépouillée (format invalide)."""
+    """A lone opening quote must not be stripped (invalid format)."""
     from commandant.commands import parse_command
     result = parse_command('"/help')
     assert result is None
@@ -151,7 +151,7 @@ def test_parse_command_single_quote_not_stripped():
 
 @pytest.mark.unit
 def test_parse_command_empty_quotes_returns_none():
-    """"" (deux quotes vides) → None."""
+    """"" (two empty quotes) → None."""
     from commandant.commands import parse_command
     result = parse_command('""')
     assert result is None
@@ -163,7 +163,7 @@ def test_parse_command_empty_quotes_returns_none():
 
 @pytest.mark.unit
 def test_command_registry_contains_all_commands():
-    """COMMAND_REGISTRY doit contenir clear et help."""
+    """COMMAND_REGISTRY must contain clear and help."""
     from commandant.commands import COMMAND_REGISTRY
     assert "clear" in COMMAND_REGISTRY
     assert "help" in COMMAND_REGISTRY
@@ -171,7 +171,7 @@ def test_command_registry_contains_all_commands():
 
 @pytest.mark.unit
 def test_command_spec_has_name_and_description():
-    """Chaque CommandSpec a un .name et .description non vides."""
+    """Each CommandSpec must have a non-empty .name and .description."""
     from commandant.commands import COMMAND_REGISTRY
     for name, spec in COMMAND_REGISTRY.items():
         assert spec.name == name
@@ -180,7 +180,7 @@ def test_command_spec_has_name_and_description():
 
 @pytest.mark.unit
 def test_known_commands_derived_from_registry():
-    """KNOWN_COMMANDS doit être cohérent avec COMMAND_REGISTRY."""
+    """KNOWN_COMMANDS must be consistent with COMMAND_REGISTRY."""
     from commandant.commands import COMMAND_REGISTRY, KNOWN_COMMANDS
     assert set(KNOWN_COMMANDS) == set(COMMAND_REGISTRY.keys())
 
@@ -192,7 +192,7 @@ def test_known_commands_derived_from_registry():
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_clear_publishes_to_memory_request(mock_redis, sample_envelope):
-    """handle_clear envoie action='clear' sur relais:memory:request."""
+    """handle_clear must publish action='clear' to relais:memory:request."""
     from commandant.commands import handle_clear
     await handle_clear(sample_envelope, mock_redis)
 
@@ -203,7 +203,7 @@ async def test_handle_clear_publishes_to_memory_request(mock_redis, sample_envel
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_clear_does_not_publish_confirmation(mock_redis, sample_envelope):
-    """handle_clear ne publie PAS de confirmation : c'est Souvenir qui confirme après le vrai nettoyage."""
+    """handle_clear must NOT publish a confirmation: Souvenir confirms after the actual cleanup."""
     from commandant.commands import handle_clear
     await handle_clear(sample_envelope, mock_redis)
 
@@ -215,7 +215,7 @@ async def test_handle_clear_does_not_publish_confirmation(mock_redis, sample_env
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_help_publishes_outgoing(mock_redis):
-    """handle_help publie exactement un message sur relais:messages:outgoing:{channel}."""
+    """handle_help must publish exactly one message to relais:messages:outgoing:{channel}."""
     from commandant.commands import handle_help
     envelope = Envelope(
         content="/help",
@@ -233,7 +233,7 @@ async def test_handle_help_publishes_outgoing(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_help_lists_all_command_names(mock_redis):
-    """La réponse de /help contient tous les noms de commandes du registre."""
+    """The /help response must contain all command names from the registry."""
     from commandant.commands import handle_help
     from commandant.commands import COMMAND_REGISTRY
     envelope = Envelope(
@@ -244,7 +244,7 @@ async def test_handle_help_lists_all_command_names(mock_redis):
     )
     await handle_help(envelope, mock_redis)
 
-    # Extraire le JSON envoyé sur le stream outgoing
+    # Extract the JSON sent to the outgoing stream
     outgoing_calls = [c for c in mock_redis.xadd.call_args_list
                       if "relais:messages:outgoing" in str(c)]
     assert outgoing_calls, "Aucun message publié sur outgoing"
@@ -260,7 +260,7 @@ async def test_handle_help_lists_all_command_names(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_handle_help_includes_descriptions(mock_redis):
-    """La réponse de /help contient les descriptions de chaque commande."""
+    """The /help response must contain the description of each command."""
     from commandant.commands import handle_help
     from commandant.commands import COMMAND_REGISTRY
     envelope = Envelope(
@@ -289,7 +289,7 @@ async def test_handle_help_includes_descriptions(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_commandant_acks_non_command_messages(mock_redis):
-    """Messages non-commandes → ACK sans traitement (pas de xadd vers outgoing)."""
+    """Non-command messages → ACK without processing (no xadd to outgoing)."""
     from commandant.main import Commandant
 
     mock_redis.xreadgroup = AsyncMock(return_value=[
@@ -320,7 +320,7 @@ async def test_commandant_acks_non_command_messages(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_commandant_acks_command_messages(mock_redis):
-    """Messages-commandes → ACK + xadd memory:request (confirmation déléguée à Souvenir)."""
+    """Command messages → ACK + xadd memory:request (confirmation delegated to Souvenir)."""
     from commandant.main import Commandant
 
     mock_redis.xreadgroup = AsyncMock(return_value=[

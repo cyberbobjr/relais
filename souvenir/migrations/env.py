@@ -18,13 +18,13 @@ target_metadata = SQLModel.metadata
 
 
 def _get_url() -> str:
-    """Retourne l'URL de la base de données.
+    """Return the database URL.
 
-    Priorité : variable d'environnement ``RELAIS_DB_PATH``, puis chemin par
-    défaut ``~/.relais/storage/memory.db`` (via ``resolve_storage_dir()``).
+    Priority: ``RELAIS_DB_PATH`` environment variable, then the default path
+    ``~/.relais/storage/memory.db`` (via ``resolve_storage_dir()``).
 
     Returns:
-        URL SQLAlchemy async (``sqlite+aiosqlite:///...``).
+        Async SQLAlchemy URL (``sqlite+aiosqlite:///...``).
     """
     db_path = os.environ.get(
         "RELAIS_DB_PATH",
@@ -34,7 +34,7 @@ def _get_url() -> str:
 
 
 def run_migrations_offline() -> None:
-    """Génère le SQL sans connexion active (mode --sql).
+    """Generate SQL without an active connection (--sql mode).
 
     Returns:
         None
@@ -52,7 +52,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Applique les migrations via une connexion async.
+    """Apply migrations via an async connection.
 
     Returns:
         None

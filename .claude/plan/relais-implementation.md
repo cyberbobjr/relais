@@ -52,6 +52,8 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 class AgentResult:
     reply_text: str          # final text reply (may be empty if only tool calls)
     messages_raw: list[dict] # full LangChain graph state (via serialize_messages())
+    tool_call_count: int     # total tool invocations in this turn
+    tool_error_count: int    # tool invocations that returned an error string
 
 class AgentExecutor:
     def __init__(
@@ -66,7 +68,7 @@ class AgentExecutor:
         envelope: Envelope,
         context: list[dict[str, str]],
         stream_callback: Callable[[str], Awaitable[None]] | None = None,
-    ) -> AgentResult: ...  # was str before commit 4c14b2b
+    ) -> AgentResult: ...  # was str before commit 4c14b2b; tool counts added fb06db0
 ```
 
 - `_TRANSIENT_ERROR_NAMES` : `frozenset{"RateLimitError", "InternalServerError", "APIConnectionError", "APITimeoutError", "ServiceUnavailableError"}` — détectés par nom de classe (provider-agnostic)
@@ -344,12 +346,20 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 **Fichiers:** adapter.py, webhook_acl.py
 **Dépendance:** FastAPI, aiohttp
 
-### 4.4 `forgeron/` — Génération skills auto (batch)
-**Taxonomie:** Batch Processor (lancé 1×/jour, exit)
-**Lit:** SQLite (archiviste), patterns récurrents
-**Écrit:** `~/.relais/skills/auto/` SKILL_auto_*.md
-**Publie:** `relais:skills:new` → Vigile
-**Fichiers:** main.py, pattern_analyzer.py, skill_generator.py
+### 4.4 ✅ `forgeron/` — Auto-amélioration skills (BrickBase long-running) DONE
+
+**Taxonomie:** BrickBase long-running — `autostart=true`, `autorestart=true`.
+
+**Deux pipelines :**
+- **Trace analysis pipeline** : consomme `relais:skill:trace` (groupe `forgeron_group`) → `SkillTraceStore` SQLite → `SkillAnalyzer` (LLM précis) → `SkillPatcher` (atomic write) → `SkillValidator` (régression post-patch)
+- **Auto-creation pipeline** : consomme `relais:memory:request` (groupe `forgeron_archive_group`) → `IntentLabeler` (Fast LLM, snake_case) → `SkillCreator` (LLM précis) quand N sessions partagent le même label
+- **Inline annotation** : `SkillAnnotator.maybe_annotate()` inline dans Atelier (import paresseux) quand `tool_error_count > 0`
+
+**Guard non-archive :** les actions autres que `archive` sur `relais:memory:request` sont ignorées (log DEBUG, return early).
+
+**Produit :** `relais:events:system` (skill_patch_applied / skill_created), `relais:messages:outgoing_pending` (notifications), `relais:logs`
+
+**Fichiers:** main.py, skill_trace_store.py, skill_patch_store.py, session_store.py, skill_analyzer.py, skill_patcher.py, skill_validator.py, intent_labeler.py, skill_creator.py, skill_annotator.py
 
 ---
 

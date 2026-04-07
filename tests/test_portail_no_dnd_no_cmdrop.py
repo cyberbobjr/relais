@@ -13,7 +13,7 @@ from portail.main import Portail
 
 
 def _make_message(content: str) -> list:
-    """Helper: retourne un résultat xreadgroup avec un seul message."""
+    """Helper: returns an xreadgroup result with a single message."""
     payload = json.dumps({
         "content": content,
         "sender_id": "discord:123",

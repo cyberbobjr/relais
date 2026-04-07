@@ -18,21 +18,21 @@ forgeron:
   # Number of post-patch traces to collect before evaluating rollback.
   rollback_window_traces: 3
 
-  # LLM profile for batch analysis and skill rewrite (Solution B).
+  # LLM profile for batch statistical analysis and skill rewrite.
   # References a named profile from atelier/profiles.yaml (config cascade).
   llm_profile: "precise"
 
-  # LLM profile for quick inline annotations (Solution D).
+  # LLM profile for quick inline intent labeling (cheap, high-throughput).
   annotation_profile: "fast"
 
-  # Enable Solution D: fast inline annotations (## LESSONS LEARNED) written
-  # by Atelier directly after a turn with errors. Visible on next message.
+  # Enable inline annotations: fast ## LESSONS LEARNED blocks written by
+  # Atelier directly after a turn with errors. Visible on the next message.
   annotation_mode: true
 
-  # Enable Solution B: full statistical batch rewrite by Forgeron brick.
+  # Enable patch mode: full statistical batch rewrite by the Forgeron brick.
   patch_mode: true
 
-  # Minimum tool errors in a turn to trigger an annotation (Solution D).
+  # Minimum tool errors in a turn to trigger an inline annotation.
   annotation_min_tool_errors: 1
 
   # Cooldown for annotations per skill (seconds).
@@ -43,7 +43,7 @@ forgeron:
   # (~/.relais/skills/ > /opt/relais/skills/ > ./skills/)
   skills_dir: null
 
-  # --- Création automatique de skills (Solution D) ---
+  # --- Création automatique de skills depuis les archives de session ---
 
   # Enable automatic skill creation from recurring session patterns.
   # Forgeron consumes relais:memory:request (forgeron_archive_group) to detect

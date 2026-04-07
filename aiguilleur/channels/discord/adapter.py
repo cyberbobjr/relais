@@ -12,10 +12,10 @@ Two envelope types are consumed from relais:messages:outgoing:discord:
   Format: ``{event} : [{detail}]``.  The typing indicator is NOT cancelled on
   progress events — it continues until the final reply arrives.
 
-Streaming progressif (token-by-token) est désactivé sur ce canal.  Atelier
-publie la réponse complète sur relais:messages:outgoing:discord après la fin
-de l'exécution agentique.  La publication des événements progress est
-contrôlée par ``ProgressConfig`` (config/atelier.yaml, section ``progress:``).
+Progressive streaming (token-by-token) is disabled on this channel.  Atelier
+publishes the full response to relais:messages:outgoing:discord after the
+agentic execution completes.  Progress event publishing is controlled by
+``ProgressConfig`` (config/atelier.yaml, section ``progress:``).
 """
 
 from __future__ import annotations

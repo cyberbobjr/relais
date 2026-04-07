@@ -1,16 +1,16 @@
-"""Handler pour l'action ``file_read`` — lecture d'un fichier mémoire depuis SQLite.
+"""Handler for the ``file_read`` action — reading a memory file from SQLite.
 
-Reçu depuis ``relais:memory:request`` avec les champs :
+Received from ``relais:memory:request`` with fields:
   - ``action``: ``"file_read"``
-  - ``user_id``: identifiant unique de l'utilisateur
-  - ``path``: chemin virtuel du fichier (ex: ``/memories/notes.md``)
-  - ``correlation_id``: UUID pour corréler la réponse
+  - ``user_id``: unique user identifier
+  - ``path``: virtual file path (e.g. ``/memories/notes.md``)
+  - ``correlation_id``: UUID to correlate the response
 
-Publie sur ``relais:memory:response`` :
-  - ``correlation_id``: repris de la requête
+Publishes to ``relais:memory:response``:
+  - ``correlation_id``: echoed from the request
   - ``ok``: ``true`` | ``false``
-  - ``content``: contenu du fichier (string) ou ``null`` si erreur
-  - ``error``: message d'erreur ou ``null``
+  - ``content``: file content (string) or ``null`` on error
+  - ``error``: error message or ``null``
 """
 
 import json
@@ -24,14 +24,14 @@ _ALLOWED_PATH_PREFIX = "/memories/"
 
 
 class FileReadHandler(BaseActionHandler):
-    """Lit le contenu d'un fichier mémoire depuis SQLite via :class:`FileStore`."""
+    """Read a memory file from SQLite via :class:`FileStore`."""
 
     async def handle(self, ctx: HandlerContext) -> None:
-        """Traite la requête ``file_read``.
+        """Process a ``file_read`` request.
 
         Args:
-            ctx: Contexte handler avec ``req``, ``file_store``,
-                ``redis_conn`` et ``stream_res``.
+            ctx: Handler context with ``req``, ``file_store``,
+                ``redis_conn`` and ``stream_res``.
         """
         req = ctx.req
         corr = req.get("correlation_id", "")

@@ -28,7 +28,7 @@ def _make_clear_request(
     correlation_id: str = "c1",
     user_id: str | None = None,
 ) -> list:
-    """Helper: retourne un résultat xreadgroup avec une requête action=clear.
+    """Helper: returns an xreadgroup result with an action=clear request.
 
     Builds an Envelope-format payload so tests match the Envelope-based parsing
     in souvenir.main._process_request_stream.
@@ -51,7 +51,7 @@ def _make_clear_request(
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_souvenir_clear_calls_long_term_clear_session(mock_redis):
-    """Action 'clear' appelle long_term_store.clear_session(session_id)."""
+    """Action 'clear' must call long_term_store.clear_session(session_id)."""
     mock_redis.xreadgroup = AsyncMock(side_effect=[
         _make_clear_request("my_session"),
         asyncio.CancelledError(),
@@ -72,7 +72,7 @@ async def test_souvenir_clear_calls_long_term_clear_session(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_souvenir_clear_passes_user_id_to_clear_session(mock_redis):
-    """Action 'clear' transmet user_id à long_term_store.clear_session."""
+    """Action 'clear' must pass user_id to long_term_store.clear_session."""
     mock_redis.xreadgroup = AsyncMock(side_effect=[
         _make_clear_request("my_session", user_id="usr_admin"),
         asyncio.CancelledError(),
@@ -93,7 +93,7 @@ async def test_souvenir_clear_passes_user_id_to_clear_session(mock_redis):
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_souvenir_clear_acks_message(mock_redis):
-    """Action 'clear' ACK le message après traitement."""
+    """Action 'clear' must ACK the message after processing."""
     mock_redis.xreadgroup = AsyncMock(side_effect=[
         _make_clear_request(),
         asyncio.CancelledError(),

@@ -1,17 +1,17 @@
-"""Handler pour l'action ``file_list`` — listage des fichiers mémoire depuis SQLite.
+"""Handler for the ``file_list`` action — listing memory files from SQLite.
 
-Reçu depuis ``relais:memory:request`` avec les champs :
+Received from ``relais:memory:request`` with fields:
   - ``action``: ``"file_list"``
-  - ``user_id``: identifiant unique de l'utilisateur
-  - ``path``: préfixe de répertoire à lister (ex: ``/memories/``)
-  - ``correlation_id``: UUID pour corréler la réponse
+  - ``user_id``: unique user identifier
+  - ``path``: directory prefix to list (e.g. ``/memories/``)
+  - ``correlation_id``: UUID to correlate the response
 
-Publie sur ``relais:memory:response`` :
-  - ``correlation_id``: repris de la requête
+Publishes to ``relais:memory:response``:
+  - ``correlation_id``: echoed from the request
   - ``ok``: ``true`` | ``false``
-  - ``files``: liste de dicts ``{"path": str, "size": int, "modified_at": str}``
-    ou ``null`` si erreur
-  - ``error``: message d'erreur ou ``null``
+  - ``files``: list of dicts ``{"path": str, "size": int, "modified_at": str}``
+    or ``null`` on error
+  - ``error``: error message or ``null``
 """
 
 import json
@@ -25,14 +25,14 @@ _ALLOWED_PATH_PREFIX = "/memories/"
 
 
 class FileListHandler(BaseActionHandler):
-    """Liste les fichiers mémoire d'un utilisateur sous un préfixe de chemin."""
+    """List memory files for a user under a path prefix."""
 
     async def handle(self, ctx: HandlerContext) -> None:
-        """Traite la requête ``file_list``.
+        """Process a ``file_list`` request.
 
         Args:
-            ctx: Contexte handler avec ``req``, ``file_store``,
-                ``redis_conn`` et ``stream_res``.
+            ctx: Handler context with ``req``, ``file_store``,
+                ``redis_conn`` and ``stream_res``.
         """
         req = ctx.req
         corr = req.get("correlation_id", "")

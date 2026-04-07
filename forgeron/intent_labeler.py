@@ -1,4 +1,4 @@
-"""IntentLabeler — extrait un label d'intention d'une session via LLM Haiku.
+"""IntentLabeler — extracts an intent label from a session via Haiku LLM.
 
 Uses a cheap Haiku LLM call to classify the primary recurring task type of a
 session into a normalized snake_case label, or returns None for generic chat.
@@ -8,16 +8,32 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import cast
 
-from common.profile_loader import ProfileConfig
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
+
+from common.profile_loader import ProfileConfig, build_chat_model
 
 logger = logging.getLogger(__name__)
 
-# Labels réservés qui ne doivent pas déclencher de création de skill
+# Reserved labels that must not trigger skill creation
 _EXCLUDED_LABELS = frozenset({"none", "unknown", "general", "chat", "conversation", "question"})
 
-# Regex pour valider qu'un label est bien en snake_case (2-40 chars)
+# Regex to validate that a label is valid snake_case (2-40 chars)
 _LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+
+
+class IntentLabelLLMResponse(BaseModel):
+    """Structured output schema for the intent labeling LLM call."""
+
+    label: str = Field(
+        description=(
+            "Single snake_case intent label identifying the primary recurring task "
+            "(e.g. send_email, summarize_pdf, search_web, create_calendar_event). "
+            "Use 'none' if the conversation has no clear reusable task."
+        )
+    )
 
 
 class IntentLabeler:
@@ -33,10 +49,10 @@ class IntentLabeler:
 
     _SYSTEM_PROMPT = (
         "You are a task classifier. Given a conversation, identify the single "
-        "primary recurring task type it represents. Respond with ONLY a "
-        "short snake_case label (e.g. send_email, summarize_pdf, search_web, "
-        "create_calendar_event). If the conversation is generic chat or has "
-        "no clear reusable task, respond with 'none'."
+        "primary recurring task type it represents as a short snake_case label "
+        "(e.g. send_email, summarize_pdf, search_web, create_calendar_event). "
+        "If the conversation is generic chat or has no clear reusable task, "
+        "use 'none'."
     )
 
     def __init__(self, profile: ProfileConfig) -> None:
@@ -84,14 +100,13 @@ class IntentLabeler:
         conversation_text = "\n".join(f"- {m}" for m in user_messages[:5])
 
         try:
-            from common.profile_loader import build_chat_model  # noqa: PLC0415
             model = build_chat_model(self._profile)
-            from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
-            response = await model.ainvoke([
+            structured_model = model.with_structured_output(IntentLabelLLMResponse)
+            result = cast(IntentLabelLLMResponse, await structured_model.ainvoke([
                 SystemMessage(content=self._SYSTEM_PROMPT),
                 HumanMessage(content=f"Conversation:\n{conversation_text}"),
-            ])
-            raw_label = response.content.strip().lower()
+            ]))
+            raw_label = result.label.strip().lower()
         except Exception as exc:  # noqa: BLE001
             logger.warning("IntentLabeler LLM call failed: %s", exc)
             return None

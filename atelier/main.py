@@ -88,10 +88,10 @@ Message flow (one task at a time):
     │  (5) publish archive action to relais:memory:request with envelope + messages_raw
     │      (Souvenir processes this to persist the full LangChain message history)
     │  (6) if skill_used and tool_call_count > 0 → publish CTX_SKILL_TRACE envelope to
-    │      relais:skill:trace (fire-and-forget → Forgeron Solution B analysis)
+    │      relais:skill:trace (fire-and-forget → Forgeron trace analysis pipeline)
     │  (6b) if tool_error_count > 0 and forgeron.annotation_mode enabled →
     │       SkillAnnotator.maybe_annotate() appends LESSONS LEARNED inline to the
-    │       SKILL.md (Solution D fast path; lazy import — no crash if forgeron absent)
+    │       SKILL.md (inline annotation path; lazy import — no crash if forgeron absent)
     │  (7) build response Envelope; stamp context["atelier"]["skills_used"] if any
     └──► relais:messages:outgoing_pending
 
@@ -618,7 +618,7 @@ class Atelier(BrickBase):
             )
 
             # 4. Read MCP tools from the singleton — no per-request session creation.
-            # Option A: all profiles share the single global McpSessionManager.
+            # all profiles share the single global McpSessionManager.
             # The lock ensures we snapshot _mcp_tools safely during a hot-reload restart.
             # list() copies the reference list before releasing the lock so that a
             # concurrent _restart_mcp_sessions() cannot mutate self._mcp_tools under us.
@@ -696,7 +696,7 @@ class Atelier(BrickBase):
                     STREAM_SKILL_TRACE, {"payload": trace_env.to_json()}
                 )
 
-                # 7b. Inline annotation — Solution D (fast path, fires per turn).
+                # 7b. Inline annotation — fires per turn when tool errors occur.
                 # Loaded lazily so Atelier starts even without forgeron installed.
                 if agent_result.tool_error_count > 0:
                     try:

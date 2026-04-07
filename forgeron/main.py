@@ -3,16 +3,16 @@
 Functional role
 ---------------
 Forgeron improves existing skills via statistical trace analysis AND
-auto-creates new skills from recurring session patterns (Solution D).
+auto-creates new skills from recurring session patterns.
 
-**Trace analysis (existing)**:
+**Trace analysis (patch mode)**:
 Consumes skill execution traces published by Atelier on ``relais:skill:trace``,
 accumulates them per skill in SQLite, and triggers an LLM-based analysis when
 a skill shows a persistently high tool error rate.  If the analysis produces
 an improved SKILL.md, the patch is applied atomically and monitored for
 regression.
 
-**Auto-creation from archives (Solution D)**:
+**Auto-creation from session archives**:
 Consumes Atelier session archives on ``relais:memory:request`` via a dedicated
 consumer group (``forgeron_archive_group``), independent of Souvenir's group.
 An ``IntentLabeler`` (Fast LLM) extracts a normalized intent label from each
@@ -218,9 +218,19 @@ class Forgeron(BrickBase):
                 tool_error_count,
                 patch_id or "none",
             )
+            await redis_conn.xadd(STREAM_LOGS, {
+                "level": "INFO",
+                "brick": "forgeron",
+                "correlation_id": envelope.correlation_id,
+                "sender_id": envelope.sender_id,
+                "message": (
+                    f"Trace stored for skill '{skill_name}' "
+                    f"(calls={tool_call_count} errors={tool_error_count} patch={patch_id or 'none'})"
+                ),
+            })
 
             # Post-patch validation: if there is an active patch, check for
-            # regression (Étape 3 — SkillValidator; loaded lazily when available).
+            # regression (Step 3 — SkillValidator; loaded lazily when available).
             if active_patch is not None and self._config.patch_mode:
                 await self._maybe_validate_patch(
                     envelope, skill_name, active_patch, redis_conn
@@ -266,8 +276,15 @@ class Forgeron(BrickBase):
             skill_name,
             trigger_corr_id,
         )
+        await redis_conn.xadd(STREAM_LOGS, {
+            "level": "INFO",
+            "brick": "forgeron",
+            "correlation_id": trigger_corr_id,
+            "sender_id": envelope.sender_id,
+            "message": f"LLM analysis triggered for skill '{skill_name}'",
+        })
 
-        # Étape 2: SkillAnalyzer — imported lazily so the brick starts even if
+        # Step 2: SkillAnalyzer — imported lazily so the brick starts even if
         # the analyzer module is not yet implemented.
         try:
             from forgeron.analyzer import SkillAnalyzer  # noqa: PLC0415
@@ -366,6 +383,16 @@ class Forgeron(BrickBase):
             skill_name,
             error_rate * 100,
         )
+        await redis_conn.xadd(STREAM_LOGS, {
+            "level": "INFO",
+            "brick": "forgeron",
+            "correlation_id": envelope.correlation_id,
+            "sender_id": envelope.sender_id,
+            "message": (
+                f"Patch '{patch.id[:8]}' applied for skill '{skill_name}' "
+                f"(pre_error_rate={error_rate:.0%})"
+            ),
+        })
 
         if self._config.notify_user_on_patch:
             await self._notify_user(
@@ -374,8 +401,8 @@ class Forgeron(BrickBase):
                 session_id=envelope.session_id,
                 correlation_id=envelope.correlation_id,
                 message=(
-                    f"[Forgeron] Skill `{skill_name}` amélioré automatiquement "
-                    f"(taux d'erreur : {error_rate:.0%} → patch `{patch.id[:8]}`)"
+                    f"[Forgeron] Skill `{skill_name}` automatically improved "
+                    f"(error rate: {error_rate:.0%} → patch `{patch.id[:8]}`)"
                 ),
                 redis_conn=redis_conn,
             )
@@ -430,6 +457,16 @@ class Forgeron(BrickBase):
                 "patch_id": patch.id,
             })
             await redis_conn.xadd(STREAM_EVENTS_SYSTEM, {"payload": event_env.to_json()})
+            await redis_conn.xadd(STREAM_LOGS, {
+                "level": "WARNING",
+                "brick": "forgeron",
+                "correlation_id": envelope.correlation_id,
+                "sender_id": envelope.sender_id,
+                "message": (
+                    f"Patch '{patch.id[:8]}' rolled back for skill '{skill_name}' "
+                    f"(regression detected)"
+                ),
+            })
 
             if self._config.notify_user_on_patch:
                 await self._notify_user(
@@ -438,14 +475,14 @@ class Forgeron(BrickBase):
                     session_id=envelope.session_id,
                     correlation_id=envelope.correlation_id,
                     message=(
-                        f"[Forgeron] Patch `{patch.id[:8]}` sur skill `{skill_name}` "
-                        f"annulé (régression détectée, retour à la version précédente)."
+                        f"[Forgeron] Patch `{patch.id[:8]}` on skill `{skill_name}` "
+                        f"rolled back (regression detected, reverted to previous version)."
                     ),
                     redis_conn=redis_conn,
                 )
 
     # ------------------------------------------------------------------ #
-    # Archive consumer — auto-creation pipeline (Solution D)             #
+    # Archive consumer — auto-creation pipeline                          #
     # ------------------------------------------------------------------ #
 
     async def _handle_archive(self, envelope: Envelope, redis_conn: Any) -> bool:
@@ -630,6 +667,16 @@ class Forgeron(BrickBase):
         })
         await redis_conn.xadd(STREAM_EVENTS_SYSTEM, {"payload": event_env.to_json()})
         logger.info("Skill '%s' created at %s", result.skill_name, result.skill_path)
+        await redis_conn.xadd(STREAM_LOGS, {
+            "level": "INFO",
+            "brick": "forgeron",
+            "correlation_id": correlation_id,
+            "sender_id": sender_id,
+            "message": (
+                f"Skill '{result.skill_name}' created for intent '{intent_label}' "
+                f"({len(representative)} contributing sessions)"
+            ),
+        })
 
         if self._config.notify_user_on_creation:
             await self._notify_user(
@@ -638,9 +685,9 @@ class Forgeron(BrickBase):
                 session_id=session_id,
                 correlation_id=correlation_id,
                 message=(
-                    f"[Forgeron] Nouveau skill créé automatiquement : `{result.skill_name}`\n"
+                    f"[Forgeron] New skill automatically created: `{result.skill_name}`\n"
                     f"{result.description}\n"
-                    f"_(basé sur {len(representative)} sessions récurrentes)_"
+                    f"_(based on {len(representative)} recurring sessions)_"
                 ),
                 redis_conn=redis_conn,
             )
@@ -677,6 +724,13 @@ class Forgeron(BrickBase):
         )
         notif_env.action = ACTION_MESSAGE_OUTGOING_PENDING
         await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": notif_env.to_json()})
+        await redis_conn.xadd(STREAM_LOGS, {
+            "level": "INFO",
+            "brick": "forgeron",
+            "correlation_id": correlation_id,
+            "sender_id": sender_id,
+            "message": f"Notification sent to {channel}/{sender_id}: {message[:60]}",
+        })
         logger.info(
             "Notification sent to %s/%s: %s", channel, sender_id, message[:60]
         )

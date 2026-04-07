@@ -80,8 +80,8 @@ Aiguilleur
 
 | Stream / clé | Producteur | Consommateur |
 |--------------|------------|--------------|
-| `relais:skill:trace` | Atelier | Forgeron (`forgeron_group`) — Solution B |
-| `relais:memory:request` | Atelier | Forgeron (`forgeron_archive_group`) — Solution D, Souvenir (`souvenir_group`) |
+| `relais:skill:trace` | Atelier | Forgeron (`forgeron_group`) — trace analysis pipeline |
+| `relais:memory:request` | Atelier | Forgeron (`forgeron_archive_group`) — auto-skill creation pipeline, Souvenir (`souvenir_group`) |
 | `relais:events:system` | Forgeron | Archiviste |
 | `relais:messages:outgoing_pending` | Forgeron (notifications) | Sentinelle |
 | `relais:skill:last_improved:{skill_name}` (Redis String) | Forgeron | Forgeron (cooldown B) |
@@ -164,7 +164,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide **et** `tool_call_count > 0`) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`
   - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
   - les erreurs finales sur `relais:tasks:failed`
-- **Solution D fast path** : si `tool_error_count > 0` et `annotation_mode` activé dans `forgeron.yaml`, `SkillAnnotator.maybe_annotate()` est appelé inline après l'exécution (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé).
+- **Inline annotation** : si `tool_error_count > 0` et `annotation_mode` activé dans `forgeron.yaml`, `SkillAnnotator.maybe_annotate()` est appelé inline après l'exécution (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé).
 
 ### Commandant
 
@@ -192,7 +192,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 
 Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipelines indépendants :
 
-#### Solution B — Amélioration par analyse statistique (patch)
+#### Pipeline trace analysis — Amélioration par analyse statistique (patch)
 
 - Consomme `relais:skill:trace` (groupe `forgeron_group`, `ack_mode="always"` — les traces sont advisory).
 - Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`).
@@ -204,7 +204,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 - Les événements `ACTION_SKILL_PATCH_APPLIED` et `ACTION_SKILL_PATCH_ROLLED_BACK` sont publiés sur `relais:events:system` via une `Envelope` minimale (sans héritage du contexte upstream) avec `context["forgeron"]` (`CTX_FORGERON`).
 - Le profil LLM utilisé pour l'analyse est configuré via `llm_profile` dans `forgeron.yaml` et résolu via `common/profile_loader.py`.
 
-#### Solution D — Création automatique de skills depuis les archives de sessions
+#### Pipeline auto-création — Création automatique de skills depuis les archives de sessions
 
 - Consomme `relais:memory:request` (groupe `forgeron_archive_group`, indépendant du groupe `souvenir_group` — fan-out complet via deux consumer groups sur le même stream).
 - Pour chaque action `archive`, Forgeron extrait les messages utilisateur depuis `CTX_SOUVENIR_REQUEST["messages_raw"]` et appelle `IntentLabeler` (profil Haiku — léger) pour obtenir un label normalisé (ex. `"send_email"`).
@@ -218,10 +218,10 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 
 | Table | Contenu |
 |-------|---------|
-| `skill_traces` | Traces d'exécution par skill (Solution B) |
-| `skill_patches` | Historique des patches appliqués (Solution B) |
-| `session_summaries` | Sessions archivées avec leur label d'intention (Solution D) |
-| `skill_proposals` | Propositions de skills agrégées par label (Solution D) |
+| `skill_traces` | Traces d'exécution par skill (trace analysis pipeline) |
+| `skill_patches` | Historique des patches appliqués (trace analysis pipeline) |
+| `session_summaries` | Sessions archivées avec leur label d'intention (auto-création pipeline) |
+| `skill_proposals` | Propositions de skills agrégées par label (auto-création pipeline) |
 
 ---
 

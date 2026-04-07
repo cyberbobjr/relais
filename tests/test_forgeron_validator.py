@@ -1,4 +1,4 @@
-"""Tests for SkillValidator — regression detection and rollback (Étape 3)."""
+"""Tests for SkillValidator — regression detection and rollback (Step 3)."""
 
 from __future__ import annotations
 

@@ -1,18 +1,18 @@
-"""Handler pour l'action ``file_write`` — écriture de fichier mémoire dans SQLite.
+"""Handler for the ``file_write`` action — writing a memory file to SQLite.
 
-Reçu depuis ``relais:memory:request`` avec les champs :
+Received from ``relais:memory:request`` with fields:
   - ``action``: ``"file_write"``
-  - ``user_id``: identifiant unique de l'utilisateur
-  - ``path``: chemin virtuel du fichier (ex: ``/memories/notes.md``)
-  - ``content``: contenu textuel à écrire
-  - ``overwrite``: (bool, optionnel, défaut ``False``) si ``True``, écrase un
-    fichier existant
-  - ``correlation_id``: UUID pour corréler la réponse
+  - ``user_id``: unique user identifier
+  - ``path``: virtual file path (e.g. ``/memories/notes.md``)
+  - ``content``: text content to write
+  - ``overwrite``: (bool, optional, default ``False``) if ``True``, overwrites
+    an existing file
+  - ``correlation_id``: UUID to correlate the response
 
-Publie sur ``relais:memory:response`` :
-  - ``correlation_id``: repris de la requête
+Publishes to ``relais:memory:response``:
+  - ``correlation_id``: echoed from the request
   - ``ok``: ``true`` | ``false``
-  - ``error``: message d'erreur ou ``null``
+  - ``error``: error message or ``null``
 """
 
 import json
@@ -26,23 +26,22 @@ _ALLOWED_PATH_PREFIX = "/memories/"
 
 
 class FileWriteHandler(BaseActionHandler):
-    """Écrit ou crée un fichier mémoire dans SQLite via :class:`FileStore`.
+    """Write or create a memory file in SQLite via :class:`FileStore`.
 
-    Supporte deux modes via le champ ``overwrite`` de la requête :
+    Supports two modes via the ``overwrite`` request field:
 
-    * ``overwrite=False`` (défaut) : crée un nouveau fichier — retourne une
-      erreur si le fichier existe déjà (sémantique *create-only*).
-    * ``overwrite=True`` : upsert — crée ou remplace le fichier existant
-      (utilisé par l'opération ``edit`` du backend après reconstruction locale
-      du contenu).
+    * ``overwrite=False`` (default): create a new file — returns an error if
+      the file already exists (*create-only* semantics).
+    * ``overwrite=True``: upsert — creates or replaces the existing file
+      (used by the backend ``edit`` operation after local content reconstruction).
     """
 
     async def handle(self, ctx: HandlerContext) -> None:
-        """Traite la requête ``file_write``.
+        """Process a ``file_write`` request.
 
         Args:
-            ctx: Contexte handler avec ``req``, ``file_store``,
-                ``redis_conn`` et ``stream_res``.
+            ctx: Handler context with ``req``, ``file_store``,
+                ``redis_conn`` and ``stream_res``.
         """
         req = ctx.req
         corr = req.get("correlation_id", "")

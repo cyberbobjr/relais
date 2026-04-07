@@ -30,7 +30,7 @@ class ForgeonConfig:
     annotation_min_tool_errors: int = 1
     annotation_cooldown_seconds: int = 300
     skills_dir: Path | None = None
-    # --- Création automatique de skills (Solution D) ---
+    # --- Automatic skill creation from session archives ---
     creation_mode: bool = True
     """Enable automatic skill creation from recurring session patterns."""
     min_sessions_for_creation: int = 3

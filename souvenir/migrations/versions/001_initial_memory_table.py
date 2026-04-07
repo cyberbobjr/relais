@@ -16,7 +16,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Crée la table ``memories`` avec contrainte UNIQUE sur (user_id, key).
+    """Create the ``memories`` table with a UNIQUE constraint on (user_id, key).
 
     Returns:
         None
@@ -37,7 +37,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Supprime la table ``memories``.
+    """Drop the ``memories`` table.
 
     Returns:
         None

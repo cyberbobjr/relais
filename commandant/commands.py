@@ -1,11 +1,11 @@
-"""Registre centralisé des commandes du Commandant.
+"""Centralised command registry for Commandant.
 
-Ce module est l'unique source de vérité pour les commandes globales hors-LLM.
-Ajouter une commande = une seule modification ici :
-  1. Écrire le handler async (fonction ci-dessous)
-  2. Ajouter une entrée dans COMMAND_REGISTRY
+This module is the single source of truth for global out-of-LLM commands.
+Adding a command requires only one change here:
+  1. Write the async handler (function below)
+  2. Add an entry to COMMAND_REGISTRY
 
-KNOWN_COMMANDS et parse_command() se mettent à jour automatiquement.
+KNOWN_COMMANDS and parse_command() are updated automatically.
 """
 
 import logging
@@ -26,13 +26,13 @@ logger = logging.getLogger("commandant.commands")
 
 @dataclass(frozen=True)
 class CommandSpec:
-    """Métadonnées et handler d'une commande globale.
+    """Metadata and handler for a global command.
 
     Attributes:
-        name: Nom de la commande en minuscules (ex: "clear").
-        description: Description courte affichée par /help.
-        handler: Coroutine async(envelope, redis_conn) exécutée quand la
-                 commande est détectée.
+        name: Command name in lowercase (e.g. "clear").
+        description: Short description displayed by /help.
+        handler: async(envelope, redis_conn) coroutine executed when the
+                 command is detected.
     """
     name: str
     description: str
@@ -41,11 +41,11 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class CommandResult:
-    """Résultat du parsing d'une commande globale.
+    """Result of parsing a global command.
 
     Attributes:
-        command: Nom de la commande en minuscules (ex: "clear").
-        args: Arguments supplémentaires (actuellement toujours vide).
+        command: Command name in lowercase (e.g. "clear").
+        args: Additional arguments (currently always empty).
     """
     command: str
     args: list[str] = field(default_factory=list)
@@ -56,15 +56,15 @@ class CommandResult:
 # ---------------------------------------------------------------------------
 
 async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
-    """Efface l'historique de session : Redis context + SQLite messages.
+    """Clear session history: Redis context + SQLite messages.
 
-    Envoie action="clear" sur relais:memory:request pour que Souvenir
-    effectue le nettoyage (context_store.clear + long_term_store.clear_session)
-    et publie la confirmation de retour vers le canal.
+    Sends action="clear" on relais:memory:request so that Souvenir performs
+    the cleanup (context_store.clear + long_term_store.clear_session) and
+    publishes a confirmation back to the channel.
 
     Args:
-        envelope: L'enveloppe du message /clear reçu.
-        redis_conn: Connexion Redis async active.
+        envelope: The envelope of the received /clear message.
+        redis_conn: Active async Redis connection.
     """
     portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
     user_id = portail_ctx.get("user_id", envelope.sender_id)
@@ -86,16 +86,16 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
 
 
 async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
-    """Retourne la liste de toutes les commandes disponibles avec leur description.
+    """Return the list of all available commands with their descriptions.
 
-    La liste est construite dynamiquement depuis COMMAND_REGISTRY, garantissant
-    qu'elle est toujours à jour sans modification du handler.
+    The list is built dynamically from COMMAND_REGISTRY, ensuring it is always
+    up-to-date without any handler modification.
 
     Args:
-        envelope: L'enveloppe du message /help reçu.
-        redis_conn: Connexion Redis async active.
+        envelope: The envelope of the received /help message.
+        redis_conn: Active async Redis connection.
     """
-    lines = ["Commandes disponibles :"]
+    lines = ["Available commands:"]
     for spec in COMMAND_REGISTRY.values():
         lines.append(f"  /{spec.name} — {spec.description}")
     help_text = "\n".join(lines)
@@ -108,18 +108,18 @@ async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Registre — source unique de vérité
+# Registry — single source of truth
 # ---------------------------------------------------------------------------
 
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
     "clear": CommandSpec(
         name="clear",
-        description="Efface l'historique de conversation (Redis + SQLite).",
+        description="Clears conversation history (Redis + SQLite).",
         handler=handle_clear,
     ),
     "help": CommandSpec(
         name="help",
-        description="Affiche la liste des commandes disponibles.",
+        description="Displays the list of available commands.",
         handler=handle_help,
     ),
 }
@@ -132,18 +132,18 @@ KNOWN_COMMANDS: frozenset[str] = frozenset(COMMAND_REGISTRY)
 # ---------------------------------------------------------------------------
 
 def parse_command(text: str) -> CommandResult | None:
-    """Parse un message texte pour détecter une commande globale.
+    """Parse a text message to detect a global command.
 
-    Une commande valide :
-    - Commence par '/' après strip()
-    - Peut être entourée de quotes simples ou doubles symétriques
-    - Le nom (après '/') appartient à KNOWN_COMMANDS (insensible à la casse)
+    A valid command:
+    - Starts with '/' after strip()
+    - May be wrapped in symmetric single or double quotes
+    - The name (after '/') must belong to KNOWN_COMMANDS (case-insensitive)
 
     Args:
-        text: Le contenu brut du message.
+        text: Raw message content.
 
     Returns:
-        CommandResult si commande connue détectée, None sinon.
+        CommandResult if a known command is detected, None otherwise.
     """
     stripped = strip_outer_quotes(text)
     if not stripped.startswith("/"):

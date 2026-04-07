@@ -1,26 +1,25 @@
-"""Backend DeepAgents qui route les opérations de fichiers vers SOUVENIR via Redis Streams.
+"""DeepAgents backend that routes file operations to Souvenir via Redis Streams.
 
-Ce module expose :class:`SouvenirBackend`, une implémentation de
-``BackendProtocol`` qui persiste les fichiers de mémoire dans la base SQLite
-de SOUVENIR plutôt que sur le système de fichiers local.
+This module exposes :class:`SouvenirBackend`, a ``BackendProtocol`` implementation
+that persists memory files in Souvenir's SQLite database rather than the local
+filesystem.
 
-Protocole Redis
----------------
-Requête (stream ``relais:memory:request``) :
-    Envelope sérialisée (``Envelope.to_json()``).  L'``action`` est portée
-    par le champ ``Envelope.action`` ; les paramètres de l'action
-    (``user_id``, ``path``, ``content``, ``overwrite``, …) sont dans
-    ``context["souvenir_request"]`` (``CTX_SOUVENIR_REQUEST``).
+Redis Protocol
+--------------
+Request (stream ``relais:memory:request``):
+    Serialized Envelope (``Envelope.to_json()``).  The ``action`` is carried in
+    the ``Envelope.action`` field; action parameters (``user_id``, ``path``,
+    ``content``, ``overwrite``, …) are in ``context["souvenir_request"]``
+    (``CTX_SOUVENIR_REQUEST``).
 
-Réponse (stream ``relais:memory:response``) :
+Response (stream ``relais:memory:response``):
     ``{"correlation_id": str, "ok": bool, "error": str|null, ...}``
 
 Thread-safety
 -------------
-``BackendProtocol`` est synchrone — ses méthodes sont appelées depuis un
-thread de pool via ``asyncio.to_thread()``. Ce module utilise donc un client
-Redis *synchrone* (``redis.Redis``) isolé, jamais partagé avec le client async
-d'Atelier.
+``BackendProtocol`` is synchronous — its methods are called from a thread pool
+via ``asyncio.to_thread()``. This module therefore uses an isolated *synchronous*
+Redis client (``redis.Redis``), never shared with Atelier's async client.
 """
 
 from __future__ import annotations
@@ -58,38 +57,38 @@ _TIMEOUT_S = 3.0
 
 
 class SouvenirBackend(BackendProtocol):
-    """Backend DeepAgents qui persiste les fichiers de mémoire dans SOUVENIR.
+    """DeepAgents backend that persists memory files in Souvenir.
 
-    Chaque instance est liée à un ``user_id`` unique, transmis dans chaque
-    requête Redis de façon à ce que SOUVENIR isole les fichiers par utilisateur.
+    Each instance is bound to a unique ``user_id``, transmitted in every Redis
+    request so that Souvenir isolates files per user.
 
-    Le client Redis synchrone est créé à la première utilisation et réutilisé
-    pour toute la durée de vie de l'instance.
+    The synchronous Redis client is created on first use and reused for the
+    lifetime of the instance.
 
     Args:
-        user_id: Identifiant unique de l'utilisateur (issu de
+        user_id: Unique user identifier (sourced from
             ``envelope.context["portail"]["user_id"]``).
     """
 
     def __init__(self, user_id: str) -> None:
-        """Initialise le backend avec l'identifiant utilisateur.
+        """Initialise the backend with the user identifier.
 
         Args:
-            user_id: Identifiant unique de l'utilisateur.
+            user_id: Unique user identifier.
         """
         self._user_id = user_id
         self._redis: redis_sync.Redis | None = None
 
     def _get_redis(self) -> redis_sync.Redis:
-        """Retourne (et crée si besoin) le client Redis synchrone.
+        """Return (and create if needed) the synchronous Redis client.
 
-        Utilise la même résolution de chemin socket que :class:`RedisClient` :
-        variable d'environnement ``REDIS_SOCKET_PATH`` ou socket par défaut
-        dans ``RELAIS_HOME``. Le mot de passe est lu depuis
-        ``REDIS_PASS_ATELIER`` (partagé avec le client async d'Atelier).
+        Uses the same socket path resolution as :class:`RedisClient`:
+        the ``REDIS_SOCKET_PATH`` environment variable or the default socket
+        path under ``RELAIS_HOME``. The password is read from
+        ``REDIS_PASS_ATELIER`` (shared with Atelier's async client).
 
         Returns:
-            Instance ``redis.Redis`` connectée via socket Unix.
+            A ``redis.Redis`` instance connected via Unix socket.
         """
         if self._redis is None:
             default_socket = str(get_relais_home() / "redis.sock")
@@ -104,25 +103,25 @@ class SouvenirBackend(BackendProtocol):
         return self._redis
 
     def _request(self, action: str, **kwargs: Any) -> dict[str, Any]:
-        """Envoie une requête synchrone à SOUVENIR et attend la réponse.
+        """Send a synchronous request to Souvenir and wait for the response.
 
-        Publie dans ``relais:memory:request`` puis poll ``relais:memory:response``
-        en filtrant par ``correlation_id`` jusqu'au timeout de 3 s.
+        Publishes to ``relais:memory:request`` then polls ``relais:memory:response``
+        filtering by ``correlation_id`` until the 3-second timeout.
 
         Args:
-            action: Nom de l'action (``"file_write"``, ``"file_read"``,
+            action: Action name (``"file_write"``, ``"file_read"``,
                 ``"file_list"``).
-            **kwargs: Champs supplémentaires inclus dans le payload JSON.
+            **kwargs: Additional fields included in the JSON payload.
 
         Returns:
-            Dict de la réponse SOUVENIR, ou ``{"ok": False, "error": "timeout"}``
-            si aucune réponse n'arrive dans le délai imparti.
+            Souvenir response dict, or ``{"ok": False, "error": "timeout"}``
+            if no response arrives within the allotted time.
         """
         r = self._get_redis()
         corr = str(uuid.uuid4())
 
-        # Snapshot la queue de réponse AVANT d'envoyer la requête pour ne pas
-        # manquer une réponse ultra-rapide ni lire de vieux messages.
+        # Snapshot the response queue BEFORE sending the request so we don't
+        # miss an ultra-fast response or read stale messages.
         last_msgs = r.xrevrange(_STREAM_RES, count=1)
         last_id: str = last_msgs[0][0].decode() if last_msgs else "0-0"
 
@@ -167,14 +166,14 @@ class SouvenirBackend(BackendProtocol):
     # ------------------------------------------------------------------
 
     def write(self, file_path: str, content: str) -> WriteResult:
-        """Crée un nouveau fichier mémoire (erreur si le fichier existe déjà).
+        """Create a new memory file (error if the file already exists).
 
         Args:
-            file_path: Chemin virtuel du fichier (ex: ``/memories/notes.md``).
-            content: Contenu textuel à écrire.
+            file_path: Virtual file path (e.g. ``/memories/notes.md``).
+            content: Text content to write.
 
         Returns:
-            :class:`WriteResult` avec ``files_update=None`` (persistence externe).
+            :class:`WriteResult` with ``files_update=None`` (external persistence).
         """
         resp = self._request("file_write", path=file_path, content=content, overwrite=False)
         if not resp.get("ok"):
@@ -182,16 +181,16 @@ class SouvenirBackend(BackendProtocol):
         return WriteResult(path=file_path, files_update=None)
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
-        """Lit le contenu d'un fichier mémoire avec numéros de lignes.
+        """Read the content of a memory file with line numbers.
 
         Args:
-            file_path: Chemin virtuel du fichier.
-            offset: Numéro de ligne de départ (0-indexé).
-            limit: Nombre maximum de lignes à retourner.
+            file_path: Virtual file path.
+            offset: Starting line number (0-indexed).
+            limit: Maximum number of lines to return.
 
         Returns:
-            Contenu du fichier formaté avec numéros de lignes (format ``cat -n``),
-            ou un message d'erreur si le fichier est introuvable.
+            File content formatted with line numbers (``cat -n`` format),
+            or an error message if the file is not found.
         """
         resp = self._request("file_read", path=file_path)
         if not resp.get("ok"):
@@ -208,19 +207,19 @@ class SouvenirBackend(BackendProtocol):
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
-        """Effectue un remplacement de chaîne dans un fichier mémoire existant.
+        """Perform a string replacement in an existing memory file.
 
-        Lit le contenu actuel depuis SOUVENIR, applique le remplacement
-        localement, puis réécrit le fichier avec ``overwrite=True``.
+        Reads the current content from Souvenir, applies the replacement
+        locally, then rewrites the file with ``overwrite=True``.
 
         Args:
-            file_path: Chemin virtuel du fichier.
-            old_string: Chaîne exacte à rechercher.
-            new_string: Chaîne de remplacement.
-            replace_all: Si ``True``, remplace toutes les occurrences.
+            file_path: Virtual file path.
+            old_string: Exact string to search for.
+            new_string: Replacement string.
+            replace_all: If ``True``, replaces all occurrences.
 
         Returns:
-            :class:`EditResult` avec ``files_update=None`` (persistence externe).
+            :class:`EditResult` with ``files_update=None`` (external persistence).
         """
         read_resp = self._request("file_read", path=file_path)
         if not read_resp.get("ok"):
@@ -246,14 +245,14 @@ class SouvenirBackend(BackendProtocol):
         return EditResult(path=file_path, occurrences=occurrences, files_update=None)
 
     def ls_info(self, path: str) -> list[FileInfo]:
-        """Liste les fichiers mémoire sous un répertoire virtuel.
+        """List memory files under a virtual directory.
 
         Args:
-            path: Chemin virtuel du répertoire (ex: ``/memories/``).
+            path: Virtual directory path (e.g. ``/memories/``).
 
         Returns:
-            Liste de :class:`FileInfo` contenant ``path``, ``size`` et
-            ``modified_at`` pour chaque fichier.
+            List of :class:`FileInfo` containing ``path``, ``size`` and
+            ``modified_at`` for each file.
         """
         prefix = path if path.endswith("/") else path + "/"
         resp = self._request("file_list", path=prefix)
@@ -271,16 +270,16 @@ class SouvenirBackend(BackendProtocol):
         ]
 
     def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
-        """Trouve les fichiers mémoire correspondant à un motif glob.
+        """Find memory files matching a glob pattern.
 
-        Liste tous les fichiers sous ``path`` puis filtre par ``pattern``.
+        Lists all files under ``path`` then filters by ``pattern``.
 
         Args:
-            pattern: Motif glob (ex: ``*.md``, ``**/*.txt``).
-            path: Répertoire de base pour la recherche.
+            pattern: Glob pattern (e.g. ``*.md``, ``**/*.txt``).
+            path: Base directory for the search.
 
         Returns:
-            Liste de :class:`FileInfo` des fichiers correspondants.
+            List of :class:`FileInfo` for matching files.
         """
         all_files = self.ls_info(path)
         return [f for f in all_files if fnmatch.fnmatch(f["path"], pattern)]
@@ -291,17 +290,17 @@ class SouvenirBackend(BackendProtocol):
         path: str | None = None,
         glob: str | None = None,
     ) -> list[GrepMatch] | str:
-        """Recherche une chaîne littérale dans les fichiers mémoire.
+        """Search for a literal string in memory files.
 
-        Lit chaque fichier depuis SOUVENIR et filtre ligne par ligne.
+        Reads each file from Souvenir and filters line by line.
 
         Args:
-            pattern: Chaîne littérale à rechercher (pas une regex).
-            path: Répertoire virtuel de recherche (défaut: ``/memories/``).
-            glob: Motif glob pour filtrer les fichiers à inspecter.
+            pattern: Literal string to search for (not a regex).
+            path: Virtual search directory (default: ``/memories/``).
+            glob: Glob pattern to filter which files to inspect.
 
         Returns:
-            Liste de :class:`GrepMatch` ou message d'erreur string.
+            List of :class:`GrepMatch` or an error message string.
         """
         search_path = path or "/memories/"
         candidates = self.ls_info(search_path)
@@ -320,13 +319,13 @@ class SouvenirBackend(BackendProtocol):
         return matches
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        """Écrit plusieurs fichiers mémoire (contenu bytes décodé en UTF-8).
+        """Write multiple memory files (bytes content decoded as UTF-8).
 
         Args:
-            files: Liste de tuples ``(path, content_bytes)``.
+            files: List of ``(path, content_bytes)`` tuples.
 
         Returns:
-            Liste de :class:`FileUploadResponse`, une par fichier.
+            List of :class:`FileUploadResponse`, one per file.
         """
         results: list[FileUploadResponse] = []
         for fpath, content_bytes in files:
@@ -343,13 +342,13 @@ class SouvenirBackend(BackendProtocol):
         return results
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Lit plusieurs fichiers mémoire.
+        """Read multiple memory files.
 
         Args:
-            paths: Liste de chemins virtuels à lire.
+            paths: List of virtual paths to read.
 
         Returns:
-            Liste de :class:`FileDownloadResponse`, une par fichier.
+            List of :class:`FileDownloadResponse`, one per file.
         """
         results: list[FileDownloadResponse] = []
         for fpath in paths:

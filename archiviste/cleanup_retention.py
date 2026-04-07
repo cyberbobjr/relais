@@ -9,12 +9,12 @@ logger = logging.getLogger("archiviste.cleanup_retention")
 
 @dataclass
 class RetentionConfig:
-    """Politique de rétention des fichiers archivés.
+    """Retention policy for archived files.
 
     Attributes:
-        jsonl_days: Rétention des fichiers JSONL en jours.
-        sqlite_days: Rétention des bases SQLite en jours.
-        audit_days: Rétention des logs d'audit (``None`` = conservation infinie).
+        jsonl_days: Retention period for JSONL files in days.
+        sqlite_days: Retention period for SQLite databases in days.
+        audit_days: Retention period for audit logs (``None`` = keep forever).
     """
 
     jsonl_days: int = 90
@@ -23,11 +23,11 @@ class RetentionConfig:
 
 
 class CleanupManager:
-    """Gère la rétention des logs archivés dans un répertoire d'archive.
+    """Manage retention of archived logs in an archive directory.
 
-    Les fichiers JSONL plus anciens que ``RetentionConfig.jsonl_days`` sont
-    supprimés lors de l'appel à ``cleanup_jsonl()``. La méthode ``run_daily()``
-    orchestre l'ensemble des tâches de nettoyage à appeler une fois par jour.
+    JSONL files older than ``RetentionConfig.jsonl_days`` are deleted when
+    ``cleanup_jsonl()`` is called. The ``run_daily()`` method orchestrates all
+    cleanup tasks and should be called once per day.
     """
 
     def __init__(
@@ -35,25 +35,23 @@ class CleanupManager:
         archive_dir: Path,
         config: RetentionConfig | None = None,
     ) -> None:
-        """Initialise le gestionnaire de rétention.
+        """Initialise the retention manager.
 
         Args:
-            archive_dir: Répertoire racine contenant les fichiers archivés.
-            config: Politique de rétention. Utilise les valeurs par défaut si
-                ``None``.
+            archive_dir: Root directory containing the archived files.
+            config: Retention policy. Uses default values if ``None``.
         """
         self._archive_dir = archive_dir
         self._config = config or RetentionConfig()
 
     async def cleanup_jsonl(self) -> int:
-        """Supprime les fichiers JSONL plus vieux que ``jsonl_days``.
+        """Delete JSONL files older than ``jsonl_days``.
 
-        Parcourt récursivement ``archive_dir`` et supprime tout fichier
-        ``*.jsonl`` dont la date de dernière modification dépasse le seuil de
-        rétention configuré.
+        Recursively walks ``archive_dir`` and deletes any ``*.jsonl`` file
+        whose last modification time exceeds the configured retention threshold.
 
         Returns:
-            Nombre de fichiers supprimés.
+            Number of files deleted.
         """
         threshold = time.time() - self._config.jsonl_days * 86400
         deleted = 0
@@ -68,14 +66,14 @@ class CleanupManager:
         return deleted
 
     async def get_stats(self) -> dict:
-        """Retourne les statistiques du répertoire d'archive.
+        """Return statistics for the archive directory.
 
-        Collecte le nombre de fichiers JSONL, la taille totale et la date du
-        fichier le plus ancien présent dans ``archive_dir``.
+        Collects the number of JSONL files, total size, and modification time of
+        the oldest file present in ``archive_dir``.
 
         Returns:
-            Dict avec les clés ``file_count`` (int), ``total_bytes`` (int),
-            ``oldest_mtime`` (float | None) et ``archive_dir`` (str).
+            Dict with keys ``file_count`` (int), ``total_bytes`` (int),
+            ``oldest_mtime`` (float | None) and ``archive_dir`` (str).
         """
         jsonl_files = list(self._archive_dir.rglob("*.jsonl"))
         if not jsonl_files:
@@ -106,10 +104,9 @@ class CleanupManager:
         }
 
     async def run_daily(self) -> None:
-        """Tâche de nettoyage complète à appeler une fois par jour.
+        """Complete cleanup task to be called once per day.
 
-        Exécute ``cleanup_jsonl()`` et journalise les statistiques avant et
-        après le nettoyage.
+        Runs ``cleanup_jsonl()`` and logs statistics before and after cleanup.
 
         Returns:
             None

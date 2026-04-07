@@ -1,8 +1,8 @@
-"""Stockage async de fichiers mémoire dans SQLite pour le backend SouvenirBackend.
+"""Async memory file storage in SQLite for the SouvenirBackend.
 
-Ce module expose :class:`FileStore`, analogue à :class:`LongTermStore` mais
-dédié à la table ``memory_files``. Il utilise SQLModel + aiosqlite et partage
-le même fichier ``memory.db`` que ``LongTermStore``.
+This module exposes :class:`FileStore`, analogous to :class:`LongTermStore` but
+dedicated to the ``memory_files`` table. It uses SQLModel + aiosqlite and shares
+the same ``memory.db`` file as ``LongTermStore``.
 """
 
 import logging
@@ -21,17 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 class FileStore:
-    """Stockage de fichiers mémoire dans SQLite (table ``memory_files``).
+    """Memory file storage in SQLite (table ``memory_files``).
 
-    Partage le même fichier ``memory.db`` que ``LongTermStore``. Toutes les
-    opérations I/O sont non-bloquantes grâce à ``aiosqlite``.
+    Shares the same ``memory.db`` file as ``LongTermStore``. All I/O operations
+    are non-blocking thanks to ``aiosqlite``.
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
-        """Initialise le store et crée l'engine async.
+        """Initialise the store and create the async engine.
 
         Args:
-            db_path: Chemin vers le fichier SQLite. Par défaut
+            db_path: Path to the SQLite file. Defaults to
                 ``~/.relais/storage/memory.db``.
         """
         self._db_path: Path = db_path or (resolve_storage_dir() / "memory.db")
@@ -43,9 +43,9 @@ class FileStore:
         )
 
     async def _create_tables(self) -> None:
-        """Crée toutes les tables déclarées dans SQLModel.metadata.
+        """Create all tables declared in SQLModel.metadata.
 
-        Réservé aux tests et à l'initialisation hors-Alembic.
+        Reserved for tests and non-Alembic initialisation.
 
         Returns:
             None
@@ -60,17 +60,17 @@ class FileStore:
         content: str,
         overwrite: bool = False,
     ) -> str | None:
-        """Écrit ou crée un fichier mémoire.
+        """Write or create a memory file.
 
         Args:
-            user_id: Identifiant unique de l'utilisateur propriétaire.
-            path: Chemin virtuel du fichier (ex: ``/memories/notes.md``).
-            content: Contenu textuel du fichier.
-            overwrite: Si ``True``, remplace un fichier existant.
-                Si ``False`` (défaut), retourne une erreur si le fichier existe.
+            user_id: Unique identifier of the owning user.
+            path: Virtual file path (e.g. ``/memories/notes.md``).
+            content: Text content of the file.
+            overwrite: If ``True``, replaces an existing file.
+                If ``False`` (default), returns an error if the file already exists.
 
         Returns:
-            ``None`` en cas de succès, ou un message d'erreur string en cas d'échec.
+            ``None`` on success, or an error message string on failure.
         """
         now = time.time()
         if not overwrite:
@@ -105,15 +105,15 @@ class FileStore:
         return None
 
     async def read_file(self, user_id: str, path: str) -> tuple[str | None, str | None]:
-        """Lit le contenu d'un fichier mémoire.
+        """Read the content of a memory file.
 
         Args:
-            user_id: Identifiant unique de l'utilisateur propriétaire.
-            path: Chemin virtuel du fichier.
+            user_id: Unique identifier of the owning user.
+            path: Virtual file path.
 
         Returns:
-            Tuple ``(content, error)`` — ``error`` est ``None`` en cas de
-            succès, ``content`` est ``None`` en cas d'erreur.
+            Tuple ``(content, error)`` — ``error`` is ``None`` on success,
+            ``content`` is ``None`` on error.
         """
         stmt = select(MemoryFile).where(
             MemoryFile.user_id == user_id, MemoryFile.path == path
@@ -126,16 +126,16 @@ class FileStore:
         return row.content, None
 
     async def list_files(self, user_id: str, path_prefix: str = "/memories/") -> list[dict]:
-        """Liste les fichiers mémoire d'un utilisateur sous un préfixe de chemin.
+        """List memory files for a user under a path prefix.
 
         Args:
-            user_id: Identifiant unique de l'utilisateur propriétaire.
-            path_prefix: Préfixe de chemin pour filtrer les résultats.
-                Défaut : ``/memories/``.
+            user_id: Unique identifier of the owning user.
+            path_prefix: Path prefix to filter results.
+                Default: ``/memories/``.
 
         Returns:
-            Liste de dicts ``{"path": str, "size": int, "modified_at": str}``
-            triés par ``path`` ascendant.
+            List of dicts ``{"path": str, "size": int, "modified_at": str}``
+            sorted by ``path`` ascending.
         """
         stmt = (
             select(MemoryFile)
@@ -158,7 +158,7 @@ class FileStore:
         ]
 
     async def close(self) -> None:
-        """Libère les ressources de l'engine async.
+        """Release async engine resources.
 
         Returns:
             None
@@ -168,13 +168,13 @@ class FileStore:
 
 
 def _epoch_to_iso(epoch: float) -> str:
-    """Convertit un timestamp epoch en chaîne ISO 8601 UTC.
+    """Convert a Unix epoch timestamp to an ISO 8601 UTC string.
 
     Args:
-        epoch: Timestamp en secondes depuis l'epoch Unix.
+        epoch: Timestamp in seconds since the Unix epoch.
 
     Returns:
-        Chaîne ISO 8601, ex: ``"2026-04-03T12:00:00Z"``.
+        ISO 8601 string, e.g. ``"2026-04-03T12:00:00Z"``.
     """
     import datetime
 

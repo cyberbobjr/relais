@@ -1,10 +1,10 @@
-"""SkillAnnotator — lightweight per-turn skill annotation (Solution D).
+"""SkillAnnotator — lightweight per-turn inline skill annotation.
 
 After a turn where a skill was used and produced tool errors, the annotator
 calls a fast LLM to generate a concise inline annotation block and appends it
 to the SKILL.md file under a ``## Lessons Learned`` section.
 
-This is complementary to Forgeron's full statistical analysis (Solution B):
+This is complementary to Forgeron's statistical trace analysis pipeline:
   - Annotations fire immediately, on every error-laden turn (low latency).
   - Forgeron fires only after statistical thresholds are met (high precision).
 

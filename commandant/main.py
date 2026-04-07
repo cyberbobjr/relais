@@ -12,11 +12,11 @@ logger = logging.getLogger("commandant")
 
 
 class Commandant:
-    """Brique Le Commandant — interprète les commandes globales hors-LLM.
+    """Commandant brick — interprets global out-of-LLM commands.
 
-    Consomme relais:messages:incoming en parallèle avec Le Portail via
-    son propre consumer group (commandant_group). Traite les commandes
-    connues et ACK tous les messages (commandes ou non).
+    Consumes relais:messages:incoming in parallel with Portail via its own
+    consumer group (commandant_group). Processes known commands and ACKs
+    all messages (commands or otherwise).
     """
 
     def __init__(self) -> None:
@@ -30,11 +30,11 @@ class Commandant:
         redis_conn: Any,
         shutdown: GracefulShutdown | None = None,
     ) -> None:
-        """Boucle principale de consommation.
+        """Main consumption loop.
 
         Args:
-            redis_conn: Connexion Redis async active.
-            shutdown: Instance GracefulShutdown. Si None, une nouvelle est créée.
+            redis_conn: Active async Redis connection.
+            shutdown: GracefulShutdown instance. If None, a new one is created.
         """
         if shutdown is None:
             shutdown = GracefulShutdown()
@@ -98,9 +98,9 @@ class Commandant:
                 await asyncio.sleep(1)
 
     async def start(self) -> None:
-        """Point d'entrée de la brique Commandant.
+        """Entry point for the Commandant brick.
 
-        Installe les handlers de signal SIGTERM/SIGINT et démarre la boucle.
+        Installs SIGTERM/SIGINT signal handlers and starts the consumption loop.
         """
         shutdown = GracefulShutdown()
         shutdown.install_signal_handlers()

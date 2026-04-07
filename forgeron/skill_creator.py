@@ -1,4 +1,4 @@
-"""SkillCreator — génère un nouveau SKILL.md depuis des sessions récurrentes.
+"""SkillCreator — generates a new SKILL.md from recurring sessions.
 
 Uses the 'precise' LLM profile to produce a high-quality SKILL.md that
 describes the task, lists required tools, and provides step-by-step
@@ -10,10 +10,28 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
-from common.profile_loader import ProfileConfig
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
+
+from common.profile_loader import ProfileConfig, build_chat_model
 
 logger = logging.getLogger(__name__)
+
+
+class SkillContentLLMResponse(BaseModel):
+    """Structured output schema for the skill creation LLM call."""
+
+    skill_content: str = Field(
+        description="Full SKILL.md content including YAML frontmatter and body"
+    )
+    description: str = Field(
+        description=(
+            "One-line description of what the skill does and when to use it "
+            "(max 1024 chars, used for skill discovery)"
+        )
+    )
 
 
 @dataclass
@@ -44,31 +62,39 @@ class SkillCreator:
         skills_dir: Base directory where skill subdirectories are created.
     """
 
-    _SYSTEM_PROMPT = """You are an expert at writing reusable AI agent skill documents.
-A SKILL.md file describes a recurring task type and tells an AI agent exactly how to perform it efficiently.
+    _SYSTEM_PROMPT = """\
+You are an expert at writing reusable AI agent skill documents (SKILL.md format).
 
-Structure your SKILL.md as:
-# {Skill Name}
+## Mandatory SKILL.md format
 
-## Description
-One sentence describing what this skill does.
+### Frontmatter (YAML between triple dashes)
 
-## When to use
-Bullet list of triggers / user request patterns.
+  name:          Required. 1-64 chars. Lowercase letters, digits, hyphens only.
+                 No leading/trailing/consecutive hyphens. Must match directory name.
+  description:   Required. 1-1024 chars. Describe WHAT the skill does AND when to
+                 use it. Include specific keywords for agent discovery.
+                 Good: "Extracts text from PDFs, fills forms, merges files.
+                        Use when the user mentions PDFs, forms, or document extraction."
+                 Poor: "Helps with PDFs."
+  license:       Optional.
+  compatibility: Optional (max 500 chars). Only if env-specific requirements exist.
+  metadata:      Optional. Key-value map (author, version…).
+  allowed-tools: Optional. Space-delimited list of pre-approved tools.
 
-## Required tools
-List of tools needed (e.g. bash, read_file, send_email).
+### Body sections (recommended)
 
-## Step-by-step instructions
-Numbered steps the agent should follow to complete the task without errors.
+1. Step-by-step instructions (numbered, imperative)
+2. Examples of inputs and outputs
+3. Common edge cases / mistakes to avoid
 
-## Common mistakes to avoid
-Bullet list of pitfalls observed in past executions.
+Keep SKILL.md under 500 lines. Write for agents, not humans — concise and imperative.
+Move detailed reference material to a references/ subdirectory if needed.
 
-## Example
-A brief example of a successful execution.
+## Your task
 
-Write complete, actionable instructions. Be specific. Avoid vague guidance."""
+Given the user request examples provided, generate a complete SKILL.md for the
+identified recurring task. Write complete, actionable instructions. Be specific.
+Avoid vague guidance."""
 
     def __init__(self, profile: ProfileConfig, skills_dir: Path) -> None:
         self._profile = profile
@@ -110,14 +136,13 @@ Write complete, actionable instructions. Be specific. Avoid vague guidance."""
         )
 
         try:
-            from common.profile_loader import build_chat_model  # noqa: PLC0415
             model = build_chat_model(self._profile)
-            from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
-            response = await model.ainvoke([
+            structured_model = model.with_structured_output(SkillContentLLMResponse)
+            result = cast(SkillContentLLMResponse, await structured_model.ainvoke([
                 SystemMessage(content=self._SYSTEM_PROMPT),
                 HumanMessage(content=user_prompt),
-            ])
-            skill_content = response.content.strip()
+            ]))
+            skill_content = result.skill_content.strip()
         except Exception as exc:  # noqa: BLE001
             logger.error("SkillCreator LLM call failed for '%s': %s", intent_label, exc)
             return None
@@ -125,10 +150,6 @@ Write complete, actionable instructions. Be specific. Avoid vague guidance."""
         if len(skill_content) < 100:
             logger.warning("SkillCreator: generated content too short for '%s'", intent_label)
             return None
-
-        description = (
-            self._extract_description(skill_content) or f"Auto-generated skill for: {intent_label}"
-        )
 
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path.write_text(skill_content, encoding="utf-8")
@@ -138,26 +159,5 @@ Write complete, actionable instructions. Be specific. Avoid vague guidance."""
             skill_name=skill_name,
             skill_path=skill_path,
             skill_content=skill_content,
-            description=description,
+            description=result.description,
         )
-
-    @staticmethod
-    def _extract_description(content: str) -> str | None:
-        """Extract the first non-empty line after '## Description'.
-
-        Args:
-            content: Full SKILL.md content string.
-
-        Returns:
-            The description line, or None if the section is missing or empty.
-        """
-        in_section = False
-        for line in content.splitlines():
-            if line.strip().lower().startswith("## description"):
-                in_section = True
-                continue
-            if in_section and line.strip():
-                if line.startswith("#"):
-                    break
-                return line.strip()
-        return None

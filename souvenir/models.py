@@ -8,11 +8,11 @@ from sqlmodel import Field, SQLModel
 
 
 class MemoryFile(SQLModel, table=True):
-    """Fichier de mémoire long terme géré par le backend SouvenirBackend.
+    """Long-term memory file managed by the SouvenirBackend.
 
-    Chaque fichier est identifié par le couple ``(user_id, path)`` qui est
-    contraint à être unique — un upsert sur ce couple met à jour le contenu
-    existant plutôt que d'insérer un doublon.
+    Each file is identified by the pair ``(user_id, path)``, which is
+    constrained to be unique — an upsert on this pair updates the existing
+    content rather than inserting a duplicate.
     """
 
     __tablename__ = "memory_files"
@@ -27,15 +27,15 @@ class MemoryFile(SQLModel, table=True):
 
 
 class ArchivedMessage(SQLModel, table=True):
-    """Un tour agent complet archivé depuis le stream relais:messages:outgoing.
+    """A complete agent turn archived from the relais:messages:outgoing stream.
 
-    Un seul enregistrement par tour, identifié de manière unique par
-    ``correlation_id``.  Le champ ``messages_raw`` contient le blob JSON de
-    l'intégralité de la liste de messages LangChain du tour (serialisée via
+    One record per turn, uniquely identified by ``correlation_id``. The
+    ``messages_raw`` field contains the JSON blob of the full LangChain message
+    list for the turn (serialised via
     ``atelier.message_serializer.serialize_messages``).
 
-    Permet la reconstruction de l'historique d'une session depuis SQLite
-    en cas de cache Redis manquant.
+    Enables session history reconstruction from SQLite when the Redis cache is
+    missing.
     """
 
     __tablename__ = "archived_messages"

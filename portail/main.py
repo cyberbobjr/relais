@@ -95,11 +95,11 @@ logger = logging.getLogger("portail")
 
 
 class Portail(BrickBase):
-    """La brique Le Portail du système RELAIS.
+    """Portail brick for the RELAIS system.
 
     Responsible for consuming incoming messages from external relays, enriching
     envelopes with a single ``user_record`` dict (resolved from portail.yaml),
-    and forwarding them to La Sentinelle for security validation.
+    and forwarding them to Sentinelle for security validation.
 
     The ``user_record`` dict in ``envelope.context[CTX_PORTAIL]`` is the sole
     carrier of user identity and role data for all downstream bricks.
@@ -109,7 +109,7 @@ class Portail(BrickBase):
     """
 
     def __init__(self) -> None:
-        """Initialise Le Portail with Redis stream and group configurations."""
+        """Initialise Portail with Redis stream and group configurations."""
         super().__init__("portail")
         self.stream_in: str = STREAM_INCOMING
         self.stream_out: str = STREAM_SECURITY

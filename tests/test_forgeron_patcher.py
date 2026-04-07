@@ -1,4 +1,4 @@
-"""Tests for SkillPatcher — atomic write and rollback (Étape 3)."""
+"""Tests for SkillPatcher — atomic write and rollback (Step 3)."""
 
 from __future__ import annotations
 

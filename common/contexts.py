@@ -86,14 +86,14 @@ class ForgeronCtx(TypedDict, total=False):
     """Context stamped by Forgeron on skill lifecycle event envelopes.
 
     Published on ``relais:events:system`` when a patch is applied, rolled back,
-    or when a new skill is auto-created from recurring sessions (Solution D).
+    or when a new skill is auto-created from recurring sessions (auto-creation pipeline).
     """
 
     skill_name: str       # Skill directory name (e.g. "mail-agent")
     patch_id: str         # UUID of the SkillPatch record
     pre_error_rate: float # Error rate that triggered the patch
     diff_preview: str     # First 500 chars of the unified diff
-    # Champs pour la création automatique de skills (Solution D)
+    # Fields for automatic skill creation (auto-creation pipeline)
     skill_created: bool         # True when this event is for a new skill (vs patch)
     skill_path: str             # Absolute path to the created SKILL.md
     intent_label: str           # Intent label that triggered creation (e.g. "send_email")

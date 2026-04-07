@@ -22,7 +22,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Crée la table ``archived_messages`` avec le schéma messages_raw.
+    """Create the ``archived_messages`` table with the messages_raw schema.
 
     Returns:
         None
@@ -52,7 +52,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Supprime la table ``archived_messages``.
+    """Drop the ``archived_messages`` table.
 
     Returns:
         None

@@ -269,7 +269,7 @@ while True:
 Carries memory action requests. Two independent consumer groups read this stream:
 
 - **`souvenir_group`** — Souvenir brick persists turns and handles memory actions (archive, clear, file_*)
-- **`forgeron_archive_group`** — Forgeron brick reads `archive` actions only, extracts intent labels via IntentLabeler (Haiku LLM), and triggers auto-creation of SKILL.md files when a pattern recurs (Solution D)
+- **`forgeron_archive_group`** — Forgeron brick reads `archive` actions only, extracts intent labels via IntentLabeler (Haiku LLM), and triggers auto-creation of SKILL.md files when a pattern recurs (auto-creation pipeline)
 
 Three producers:
 - **Atelier** (`atelier/main.py`) — `archive` after each completed agent turn (fire-and-forget, no response expected)
@@ -360,9 +360,9 @@ XADD relais:events:system * payload <Envelope JSON>
 
 | `action` | Description |
 |----------|-------------|
-| `skill_patch_applied` | A new SKILL.md has been atomically applied for a skill (Solution B) |
-| `skill_patch_rolled_back` | A previously applied patch has been reverted due to regression (Solution B) |
-| `skill.created` | A new SKILL.md has been auto-generated from recurring session patterns (Solution D) |
+| `skill_patch_applied` | A new SKILL.md has been atomically applied for a skill (trace analysis pipeline) |
+| `skill_patch_rolled_back` | A previously applied patch has been reverted due to regression (trace analysis pipeline) |
+| `skill.created` | A new SKILL.md has been auto-generated from recurring session patterns (auto-creation pipeline) |
 
 **Context keys set by Forgeron (in `context.forgeron` / `CTX_FORGERON`)**:
 

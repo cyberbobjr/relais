@@ -42,7 +42,7 @@ def _create_jsonl(directory: Path, name: str, age_days: float) -> Path:
 
 @pytest.mark.asyncio
 async def test_cleanup_jsonl_deletes_old_files(manager: CleanupManager, archive_dir: Path) -> None:
-    """cleanup_jsonl() doit supprimer les fichiers JSONL plus vieux que jsonl_days."""
+    """cleanup_jsonl() must delete JSONL files older than jsonl_days."""
     old_file = _create_jsonl(archive_dir, "old.jsonl", age_days=60)
 
     deleted = await manager.cleanup_jsonl()
@@ -53,7 +53,7 @@ async def test_cleanup_jsonl_deletes_old_files(manager: CleanupManager, archive_
 
 @pytest.mark.asyncio
 async def test_cleanup_jsonl_keeps_recent_files(manager: CleanupManager, archive_dir: Path) -> None:
-    """cleanup_jsonl() doit conserver les fichiers récents."""
+    """cleanup_jsonl() must keep recent files."""
     recent_file = _create_jsonl(archive_dir, "recent.jsonl", age_days=5)
 
     deleted = await manager.cleanup_jsonl()
@@ -66,7 +66,7 @@ async def test_cleanup_jsonl_keeps_recent_files(manager: CleanupManager, archive
 async def test_cleanup_jsonl_returns_correct_count(
     manager: CleanupManager, archive_dir: Path
 ) -> None:
-    """cleanup_jsonl() doit retourner le nombre exact de fichiers supprimés."""
+    """cleanup_jsonl() must return the exact number of deleted files."""
     _create_jsonl(archive_dir, "old1.jsonl", age_days=90)
     _create_jsonl(archive_dir, "old2.jsonl", age_days=45)
     _create_jsonl(archive_dir, "recent.jsonl", age_days=10)
@@ -80,7 +80,7 @@ async def test_cleanup_jsonl_returns_correct_count(
 async def test_get_stats_returns_correct_nb_files_and_total_size(
     manager: CleanupManager, archive_dir: Path
 ) -> None:
-    """get_stats() doit retourner le bon nb_files (file_count) et total_bytes."""
+    """get_stats() must return the correct file_count and total_bytes."""
     content = '{"event": "a"}\n'
     f1 = archive_dir / "a.jsonl"
     f2 = archive_dir / "b.jsonl"
@@ -96,7 +96,7 @@ async def test_get_stats_returns_correct_nb_files_and_total_size(
 
 @pytest.mark.asyncio
 async def test_get_stats_empty_directory(manager: CleanupManager) -> None:
-    """get_stats() doit retourner file_count=0 et total_bytes=0 si le dossier est vide."""
+    """get_stats() must return file_count=0 and total_bytes=0 when the directory is empty."""
     stats = await manager.get_stats()
 
     assert stats["file_count"] == 0
@@ -109,7 +109,7 @@ async def test_get_stats_empty_directory(manager: CleanupManager) -> None:
 async def test_run_daily_deletes_old_files_and_returns_none(
     manager: CleanupManager, archive_dir: Path
 ) -> None:
-    """run_daily() doit supprimer les fichiers anciens et retourner None."""
+    """run_daily() must delete stale files and return None."""
     old_file = _create_jsonl(archive_dir, "stale.jsonl", age_days=60)
     recent_file = _create_jsonl(archive_dir, "fresh.jsonl", age_days=5)
 
@@ -125,7 +125,7 @@ async def test_run_daily_deletes_old_files_and_returns_none(
 async def test_run_daily_on_empty_directory_does_not_raise(
     manager: CleanupManager,
 ) -> None:
-    """run_daily() sur un répertoire vide ne doit pas lever d'exception."""
+    """run_daily() on an empty directory must not raise an exception."""
     result = await manager.run_daily()
     assert result is None
 

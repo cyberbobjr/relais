@@ -59,7 +59,7 @@ class SkillPatch(SQLModel, table=True):
 
 
 class SessionSummary(SQLModel, table=True):
-    """Une session archivée analysée par Forgeron pour détecter des patterns.
+    """An archived session analyzed by Forgeron to detect patterns.
 
     One row per archived turn analyzed by Forgeron's archive consumer.
     ``intent_label`` is extracted by IntentLabeler (Haiku); None means no
@@ -69,17 +69,17 @@ class SessionSummary(SQLModel, table=True):
     __tablename__ = "session_summaries"
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    session_id: str = Field(index=True)       # session_id de l'archive
-    correlation_id: str = Field(index=True)   # correlation_id du tour
-    channel: str                               # canal d'origine ("discord", "telegram", …)
-    sender_id: str                             # sender_id d'origine
-    intent_label: str | None = Field(default=None, index=True)  # None = pas de pattern clair
-    user_content_preview: str = Field(default="")  # premiers 200 chars du message utilisateur
+    session_id: str = Field(index=True)       # session_id of the archive
+    correlation_id: str = Field(index=True)   # correlation_id of the turn
+    channel: str                               # origin channel ("discord", "telegram", …)
+    sender_id: str                             # origin sender_id
+    intent_label: str | None = Field(default=None, index=True)  # None = no clear pattern
+    user_content_preview: str = Field(default="")  # first 200 chars of the user message
     created_at: float = Field(default_factory=time.time)
 
 
 class SkillProposal(SQLModel, table=True):
-    """Agrégat d'intentions récurrentes en attente ou réalisées de création de skill.
+    """Aggregate of recurring intents pending or completed skill creation.
 
     One row per unique intent_label. ``session_count`` is incremented each time
     a new session with this label is archived. When ``session_count`` reaches
@@ -89,12 +89,12 @@ class SkillProposal(SQLModel, table=True):
     __tablename__ = "skill_proposals"
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    intent_label: str = Field(index=True, unique=True)  # clé de regroupement
-    candidate_name: str                                   # nom proposé pour le skill (e.g. "send-email")
-    session_count: int = Field(default=1)                # nb de sessions qui ont ce label
-    representative_session_ids: str = Field(default="[]")  # JSON list[str] des N session_ids repr.
-    draft_content: str | None = Field(default=None)      # SKILL.md généré (None = pas encore créé)
+    intent_label: str = Field(index=True, unique=True)  # grouping key
+    candidate_name: str                                   # proposed skill name (e.g. "send-email")
+    session_count: int = Field(default=1)                # number of sessions with this label
+    representative_session_ids: str = Field(default="[]")  # JSON list[str] of N representative session_ids
+    draft_content: str | None = Field(default=None)      # generated SKILL.md (None = not yet created)
     # pending | created | skipped
     status: str = Field(default="pending")
     created_at: float = Field(default_factory=time.time)
-    created_skill_name: str | None = Field(default=None)  # nom du skill finalement créé
+    created_skill_name: str | None = Field(default=None)  # name of the skill finally created
