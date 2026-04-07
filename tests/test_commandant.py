@@ -2,7 +2,7 @@
 
 Tests for commands (parse_command, CommandResult, CommandSpec, COMMAND_REGISTRY,
 handle_clear, handle_help)
-and Commandant main consumer loop.
+and Commandant handler dispatch.
 """
 import json
 import pytest
@@ -283,35 +283,48 @@ async def test_handle_help_includes_descriptions(mock_redis):
 
 
 # ---------------------------------------------------------------------------
-# Tests commandant/main.py (boucle consumer)
+# Tests commandant/main.py — _handle dispatch (BrickBase handler)
 # ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_commandant_inherits_brick_base():
+    """Commandant must inherit from BrickBase."""
+    from commandant.main import Commandant
+    from common.brick_base import BrickBase
+    assert issubclass(Commandant, BrickBase)
+
+
+@pytest.mark.unit
+def test_commandant_stream_spec():
+    """stream_specs must return a single spec for relais:commands."""
+    from commandant.main import Commandant
+    c = Commandant()
+    specs = c.stream_specs()
+    assert len(specs) == 1
+    assert specs[0].stream == "relais:commands"
+    assert specs[0].group == "commandant_group"
+    assert specs[0].consumer == "commandant_1"
+    assert specs[0].ack_mode == "always"
+
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_commandant_acks_non_command_messages(mock_redis):
-    """Non-command messages → ACK without processing (no xadd to outgoing)."""
+async def test_handle_non_command_returns_true(mock_redis):
+    """Non-command messages → _handle returns True (ACK), no xadd to outgoing."""
     from commandant.main import Commandant
-
-    mock_redis.xreadgroup = AsyncMock(return_value=[
-        (b"relais:messages:incoming", [(b"1-1", {b"payload": json.dumps({
-            "content": "bonjour",
-            "sender_id": "discord:999",
-            "channel": "discord",
-            "session_id": "s1",
-            "correlation_id": "c1",
-            "timestamp": 0.0,
-            "metadata": {},
-            "media_refs": [],
-        }).encode()})])
-    ])
-
     commandant = Commandant()
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
 
-    await commandant._process_stream(mock_redis, shutdown=shutdown)
+    envelope = Envelope(
+        content="bonjour",
+        sender_id="discord:999",
+        channel="discord",
+        session_id="s1",
+        correlation_id="c1",
+    )
 
-    mock_redis.xack.assert_called_once()
+    result = await commandant._handle(envelope, mock_redis)
+    assert result is True
+
     outgoing_calls = [c for c in mock_redis.xadd.call_args_list
                       if "outgoing" in str(c)]
     assert len(outgoing_calls) == 0
@@ -319,30 +332,22 @@ async def test_commandant_acks_non_command_messages(mock_redis):
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_commandant_acks_command_messages(mock_redis):
-    """Command messages → ACK + xadd memory:request (confirmation delegated to Souvenir)."""
+async def test_handle_clear_command_dispatches(mock_redis):
+    """Command /clear → _handle dispatches to handler and returns True."""
     from commandant.main import Commandant
-
-    mock_redis.xreadgroup = AsyncMock(return_value=[
-        (b"relais:messages:incoming", [(b"1-1", {b"payload": json.dumps({
-            "content": "/clear",
-            "sender_id": "discord:999",
-            "channel": "discord",
-            "session_id": "s1",
-            "correlation_id": "c1",
-            "timestamp": 0.0,
-            "metadata": {},
-            "media_refs": [],
-        }).encode()})])
-    ])
-
     commandant = Commandant()
-    shutdown = MagicMock()
-    shutdown.is_stopping.side_effect = [False, True]
 
-    await commandant._process_stream(mock_redis, shutdown=shutdown)
+    envelope = Envelope(
+        content="/clear",
+        sender_id="discord:999",
+        channel="discord",
+        session_id="s1",
+        correlation_id="c1",
+    )
 
-    mock_redis.xack.assert_called_once()
+    result = await commandant._handle(envelope, mock_redis)
+    assert result is True
+
     all_xadd_streams = [str(c) for c in mock_redis.xadd.call_args_list]
     assert any("relais:memory:request" in s for s in all_xadd_streams)
     assert not any("relais:messages:outgoing:discord" in s for s in all_xadd_streams)

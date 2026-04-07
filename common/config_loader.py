@@ -109,6 +109,23 @@ def resolve_storage_dir() -> Path:
     return get_relais_home() / "storage"
 
 
+def get_log_level() -> str:
+    """Return the configured log level name from ``config.yaml``.
+
+    Reads ``logging.level`` from the config cascade (user > system > project).
+    Returns ``"INFO"`` on any error (missing file, missing key, empty config).
+
+    Returns:
+        The configured log level name (e.g. ``"DEBUG"``, ``"INFO"``), uppercased.
+    """
+    try:
+        config_path: Path = resolve_config_path("config.yaml")
+        raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
+        return str(raw.get("logging", {}).get("level") or "INFO").upper()
+    except FileNotFoundError:
+        return "INFO"
+
+
 def get_default_llm_profile() -> str:
     """Return the system-wide default LLM profile name.
 

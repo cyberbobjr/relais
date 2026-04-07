@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from common.brick_logger import BrickLogger
+from common.config_loader import get_log_level
 from common.config_reload import safe_reload, watch_and_reload
 from common.envelope import Envelope
 from common.redis_client import RedisClient
@@ -69,7 +70,9 @@ def configure_logging_once() -> None:
     """
     global _logging_configured
     if not _logging_configured:
-        _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+        # Priority: LOG_LEVEL env var > config.yaml logging.level > INFO
+        level_name = os.environ.get("LOG_LEVEL") or get_log_level()
+        _log_level = getattr(logging, level_name.upper(), logging.INFO)
         logging.basicConfig(
             level=_log_level,
             format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",

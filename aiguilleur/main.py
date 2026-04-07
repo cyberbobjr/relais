@@ -72,16 +72,11 @@ aiguilleur.yaml changes are classified into two categories:
 """
 
 import logging
-import os
-import sys
 from pathlib import Path
 
-_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s",
-    stream=sys.stdout,
-)
+from common.brick_base import configure_logging_once
+
+configure_logging_once()
 
 from aiguilleur.core.manager import AiguilleurManager
 
