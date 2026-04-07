@@ -280,8 +280,7 @@ async def test_forgeron_notify_user_publishes_to_outgoing_pending(mock_redis: As
         redis_conn=mock_redis,
     )
 
-    # Two xadd calls: STREAM_OUTGOING_PENDING + STREAM_LOGS
-    assert mock_redis.xadd.call_count == 2
+    # xadd on STREAM_OUTGOING_PENDING (STREAM_LOGS now via BrickLogger)
     outgoing_calls = [c for c in mock_redis.xadd.call_args_list if c[0][0] == STREAM_OUTGOING_PENDING]
     assert len(outgoing_calls) == 1
     call_args = outgoing_calls[0]

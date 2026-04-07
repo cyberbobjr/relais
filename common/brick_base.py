@@ -234,6 +234,23 @@ class BrickBase(abc.ABC):
             candidate: The value returned by ``_build_config_candidate()``.
         """
 
+    @property
+    def log(self) -> BrickLogger:
+        """Structured logger writing to both Python logging and ``relais:logs``.
+
+        Available after ``start()`` has initialised the Redis connection.
+        Before ``start()``, returns a fallback logger that writes to Python
+        logging only (no Redis).
+
+        Returns:
+            The ``BrickLogger`` instance for this brick.
+        """
+        if self._brick_logger is None:
+            # Fallback for test/pre-start usage: create a no-op Redis logger
+            # that only writes to Python logging (redis_getter returns None).
+            self._brick_logger = BrickLogger(self._brick_name, lambda: None)
+        return self._brick_logger
+
     async def on_startup(self, redis: Any) -> None:
         """Async hook called once before stream loops start.
 

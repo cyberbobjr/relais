@@ -1,49 +1,31 @@
 forgeron:
-  # Minimum number of traces to accumulate before triggering an LLM analysis.
-  # Prevents over-fitting to a single fluke execution.
-  min_traces_before_analysis: 5
-
-  # Minimum tool error rate (fraction) to trigger analysis.
-  # e.g. 0.3 means at least 30% of tool calls must have errored.
-  min_error_rate: 0.3
-
-  # Minimum interval between two analyses of the same skill (seconds).
-  # Redis TTL key: relais:skill:last_improved:{skill_name}
-  min_improvement_interval_seconds: 3600
-
-  # Auto-rollback threshold: if post-patch error_rate exceeds pre-patch
-  # error_rate by this margin, the patch is automatically rolled back.
-  rollback_error_rate_threshold: 0.2
-
-  # Number of post-patch traces to collect before evaluating rollback.
-  rollback_window_traces: 3
-
-  # LLM profile for batch statistical analysis and skill rewrite.
+  # LLM profile for skill creation and consolidation (precise, heavier model).
   # References a named profile from atelier/profiles.yaml (config cascade).
   llm_profile: "precise"
 
-  # LLM profile for quick inline intent labeling (cheap, high-throughput).
+  # LLM profile for Phase 1 changelog observations and intent labeling (fast, cheap).
   annotation_profile: "fast"
 
-  # Enable inline annotations: fast ## LESSONS LEARNED blocks written by
-  # Atelier directly after a turn with errors. Visible on the next message.
+  # Enable S3 Phase 1: extract observations into per-skill CHANGELOG.md
+  # after turns with errors or after annotation_call_threshold cumulative calls.
   annotation_mode: true
 
-  # Enable patch mode: full statistical batch rewrite by the Forgeron brick.
-  patch_mode: true
-
-  # Minimum tool errors in a turn to trigger an inline annotation.
+  # Minimum tool errors in a turn to trigger a changelog observation.
   annotation_min_tool_errors: 1
 
-  # Cooldown for annotations per skill (seconds).
-  # Redis TTL key: relais:skill:annotated:{skill_name}
+  # Cooldown for changelog observations per skill (seconds).
+  # Redis TTL key: relais:skill:annotation_cooldown:{skill_name}
   annotation_cooldown_seconds: 300
+
+  # Trigger a changelog observation after this many cumulative calls,
+  # even when there are no errors.
+  annotation_call_threshold: 10
 
   # skills_dir: null means resolved from the config cascade
   # (~/.relais/skills/ > /opt/relais/skills/ > ./skills/)
   skills_dir: null
 
-  # --- Création automatique de skills depuis les archives de session ---
+  # --- Automatic skill creation from session archives ---
 
   # Enable automatic skill creation from recurring session patterns.
   # Forgeron consumes relais:memory:request (forgeron_archive_group) to detect
@@ -60,8 +42,20 @@ forgeron:
   # Number of representative sessions passed to SkillCreator LLM.
   max_sessions_for_labeling: 5
 
-  # Notify the user when Forgeron applies a patch to an existing skill.
-  notify_user_on_patch: true
-
   # Notify the user when Forgeron creates a new skill.
   notify_user_on_creation: true
+
+  # --- S3 Phase 2: periodic consolidation ---
+
+  # Consolidate SKILL.md when CHANGELOG.md exceeds this many lines.
+  consolidation_line_threshold: 80
+
+  # Minimum interval between two consolidations for the same skill (seconds, default 7 days).
+  # Redis TTL key: relais:skill:consolidation_cooldown:{skill_name}
+  consolidation_cooldown_seconds: 604800
+
+  # LLM profile for consolidation (heavier model than annotation).
+  consolidation_profile: "precise"
+
+  # Notify the user when a skill is consolidated.
+  notify_user_on_consolidation: true

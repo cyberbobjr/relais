@@ -74,7 +74,6 @@ from common.envelope_actions import (
 from common.profile_loader import ProfileConfig, load_profiles, resolve_profile
 from common.streams import (
     STREAM_EVENTS_SYSTEM,
-    STREAM_LOGS,
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
@@ -126,6 +125,16 @@ class Forgeron(BrickBase):
             self._config.annotation_profile,
             self._config.consolidation_profile,
         )
+
+    async def on_startup(self, redis: Any) -> None:
+        """Create SQLite tables for trace and session stores on first run.
+
+        Args:
+            redis: Active Redis connection (unused here, required by hook).
+        """
+        await self._trace_store._create_tables()
+        await self._session_store._create_tables()
+        logger.info("Forgeron SQLite tables initialised.")
 
     def stream_specs(self) -> list[StreamSpec]:
         """Declare the streams this brick consumes.
@@ -201,22 +210,12 @@ class Forgeron(BrickBase):
             )
             await self._trace_store.add_trace(trace)
 
-            logger.info(
-                "Stored trace for skill '%s' (calls=%d errors=%d)",
-                skill_name,
-                tool_call_count,
-                tool_error_count,
+            await self.log.info(
+                f"Trace stored for skill '{skill_name}' "
+                f"(calls={tool_call_count} errors={tool_error_count})",
+                correlation_id=correlation_id,
+                sender_id=envelope.sender_id,
             )
-            await redis_conn.xadd(STREAM_LOGS, {
-                "level": "INFO",
-                "brick": "forgeron",
-                "correlation_id": envelope.correlation_id,
-                "sender_id": envelope.sender_id,
-                "message": (
-                    f"Trace stored for skill '{skill_name}' "
-                    f"(calls={tool_call_count} errors={tool_error_count})"
-                ),
-            })
 
             # Write observations to CHANGELOG.md on errors or after N calls.
             call_count = self._skill_call_counts.get(skill_name, 0) + 1
@@ -274,7 +273,11 @@ class Forgeron(BrickBase):
             skill_name, redis_conn, self._config
         )
         if consolidated:
-            logger.info("Consolidation completed for skill '%s'.", skill_name)
+            await self.log.info(
+                f"Consolidation completed for skill '{skill_name}'",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
+            )
             if self._config.notify_user_on_consolidation:
                 await self._notify_user(
                     channel=envelope.channel,
@@ -321,6 +324,8 @@ class Forgeron(BrickBase):
             envelope: Archive envelope from ``relais:memory:request``.
             redis_conn: Active Redis connection.
         """
+        corr = envelope.correlation_id
+
         if envelope.action != ACTION_MEMORY_ARCHIVE:
             logger.debug(
                 "Skipping non-archive action '%s' on memory:request.", envelope.action
@@ -338,6 +343,12 @@ class Forgeron(BrickBase):
         original_env = Envelope.from_json(envelope_json)
         channel = original_env.channel
         sender_id = original_env.sender_id
+
+        await self.log.info(
+            f"Archive received from {channel}/{sender_id}",
+            correlation_id=corr,
+            sender_id=sender_id,
+        )
 
         # Deserialize messages_raw (can be str or list depending on serialization)
         if isinstance(messages_raw_raw, str):
@@ -360,12 +371,20 @@ class Forgeron(BrickBase):
         if self._annotation_profile is not None:
             try:
                 from forgeron.intent_labeler import IntentLabeler  # noqa: PLC0415
+
                 labeler = IntentLabeler(profile=self._annotation_profile)
                 intent_label = await labeler.label(messages_raw)
             except ImportError:
-                logger.debug("IntentLabeler not yet available, skipping.")
+                await self.log.warning(
+                    "IntentLabeler not available, skipping.",
+                    correlation_id=corr,
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("IntentLabeler failed: %s", exc)
+                await self.log.warning(
+                    f"IntentLabeler failed: {exc}",
+                    correlation_id=corr,
+                    sender_id=sender_id,
+                )
 
         # Record in SQLite
         await self._session_store.record_session(
@@ -375,6 +394,13 @@ class Forgeron(BrickBase):
             sender_id=sender_id,
             intent_label=intent_label,
             user_content_preview=user_preview,
+        )
+
+        await self.log.info(
+            f"Session recorded (intent={intent_label or 'none'}, "
+            f"preview='{user_preview[:50]}...')",
+            correlation_id=corr,
+            sender_id=sender_id,
         )
 
         if intent_label is None:
@@ -387,6 +413,12 @@ class Forgeron(BrickBase):
             redis_conn=redis_conn,
         )
         if should:
+            await self.log.info(
+                f"Creation threshold reached for intent '{intent_label}' "
+                f"(min={self._config.min_sessions_for_creation})",
+                correlation_id=corr,
+                sender_id=sender_id,
+            )
             await self._trigger_creation(
                 intent_label=intent_label,
                 channel=channel,
@@ -424,19 +456,32 @@ class Forgeron(BrickBase):
         cooldown_key = f"relais:skill:creation_cooldown:{intent_label}"
         await redis_conn.set(cooldown_key, "1", ex=self._config.creation_cooldown_seconds)
 
-        logger.info("Triggering skill creation for intent '%s'", intent_label)
+        await self.log.info(
+            f"Triggering skill creation for intent '{intent_label}'",
+            correlation_id=correlation_id,
+            sender_id=sender_id,
+        )
 
         try:
             from forgeron.skill_creator import SkillCreator  # noqa: PLC0415
         except ImportError as exc:
-            logger.warning("SkillCreator not available: %s", exc)
+            await self.log.warning(
+                f"SkillCreator not available: {exc}",
+                correlation_id=correlation_id,
+            )
             return
 
         if self._config.skills_dir is None:
-            logger.warning("skills_dir is None — cannot create skill.")
+            await self.log.warning(
+                "skills_dir is None — cannot create skill.",
+                correlation_id=correlation_id,
+            )
             return
         if self._llm_profile is None:
-            logger.warning("llm_profile not loaded — cannot create skill.")
+            await self.log.warning(
+                "llm_profile not loaded — cannot create skill.",
+                correlation_id=correlation_id,
+            )
             return
 
         representative = await self._session_store.get_representative_sessions(
@@ -450,7 +495,10 @@ class Forgeron(BrickBase):
         creator = SkillCreator(profile=self._llm_profile, skills_dir=self._config.skills_dir)
         result = await creator.create(intent_label, session_examples)
         if result is None:
-            logger.warning("SkillCreator returned None for intent '%s'", intent_label)
+            await self.log.warning(
+                f"SkillCreator returned None for intent '{intent_label}'",
+                correlation_id=correlation_id,
+            )
             return
 
         await self._session_store.mark_created(intent_label, result.skill_name)
@@ -473,17 +521,12 @@ class Forgeron(BrickBase):
             "contributing_sessions": len(representative),
         })
         await redis_conn.xadd(STREAM_EVENTS_SYSTEM, {"payload": event_env.to_json()})
-        logger.info("Skill '%s' created at %s", result.skill_name, result.skill_path)
-        await redis_conn.xadd(STREAM_LOGS, {
-            "level": "INFO",
-            "brick": "forgeron",
-            "correlation_id": correlation_id,
-            "sender_id": sender_id,
-            "message": (
-                f"Skill '{result.skill_name}' created for intent '{intent_label}' "
-                f"({len(representative)} contributing sessions)"
-            ),
-        })
+        await self.log.info(
+            f"Skill '{result.skill_name}' created for intent '{intent_label}' "
+            f"({len(representative)} contributing sessions)",
+            correlation_id=correlation_id,
+            sender_id=sender_id,
+        )
 
         if self._config.notify_user_on_creation:
             await self._notify_user(
@@ -531,15 +574,10 @@ class Forgeron(BrickBase):
         )
         notif_env.action = ACTION_MESSAGE_OUTGOING_PENDING
         await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": notif_env.to_json()})
-        await redis_conn.xadd(STREAM_LOGS, {
-            "level": "INFO",
-            "brick": "forgeron",
-            "correlation_id": correlation_id,
-            "sender_id": sender_id,
-            "message": f"Notification sent to {channel}/{sender_id}: {message[:60]}",
-        })
-        logger.info(
-            "Notification sent to %s/%s: %s", channel, sender_id, message[:60]
+        await self.log.info(
+            f"Notification sent to {channel}/{sender_id}: {message[:60]}",
+            correlation_id=correlation_id,
+            sender_id=sender_id,
         )
 
 if __name__ == "__main__":

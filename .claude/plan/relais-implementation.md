@@ -350,16 +350,15 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 
 **Taxonomie:** BrickBase long-running — `autostart=true`, `autorestart=true`.
 
-**Deux pipelines :**
-- **Trace analysis pipeline** : consomme `relais:skill:trace` (groupe `forgeron_group`) → `SkillTraceStore` SQLite → `SkillAnalyzer` (LLM précis) → `SkillPatcher` (atomic write) → `SkillValidator` (régression post-patch)
+**Deux mécanismes :**
+- **Changelog + consolidation (S3)** : consomme `relais:skill:trace` (groupe `forgeron_group`) → `SkillTraceStore` SQLite → `ChangelogWriter` (LLM rapide, observations dans CHANGELOG.md) → `SkillConsolidator` (LLM précis, réécrit SKILL.md quand changelog dépasse le seuil)
 - **Auto-creation pipeline** : consomme `relais:memory:request` (groupe `forgeron_archive_group`) → `IntentLabeler` (Fast LLM, snake_case) → `SkillCreator` (LLM précis) quand N sessions partagent le même label
-- **Inline annotation** : `SkillAnnotator.maybe_annotate()` inline dans Atelier (import paresseux) quand `tool_error_count > 0`
 
 **Guard non-archive :** les actions autres que `archive` sur `relais:memory:request` sont ignorées (log DEBUG, return early).
 
-**Produit :** `relais:events:system` (skill_patch_applied / skill_created), `relais:messages:outgoing_pending` (notifications), `relais:logs`
+**Produit :** `relais:events:system` (skill_created), `relais:messages:outgoing_pending` (notifications), `relais:logs`
 
-**Fichiers:** main.py, skill_trace_store.py, skill_patch_store.py, session_store.py, skill_analyzer.py, skill_patcher.py, skill_validator.py, intent_labeler.py, skill_creator.py, skill_annotator.py
+**Fichiers:** main.py, trace_store.py, changelog_writer.py, skill_consolidator.py, session_store.py, intent_labeler.py, skill_creator.py, models.py, config.py
 
 ---
 

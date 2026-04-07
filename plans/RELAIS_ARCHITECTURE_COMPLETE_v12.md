@@ -1383,11 +1383,11 @@ retention:
 
 **Taxonomie :** BrickBase long-running — deux boucles consommateurs Redis ; `autostart=true`, `autorestart=true`.
 
-**Rôle :** Améliore les skills existants par analyse statistique des traces d'exécution (trace analysis pipeline) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (auto-creation pipeline). Publie des notifications utilisateur quand un patch est appliqué ou un nouveau skill créé.
+**Rôle :** Améliore les skills existants via S3 (changelog + consolidation périodique) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (auto-creation pipeline). Publie des notifications utilisateur quand un skill est créé ou consolidé.
 
-**Pipeline trace analysis (patch mode) :**
+**Pipeline changelog + consolidation (S3) :**
 
-Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. Quand un skill dépasse un seuil d'erreurs persistant, `SkillAnalyzer` (LLM précis, structured output) génère une `SkillPatchProposal`. `SkillPatcher` applique le patch atomiquement (`.pending` → snapshot `.bak`). `SkillValidator` monitore la régression post-patch et peut déclencher un rollback.
+Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. Phase 1 : `ChangelogWriter` (LLM rapide, profil `annotation_profile`) extrait 1-3 observations concrètes et les écrit dans un `CHANGELOG.md` séparé — le SKILL.md n'est jamais touché. Déclenché par erreurs d'outils ou par seuil d'appels cumulés (`annotation_call_threshold`). Phase 2 : quand le changelog dépasse `consolidation_line_threshold` lignes (défaut 80), `SkillConsolidator` (LLM précis, profil `consolidation_profile`) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail), et vide le changelog. Cooldown Redis par skill empêche les consolidations trop fréquentes.
 
 **Pipeline auto-création (session archives) :**
 
@@ -1399,11 +1399,9 @@ Consomme `relais:memory:request` via groupe dédié `forgeron_archive_group` (in
 |--------|------|
 | `Forgeron` | BrickBase — deux boucles : `relais:skill:trace` + `relais:memory:request` |
 | `SkillTraceStore` | SQLite — accumule les traces par skill (tool_call_count, tool_error_count) |
-| `SkillPatchStore` | SQLite — patches versionnés (pending / applied / validated / rolled_back) |
+| `ChangelogWriter` | Phase 1 : LLM rapide — écrit observations dans CHANGELOG.md (import paresseux) |
+| `SkillConsolidator` | Phase 2 : LLM précis — réécrit SKILL.md depuis changelog (import paresseux) |
 | `SessionStore` | SQLite — patterns d'intention par session (pipeline auto-création) |
-| `SkillAnalyzer` | LLM analysis → `SkillPatchProposal` (import paresseux) |
-| `SkillPatcher` | écriture atomique avec snapshot `.bak` (import paresseux) |
-| `SkillValidator` | moniteur de régression post-patch (import paresseux) |
 | `IntentLabeler` | Haiku LLM — extrait label snake_case depuis session (import paresseux) |
 | `SkillCreator` | LLM précis — génère SKILL.md depuis exemples (import paresseux) |
 
@@ -1415,16 +1413,19 @@ Consommés :
   relais:memory:request      (consumer group: forgeron_archive_group)
 
 Produits :
-  relais:events:system       — skill_patch_applied / skill_patch_rolled_back / skill_created
+  relais:events:system       — skill_created
   relais:messages:outgoing_pending — notifications utilisateur
   relais:logs                — logs opérationnels
+
+Redis keys (cooldowns) :
+  relais:skill:annotation_cooldown:{skill_name}     — Phase 1 cooldown
+  relais:skill:consolidation_cooldown:{skill_name}  — Phase 2 cooldown
+  relais:skill:creation_cooldown:{intent_label}     — auto-creation cooldown
 
 XACK : ack_mode="always" sur les deux streams (consumer advisory — perte acceptable).
 ```
 
-**Inline annotation (SkillAnnotator inline dans Atelier) :**
-
-Si `tool_error_count > 0` après un tour, `SkillAnnotator.maybe_annotate()` est appelé inline dans Atelier (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé). Cela ajoute une section `LESSONS LEARNED` directement dans le `SKILL.md` concerné sans attendre le pipeline asynchrone de Forgeron.
+**Note :** L'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
 
 ---
 

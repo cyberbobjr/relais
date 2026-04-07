@@ -47,29 +47,22 @@ Atelier._handle_envelope()
     → publie relais:skill:trace
               ↓
          FORGERON (brick dédié)
-         ┌─────────────────────────────────┐
-         │  SkillTraceStore (SQLite)        │
-         │  Accumule traces par skill       │
-         │  Quand N traces + error_rate ≥ X │
-         │       ↓                          │
-         │  SkillAnalyzer (LLM batch)       │
-         │  Compare N traces → diff         │
-         │       ↓                          │
-         │  SkillPatcher (atomic write)     │
-         │  applique patch sur filesystem   │
-         │       ↓                          │
-         │  SkillValidator (post-patch)     │
-         │  compare métriques avant/après   │
-         │  rollback si régression          │
-         └─────────────────────────────────┘
+         ┌──────────────────────────────────────────┐
+         │  SkillTraceStore (SQLite)                 │
+         │  Accumule traces par skill                │
+         │       ↓                                   │
+         │  Phase 1 — ChangelogWriter (LLM fast)     │
+         │  Extrait 1-3 observations → CHANGELOG.md  │
+         │  (SKILL.md intouché)                      │
+         │       ↓  (si changelog > seuil lignes)    │
+         │  Phase 2 — SkillConsolidator (LLM precise)│
+         │  Réécrit SKILL.md en absorbant changelog  │
+         │  Produit CHANGELOG_DIGEST.md (audit)      │
+         │  Vide CHANGELOG.md                        │
+         └──────────────────────────────────────────┘
               ↓
-         relais:events:system
-         (skill_patch_applied | skill_patch_rolled_back)
-
-D (complémentaire) :
-    Atelier écrit annotations LESSONS LEARNED
-    directement dans le skill file après un tour
-    avec erreurs → visible dès le message suivant
+         relais:events:system (skill_created)
+         relais:messages:outgoing_pending (notifications)
 ```
 
 ---
