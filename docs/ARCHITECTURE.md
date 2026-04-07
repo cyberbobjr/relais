@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-06
+**Dernière mise à jour :** 2026-04-07
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -102,7 +102,7 @@ Aiguilleur
 
 ## BrickBase — infrastructure commune
 
-Toutes les briques du pipeline principal (`portail`, `sentinelle`, `atelier`, `souvenir`) héritent de `common.brick_base.BrickBase`. Cette classe abstraite fournit :
+Toutes les briques du pipeline principal (`portail`, `sentinelle`, `atelier`, `souvenir`, `commandant`, `forgeron`) héritent de `common.brick_base.BrickBase`. Cette classe abstraite fournit :
 
 | Mécanisme | Description |
 |-----------|-------------|
@@ -113,6 +113,7 @@ Toutes les briques du pipeline principal (`portail`, `sentinelle`, `atelier`, `s
 | `_config_reload_listener()` | Écoute `relais:config:reload:{brick}` en Pub/Sub |
 | `_create_shutdown()` | Instancie `GracefulShutdown` — les sous-classes surchargent pour la patchabilité des tests |
 | `_extra_lifespan(stack)` | Hook pour entrer des context managers supplémentaires (ex. `AsyncSqliteSaver` dans Atelier) |
+| `configure_logging_once()` | Fonction module-level : configure `logging.basicConfig` une seule fois. Priorité : env `LOG_LEVEL` > `config.yaml` `logging.level` (via `get_log_level()`) > `"INFO"` |
 
 Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son handler `async (envelope, redis) -> bool`.
 
@@ -162,14 +163,14 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
   - certains événements de progression sur `relais:messages:outgoing:{channel}`
   - une action `archive` sur `relais:memory:request` avec la réponse complète et `messages_raw` pour archivage Souvenir
-  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide **et** `tool_call_count > 0`) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`
+  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`. Publié dans deux cas : (a) après un tour réussi quand `tool_call_count > 0`, (b) sur le chemin DLQ (`AgentExecutionError`) avec `tool_error_count = -1` (sentinelle : tour avorté) et `messages_raw = []`
   - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
   - les erreurs finales sur `relais:tasks:failed`
 - **Note** : l'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
 
 ### Commandant
 
-- Consomme `relais:commands`.
+- Hérite de `BrickBase` ; `stream_specs()` déclare un seul flux : `relais:commands` (`commandant_group`, `ack_mode="always"`).
 - `/help` écrit directement sur `relais:messages:outgoing:{channel}`.
 - `/clear` écrit une action `clear` sur `relais:memory:request`.
 
@@ -201,7 +202,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 
 **Phase 1 — Changelog (chaque trigger, LLM fast)** :
 - `ChangelogWriter` (profil `annotation_profile`, LLM rapide) extrait 1-3 observations concrètes et les écrit dans un `CHANGELOG.md` séparé du SKILL.md.
-- Déclenché par erreurs d'outils (`tool_error_count >= annotation_min_tool_errors`) ou par seuil d'appels cumulés (`annotation_call_threshold`).
+- Déclenché par erreurs d'outils (`tool_error_count >= annotation_min_tool_errors`), par seuil d'appels cumulés (`annotation_call_threshold`), ou par tours avortés (`tool_error_count == -1`, sentinelle DLQ).
 - Rate-limité par cooldown Redis `relais:skill:annotation_cooldown:{skill_name}` (TTL `annotation_cooldown_seconds`).
 - Le SKILL.md n'est **jamais touché** en Phase 1.
 

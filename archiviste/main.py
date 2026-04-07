@@ -169,7 +169,7 @@ class Archiviste(BrickBase):
                 await redis_conn.xgroup_create(stream, group_name, mkstream=True)
             except Exception as e:
                 if "BUSYGROUP" not in str(e):
-                    logger.warning(f"Consumer group error for {stream}: {e}")
+                    await self.log.warning(f"Consumer group error for {stream}: {e}")
 
         # Emit the startup log *after* the consumer group exists so this
         # brick's own archiviste_group will receive the message.
@@ -179,7 +179,7 @@ class Archiviste(BrickBase):
             "message": "Archiviste started",
         })
 
-        logger.info("Archiviste listening to streams...")
+        await self.log.info("Archiviste listening to streams...")
 
         while not shutdown_event.is_set():
             try:
@@ -214,7 +214,7 @@ class Archiviste(BrickBase):
                             logging.getLogger(brick).log(numeric_level, f"{prefix}{msg}")
 
             except Exception as e:
-                logger.error(f"Error reading from stream: {e}")
+                await self.log.error(f"Error reading from stream: {e}")
                 await asyncio.sleep(1)
 
     async def _process_pipeline_streams(
@@ -244,10 +244,10 @@ class Archiviste(BrickBase):
                 await redis_conn.xgroup_create(stream, group_name, mkstream=True)
             except Exception as e:
                 if "BUSYGROUP" not in str(e):
-                    logger.warning(f"Consumer group error for {stream}: {e}")
+                    await self.log.warning(f"Consumer group error for {stream}: {e}")
             streams[stream] = ">"
 
-        logger.info("Archiviste pipeline observer started on %d streams", len(streams))
+        await self.log.info(f"Archiviste pipeline observer started on {len(streams)} streams")
 
         while not shutdown_event.is_set():
             try:
@@ -304,7 +304,7 @@ class Archiviste(BrickBase):
                             )
 
             except Exception as e:
-                logger.error(f"Pipeline stream error: {e}")
+                await self.log.error(f"Pipeline stream error: {e}")
                 await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
@@ -333,10 +333,10 @@ class Archiviste(BrickBase):
                 self._process_pipeline_streams(redis_conn, shutdown_event),
             )
         except asyncio.CancelledError:
-            logger.info("Archiviste shutting down...")
+            await self.log.info("Archiviste shutting down...")
         finally:
             await self.client.close()
-            logger.info("Archiviste stopped gracefully")
+            await self.log.info("Archiviste stopped gracefully")
 
 if __name__ == "__main__":
     from common.init import initialize_user_dir

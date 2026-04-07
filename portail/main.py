@@ -350,10 +350,8 @@ class Portail(BrickBase):
             await redis_conn.hset(key, mapping=mapping)
             await redis_conn.expire(key, 3600)
         except Exception as exc:
-            logger.warning(
-                "Failed to update active_session for %s: %s",
-                envelope.sender_id,
-                exc,
+            await self.log.warning(
+                f"Failed to update active_session for {envelope.sender_id}: {exc}",
             )
 
     # ------------------------------------------------------------------
@@ -374,10 +372,9 @@ class Portail(BrickBase):
             ``True`` always — Portail uses ``ack_mode="always"`` so the
             BrickBase loop ACKs unconditionally regardless of the return value.
         """
-        logger.info(
-            "Received message: %s from %s",
-            envelope.correlation_id,
-            envelope.channel,
+        await self.log.info(
+            f"Received message: {envelope.correlation_id} from {envelope.channel}",
+            correlation_id=envelope.correlation_id,
         )
 
         # Enrich envelope with single user_record dict
@@ -389,9 +386,10 @@ class Portail(BrickBase):
             if policy == "guest":
                 self._apply_guest_stamps(envelope)
             elif policy == "pending":
-                logger.info(
-                    "unknown_user_policy=pending — publishing %s to pending_users",
-                    envelope.sender_id,
+                await self.log.info(
+                    f"unknown_user_policy=pending — publishing {envelope.sender_id} to pending_users",
+                    correlation_id=envelope.correlation_id,
+                    sender_id=envelope.sender_id,
                 )
                 await redis_conn.xadd(
                     STREAM_ADMIN_PENDING_USERS,
@@ -405,9 +403,10 @@ class Portail(BrickBase):
                 return True  # drop — ACKed via ack_mode="always"
             else:
                 # deny (default) — drop silently
-                logger.info(
-                    "unknown_user_policy=deny — dropping message from %s",
-                    envelope.sender_id,
+                await self.log.info(
+                    f"unknown_user_policy=deny — dropping message from {envelope.sender_id}",
+                    correlation_id=envelope.correlation_id,
+                    sender_id=envelope.sender_id,
                 )
                 return True  # drop — ACKed via ack_mode="always"
 

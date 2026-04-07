@@ -60,7 +60,6 @@ Processing flow
 """
 
 import asyncio
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +70,6 @@ from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
-
-logger = logging.getLogger("souvenir")
 
 _ALLOWED_ACTIONS: frozenset[str] = frozenset({"archive", "clear", "file_write", "file_read", "file_list"})
 
@@ -143,7 +140,7 @@ class Souvenir(BrickBase):
         Args:
             redis: Live async Redis connection (unused by Souvenir's startup).
         """
-        logger.warning(
+        await self.log.warning(
             "Initialising SQLite schema via _create_tables() — "
             "run 'alembic upgrade head' in production instead."
         )
@@ -181,10 +178,9 @@ class Souvenir(BrickBase):
         action = envelope.action or req.get("action")
 
         if action not in _ALLOWED_ACTIONS:
-            logger.error(
-                "Souvenir: rejected unknown action %r from %s",
-                action,
-                envelope.correlation_id,
+            await self.log.error(
+                f"Souvenir: rejected unknown action {action!r} from {envelope.correlation_id}",
+                correlation_id=envelope.correlation_id,
             )
             return True  # ACK to avoid infinite re-delivery of malformed messages
 
@@ -199,7 +195,10 @@ class Souvenir(BrickBase):
         if handler:
             await handler.handle(ctx)
         else:
-            logger.warning("Unknown memory action: %s", action)
+            await self.log.warning(
+                f"Unknown memory action: {action}",
+                correlation_id=envelope.correlation_id,
+            )
         return True
 
 

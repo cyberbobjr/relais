@@ -248,10 +248,11 @@ class BrickBase(abc.ABC):
         Returns:
             The ``BrickLogger`` instance for this brick.
         """
-        if self._brick_logger is None:
+        if getattr(self, "_brick_logger", None) is None:
             # Fallback for test/pre-start usage: create a no-op Redis logger
             # that only writes to Python logging (redis_getter returns None).
-            self._brick_logger = BrickLogger(self._brick_name, lambda: None)
+            brick_name = getattr(self, "_brick_name", "brick")
+            self._brick_logger = BrickLogger(brick_name, lambda: None)
         return self._brick_logger
 
     async def on_startup(self, redis: Any) -> None:

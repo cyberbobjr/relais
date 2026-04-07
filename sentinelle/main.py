@@ -312,7 +312,7 @@ class Sentinelle(BrickBase):
         pubsub = redis_conn.pubsub()
         channel = "relais:config:reload:sentinelle"
         await pubsub.subscribe(channel)
-        logger.info("Sentinelle: subscribed to %s", channel)
+        await self.log.info(f"Sentinelle: subscribed to {channel}")
 
         async for message in pubsub.listen():
             if shutdown_event is not None and shutdown_event.is_set():
@@ -323,7 +323,7 @@ class Sentinelle(BrickBase):
             if isinstance(data, bytes):
                 data = data.decode()
             if data == "reload":
-                logger.info("Sentinelle: received reload signal — reloading config")
+                await self.log.info("Sentinelle: received reload signal — reloading config")
                 await self.reload_config()
 
     # ------------------------------------------------------------------
@@ -383,8 +383,10 @@ class Sentinelle(BrickBase):
                     }),
                 )
         else:
-            logger.warning(
-                "Unauthorized message %s dropped.", envelope.correlation_id
+            await self.log.warning(
+                f"Unauthorized message {envelope.correlation_id} dropped.",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
             )
             await redis_conn.xadd(STREAM_LOGS, {
                 "level": "WARN",
@@ -466,12 +468,19 @@ class Sentinelle(BrickBase):
         cmd_name = extract_command_name(envelope.content)
 
         if cmd_name is None:
-            logger.error("extract_command_name returned None for content=%r", envelope.content)
+            await self.log.error(
+                f"extract_command_name returned None for content={envelope.content!r}",
+                correlation_id=envelope.correlation_id,
+            )
             return
 
         if cmd_name not in KNOWN_COMMANDS:
             await self._reply_inline(redis_conn, envelope, f"Commande inconnue : /{cmd_name}")
-            logger.info("Unknown command /%s from %s — replied inline", cmd_name, envelope.sender_id)
+            await self.log.info(
+                f"Unknown command /{cmd_name} from {envelope.sender_id} — replied inline",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
+            )
             return
 
         cmd_authorized = self._acl.is_allowed(
@@ -497,8 +506,10 @@ class Sentinelle(BrickBase):
             await self._reply_inline(
                 redis_conn, envelope, f"You do not have permission to execute /{cmd_name}"
             )
-            logger.warning(
-                "Unauthorised command /%s from %s — replied inline", cmd_name, envelope.sender_id
+            await self.log.warning(
+                f"Unauthorised command /{cmd_name} from {envelope.sender_id} — replied inline",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
             )
 
 

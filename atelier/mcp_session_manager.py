@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 
 from common.profile_loader import ProfileConfig
 
@@ -216,7 +217,14 @@ class McpSessionManager:
                         args=cfg.get("args", []),
                         env=cfg.get("env") or None,
                     )
-                    read, write = await stack.enter_async_context(stdio_client(params))
+                    # Redirect subprocess stderr to devnull to prevent MCP server
+                    # Rich-formatted logs from mixing into Atelier's log stream.
+                    # Session errors are already caught and logged by this manager.
+                    _devnull = open(os.devnull, "w")  # noqa: SIM115
+                    stack.callback(_devnull.close)
+                    read, write = await stack.enter_async_context(
+                        stdio_client(params, errlog=_devnull)
+                    )
 
                 elif transport == "sse":
                     if not _SSE_AVAILABLE:
