@@ -192,6 +192,112 @@ def _normalise_content(raw: object) -> str:
     return str(raw)
 
 
+class ToolErrorGuard:
+    """Tracks consecutive and total tool errors to abort runaway loops.
+
+    Raises ``AgentExecutionError`` when either the consecutive-error limit for
+    a single tool or the total-error limit across all tools is exceeded.
+
+    Args:
+        max_consecutive: Maximum number of consecutive errors allowed for the
+            same tool before aborting.
+        max_total: Maximum number of total tool errors allowed across all tools.
+    """
+
+    def __init__(self, max_consecutive: int, max_total: int) -> None:
+        self._max_consecutive = max_consecutive
+        self._max_total = max_total
+        self._total_calls: int = 0
+        self._total_errors: int = 0
+        self._consecutive_name: str = ""
+        self._consecutive_count: int = 0
+
+    @property
+    def total_calls(self) -> int:
+        """Total number of tool invocations recorded."""
+        return self._total_calls
+
+    @property
+    def total_errors(self) -> int:
+        """Total number of tool error invocations recorded."""
+        return self._total_errors
+
+    def record(self, tool_name: str, is_error: bool) -> None:
+        """Record the result of a tool invocation and raise if limits exceeded.
+
+        Unnamed tools (``tool_name == "?"``) are excluded from the consecutive
+        error check to avoid false positives when different tools all lack a
+        name attribute.
+
+        Args:
+            tool_name: The name of the tool that was called.
+            is_error: True if the tool returned a logical error.
+
+        Raises:
+            AgentExecutionError: If the consecutive or total error limit is hit.
+        """
+        self._total_calls += 1
+        if not is_error:
+            self._consecutive_name = ""
+            self._consecutive_count = 0
+            return
+
+        self._total_errors += 1
+        if self._total_errors >= self._max_total:
+            raise AgentExecutionError(
+                f"Aborting: {self._total_errors} total tool errors exceeded limit. "
+                f"Last tool: '{tool_name}'",
+                tool_call_count=self._total_calls,
+                tool_error_count=self._total_errors,
+            )
+
+        named_tool = tool_name if tool_name != "?" else None
+        if named_tool is not None:
+            if named_tool == self._consecutive_name:
+                self._consecutive_count += 1
+            else:
+                self._consecutive_name = named_tool
+                self._consecutive_count = 1
+            if self._consecutive_count >= self._max_consecutive:
+                raise AgentExecutionError(
+                    f"Tool '{tool_name}' errored {self._consecutive_count} "
+                    f"consecutive times — aborting to prevent infinite loop.",
+                    tool_call_count=self._total_calls,
+                    tool_error_count=self._total_errors,
+                )
+
+
+class StreamBuffer:
+    """Accumulates text tokens and flushes to a callback when a threshold is met.
+
+    Args:
+        flush_threshold: Number of buffered characters that triggers an automatic
+            flush.
+        callback: Async callable that receives a non-empty string chunk.
+    """
+
+    def __init__(self, flush_threshold: int, callback: Callable[[str], Awaitable[None]]) -> None:
+        self._threshold = flush_threshold
+        self._callback = callback
+        self._buf: str = ""
+
+    async def add(self, token: str) -> None:
+        """Append *token* to the buffer and flush if the threshold is reached.
+
+        Args:
+            token: Text fragment to buffer.
+        """
+        self._buf += token
+        if len(self._buf) >= self._threshold:
+            await self.flush()
+
+    async def flush(self) -> None:
+        """Flush the buffer to the callback if it is non-empty."""
+        if self._buf:
+            await self._callback(self._buf)
+            self._buf = ""
+
+
 class AgentExecutionError(Exception):
     """Raised for permanent/unknown agent execution failures.
 
@@ -211,11 +317,13 @@ class AgentExecutionError(Exception):
         *,
         tool_call_count: int = 0,
         tool_error_count: int = 0,
+        messages_raw: list[dict] | None = None,
     ) -> None:
         super().__init__(message)
         self.response_body = response_body
         self.tool_call_count = tool_call_count
         self.tool_error_count = tool_error_count
+        self.messages_raw: list[dict] = messages_raw if messages_raw is not None else []
 
 
 class ExhaustedRetriesError(AgentExecutionError):
@@ -287,17 +395,33 @@ class AgentExecutor:
         compiled_subagents: list[SubAgent] = [
             SubAgent(**spec) for spec in (subagents or [])
         ]
+        resolved_skills = skills or []
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
             system_prompt=_enrich_system_prompt(
                 soul_prompt, delegation_prompt=delegation_prompt,
             ),
-            skills=skills or [],
+            skills=resolved_skills,
             backend=composite_backend,
             checkpointer=checkpointer or MemorySaver(),
             subagents=cast(list[SubAgent | Any], compiled_subagents),
         )
+        logger.info(
+            "agent.init — model=%s skills=%d %s tools=%d",
+            profile.model,
+            len(resolved_skills),
+            [os.path.basename(s) for s in resolved_skills],
+            len(tools),
+        )
+        if tools:
+            tool_names = [t.name for t in tools]
+            logger.info(
+                "agent.init — mcp_tools=%d names=%s%s",
+                len(tool_names),
+                tool_names[:10],
+                " (truncated)" if len(tool_names) > 10 else "",
+            )
 
     async def execute(
         self,
@@ -396,9 +520,20 @@ class AgentExecutor:
         portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
         user_id = portail_ctx.get("user_id", envelope.sender_id)
         config = RunnableConfig(configurable={"thread_id": user_id})
-        reply, tool_call_count, tool_error_count = await self._stream(
-            {"messages": messages}, stream_callback, progress_callback, config=config
-        )
+        try:
+            reply, tool_call_count, tool_error_count = await self._stream(
+                {"messages": messages}, stream_callback, progress_callback, config=config
+            )
+        except AgentExecutionError as exc:
+            # Attempt to capture the partial conversation state so that an
+            # error-synthesis LLM call can produce a user-visible explanation.
+            try:
+                state = await self._agent.aget_state(config)
+                partial_messages = serialize_messages(state.values.get("messages", []))
+                exc.messages_raw = partial_messages
+            except Exception:
+                pass  # best-effort; messages_raw stays []
+            raise
         # Capture full message list from the agent graph state.
         # aget_state() must not fail — if it does, it means the agent is
         # misconfigured (e.g. no checkpointer).  Propagate the exception
@@ -435,8 +570,9 @@ class AgentExecutor:
         and ``subgraphs=True`` to capture step transitions, tool calls, tool
         results, and text tokens from both the main agent and any subagents.
 
-        When *stream_callback* is not None, text tokens are forwarded in
-        buffered chunks (STREAM_BUFFER_CHARS threshold).
+        When *stream_callback* is not None, text tokens are forwarded via
+        ``StreamBuffer`` (STREAM_BUFFER_CHARS threshold).  Tool error limits are
+        enforced by ``ToolErrorGuard``.
 
         When *progress_callback* is not None, it is called with ``(event, detail)``
         pairs for:
@@ -464,16 +600,20 @@ class AgentExecutor:
             is the total number of tool invocations, and *tool_error_count* is
             the number of invocations that returned ``status="error"``.
         """
-        buf = ""
         full_reply = ""
         last_tool_result: str = ""
         pending_tool_name: str = ""
-        _consecutive_tool_error_name: str = ""
-        _consecutive_tool_error_count: int = 0
-        _TOOL_ERROR_LOOP_LIMIT: int = 5
-        _MAX_TOTAL_TOOL_ERRORS: int = 10
-        _tool_call_count: int = 0
-        _tool_error_count: int = 0
+
+        guard = ToolErrorGuard(max_consecutive=5, max_total=5)
+
+        # No-op buffer when streaming is disabled
+        async def _noop_callback(chunk: str) -> None:  # pragma: no cover
+            pass
+
+        buf = StreamBuffer(
+            flush_threshold=STREAM_BUFFER_CHARS,
+            callback=stream_callback if stream_callback is not None else _noop_callback,
+        )
 
         stream_kwargs: dict = {
             "stream_mode": ["updates", "messages"],
@@ -484,120 +624,88 @@ class AgentExecutor:
             stream_kwargs["config"] = config
 
         async with contextlib.aclosing(self._agent.astream(input_data, **stream_kwargs)) as stream:
-          async for chunk in stream:
-            if not (isinstance(chunk, dict) and "type" in chunk and "ns" in chunk and "data" in chunk):
-                logger.warning("Unexpected astream chunk shape: %s", type(chunk))
-                continue
-            chunk_type = chunk["type"]
-            ns = chunk["ns"]
-            data = chunk["data"]
-            source = f"subagent:{ns[0]}" if ns else "agent"
+            async for chunk in stream:
+                if not (isinstance(chunk, dict) and "type" in chunk and "ns" in chunk and "data" in chunk):
+                    logger.warning("Unexpected astream chunk shape: %s", type(chunk))
+                    continue
+                chunk_type = chunk["type"]
+                ns = chunk["ns"]
+                data = chunk["data"]
+                source = f"subagent:{ns[0]}" if ns else "agent"
 
-            # ── Step transitions ─────────────────────────────────────────
-            if chunk_type == "updates":
-                for node_name in data:
-                    if node_name in ("model", "tools"):
-                        logger.debug("[%s] step: %s", source, node_name)
-                    if node_name == "model" and ns:
-                        # Subagent (non-root namespace) is starting an LLM call
-                        if progress_callback is not None:
-                            await progress_callback("subagent_start", source)
-
-            # ── Message events ───────────────────────────────────────────
-            elif chunk_type == "messages":
-                token, _metadata = data
-
-                # Tool call chunks — only AIMessageChunk has this attribute
-                tool_call_chunks = getattr(token, "tool_call_chunks", None)
-                if tool_call_chunks:
-                    for tc in tool_call_chunks:
-                        if tc.get("name"):
-                            pending_tool_name = tc["name"]
-                            logger.info("[%s] tool_call: %s", source, pending_tool_name)
+                # ── Step transitions ─────────────────────────────────────────
+                if chunk_type == "updates":
+                    for node_name in data:
+                        if node_name in ("model", "tools"):
+                            logger.debug("[%s] step: %s", source, node_name)
+                        if node_name == "model" and ns:
+                            # Subagent (non-root namespace) is starting an LLM call
                             if progress_callback is not None:
-                                await progress_callback("tool_call", pending_tool_name)
-                        if tc.get("args"):
-                            logger.debug(
-                                "[%s] tool_args [%s]: %s",
-                                source,
-                                pending_tool_name,
-                                tc["args"],
-                            )
+                                await progress_callback("subagent_start", source)
 
-                # Tool result
-                if token.type == "tool":
-                    tool_name = getattr(token, "name", "?")
-                    normalised = _normalise_content(token.content)
-                    last_tool_result = normalised
-                    result_preview = normalised[:300]
-                    _tool_call_count += 1
-                    logger.info(
-                        "[%s] tool_result [%s]: %s",
-                        source,
-                        tool_name,
-                        result_preview,
-                    )
-                    if progress_callback is not None:
-                        await progress_callback(
-                            "tool_result",
-                            f"{tool_name}: {normalised[:100]}",
+                # ── Message events ───────────────────────────────────────────
+                elif chunk_type == "messages":
+                    token, _metadata = data
+
+                    # Tool call chunks — only AIMessageChunk has this attribute
+                    tool_call_chunks = getattr(token, "tool_call_chunks", None)
+                    if tool_call_chunks:
+                        for tc in tool_call_chunks:
+                            if tc.get("name"):
+                                pending_tool_name = tc["name"]
+                                logger.info("[%s] tool_call: %s", source, pending_tool_name)
+                                if progress_callback is not None:
+                                    await progress_callback("tool_call", pending_tool_name)
+                            if tc.get("args"):
+                                args_preview = str(tc["args"])[:200]
+                                logger.info(
+                                    "[%s] tool_call_args [%s]: %s",
+                                    source,
+                                    pending_tool_name,
+                                    args_preview,
+                                )
+
+                    # Tool result
+                    if token.type == "tool":
+                        tool_name = getattr(token, "name", "?")
+                        normalised = _normalise_content(token.content)
+                        last_tool_result = normalised
+                        logger.info(
+                            "[%s] tool_result [%s]: %s",
+                            source,
+                            tool_name,
+                            normalised[:300],
                         )
-                    # Loop guard: abort on too many errors (consecutive or total).
-                    # Unnamed tools (name == "?") are excluded — grouping them together
-                    # could trigger a false abort when different tools all lack a name.
-                    #
-                    # DeepAgents marks execute ToolMessages with status="success" even when
-                    # the command exits with a non-zero code — the exit code is only embedded
-                    # in the text as "[Command failed with exit code N]". We detect that here
-                    # so the loop guard fires on systematic shell failures too.
-                    named_tool = tool_name if tool_name != "?" else None
-                    is_logical_error = getattr(token, "status", None) == "error" or (
-                        tool_name == "execute" and _EXECUTE_FAILURE_MARKER in normalised
-                    )
-                    if is_logical_error:
-                        _tool_error_count += 1
-                        if _tool_error_count >= _MAX_TOTAL_TOOL_ERRORS:
-                            raise AgentExecutionError(
-                                f"Aborting: {_tool_error_count} total tool errors exceeded limit. "
-                                f"Last tool: '{tool_name}', last error: {normalised[:200]}",
-                                tool_call_count=_tool_call_count,
-                                tool_error_count=_tool_error_count,
+                        if progress_callback is not None:
+                            await progress_callback(
+                                "tool_result",
+                                f"{tool_name}: {normalised[:100]}",
                             )
-                        if named_tool is not None and named_tool == _consecutive_tool_error_name:
-                            _consecutive_tool_error_count += 1
-                        elif named_tool is not None:
-                            _consecutive_tool_error_name = named_tool
-                            _consecutive_tool_error_count = 1
-                        if _consecutive_tool_error_count >= _TOOL_ERROR_LOOP_LIMIT:
-                            raise AgentExecutionError(
-                                f"Tool '{tool_name}' errored {_consecutive_tool_error_count} "
-                                f"consecutive times — aborting to prevent infinite loop. "
-                                f"Last error: {normalised[:200]}",
-                                tool_call_count=_tool_call_count,
-                                tool_error_count=_tool_error_count,
-                            )
-                    else:
-                        _consecutive_tool_error_name = ""
-                        _consecutive_tool_error_count = 0
+                        # Loop guard: abort on too many errors (consecutive or total).
+                        # DeepAgents marks execute ToolMessages with status="success" even when
+                        # the command exits with a non-zero code — the exit code is only embedded
+                        # in the text as "[Command failed with exit code N]". We detect that here
+                        # so the loop guard fires on systematic shell failures too.
+                        is_logical_error = getattr(token, "status", None) == "error" or (
+                            tool_name == "execute" and _EXECUTE_FAILURE_MARKER in normalised
+                        )
+                        guard.record(tool_name, is_logical_error)
 
-                # Text tokens from the LLM.
-                # AIMessageChunk.type is "AIMessageChunk" in streaming (not "ai"),
-                # so we match any non-tool message that carries content.
-                # Note: tool_call_chunks and text content can coexist in the same
-                # AIMessageChunk (parallel tool call + narration), so we do NOT
-                # gate on the absence of tool_call_chunks.
-                if token.type != "tool" and token.content:
-                    text = _normalise_content(token.content)
-                    if text:
-                        full_reply += text
-                        if stream_callback is not None:
-                            buf += text
-                            if len(buf) >= STREAM_BUFFER_CHARS:
-                                await stream_callback(buf)
-                                buf = ""
+                    # Text tokens from the LLM.
+                    # AIMessageChunk.type is "AIMessageChunk" in streaming (not "ai"),
+                    # so we match any non-tool message that carries content.
+                    # Note: tool_call_chunks and text content can coexist in the same
+                    # AIMessageChunk (parallel tool call + narration), so we do NOT
+                    # gate on the absence of tool_call_chunks.
+                    if token.type != "tool" and token.content:
+                        text = _normalise_content(token.content)
+                        if text:
+                            full_reply += text
+                            if stream_callback is not None:
+                                await buf.add(text)
 
-        if buf and stream_callback is not None:
-            await stream_callback(buf)
+        if stream_callback is not None:
+            await buf.flush()
 
         # ── Fallback for models that do not emit a final AI text token ─────
         # (e.g. nemotron-mini / Ollama models that treat tool results as the reply)
@@ -615,7 +723,7 @@ class AgentExecutor:
                 )
                 full_reply = REPLY_PLACEHOLDER
 
-        return full_reply, _tool_call_count, _tool_error_count
+        return full_reply, guard.total_calls, guard.total_errors
 
 
 def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> str:

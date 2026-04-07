@@ -7,8 +7,11 @@ AND auto-creates new skills from recurring session patterns.
 
 **Changelog + consolidation (S3)**:
 Consumes skill execution traces published by Atelier on ``relais:skill:trace``.
+Traces are published both after successful turns (when tools were called) and
+on the DLQ path for aborted turns (``tool_error_count == -1`` sentinel).
 Phase 1: ``ChangelogWriter`` (fast LLM) extracts 1-3 observations per turn and
-writes them to a per-skill ``CHANGELOG.md``.  The SKILL.md is never touched.
+writes them to a per-skill ``CHANGELOG.md``.  Triggered by tool errors, aborted
+turns, or cumulative usage threshold.  The SKILL.md is never touched.
 Phase 2: when the changelog exceeds a line threshold, ``SkillConsolidator``
 (precise LLM) rewrites SKILL.md by absorbing the observations, produces an
 audit trail in ``CHANGELOG_DIGEST.md``, and clears the changelog.
@@ -175,6 +178,11 @@ class Forgeron(BrickBase):
         Returns:
             Always ``True`` — traces are advisory, XACK unconditionally.
         """
+        await self.log.info(
+            f"Trace received — correlation_id={envelope.correlation_id} sender={envelope.sender_id}",
+            correlation_id=envelope.correlation_id,
+            sender_id=envelope.sender_id,
+        )
         try:
             await self._process_trace(envelope, redis_conn)
         except Exception as exc:
@@ -229,6 +237,16 @@ class Forgeron(BrickBase):
                 self._skill_call_counts[skill_name] = 0  # reset so it fires every N calls
             if (tool_error_count > 0 or is_aborted or threshold_reached) and self._config.annotation_mode:
                 if self._annotation_profile is not None:
+                    reason = (
+                        "aborted" if is_aborted
+                        else f"{tool_error_count} errors" if tool_error_count > 0
+                        else f"threshold ({call_count} calls)"
+                    )
+                    await self.log.info(
+                        f"Analysis triggered for skill '{skill_name}' — reason: {reason}",
+                        correlation_id=correlation_id,
+                        sender_id=envelope.sender_id,
+                    )
                     writer = ChangelogWriter(
                         profile=self._annotation_profile,
                         skills_dir=self._config.skills_dir,
@@ -248,6 +266,11 @@ class Forgeron(BrickBase):
                         if cl_path is not None and await writer.should_consolidate(
                             cl_path, self._config, redis_conn, skill_name
                         ):
+                            await self.log.info(
+                                f"Consolidation triggered for skill '{skill_name}'",
+                                correlation_id=correlation_id,
+                                sender_id=envelope.sender_id,
+                            )
                             await self._maybe_consolidate(
                                 skill_name=skill_name,
                                 envelope=envelope,

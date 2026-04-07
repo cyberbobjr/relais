@@ -911,3 +911,135 @@ async def test_handle_message_passes_checkpointer_to_agent_executor() -> None:
 
     assert len(executor_calls) == 1
     assert executor_calls[0].get("checkpointer") is atelier._checkpointer
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Error reply published to STREAM_OUTGOING_PENDING on agent failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_agent_execution_error_publishes_error_reply_to_outgoing_pending() -> None:
+    """When AgentExecutionError is raised, a synthesized error reply is published to outgoing_pending.
+
+    The user must receive a response even when the agent fails.  The error
+    synthesizer calls the LLM with the partial message history and publishes
+    the result to relais:messages:outgoing_pending so the user sees it.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope()
+    redis_conn = _make_redis_mock()
+
+    error_with_history = AgentExecutionError(
+        "Tool loop detected",
+        messages_raw=[{"role": "user", "content": "send an email"}],
+    )
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(side_effect=error_with_history)
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            with patch("atelier.main.ErrorSynthesizer") as MockSynth:
+                                mock_synth_inst = AsyncMock()
+                                mock_synth_inst.synthesize = AsyncMock(
+                                    return_value="Sorry, I ran into a problem sending the email."
+                                )
+                                MockSynth.return_value = mock_synth_inst
+
+                                try:
+                                    await atelier._run_stream_loop(
+                                        atelier.stream_specs()[0], redis_conn, asyncio.Event()
+                                    )
+                                except asyncio.CancelledError:
+                                    pass
+
+    # The error reply must be published to outgoing_pending
+    outgoing_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == "relais:messages:outgoing_pending"
+    ]
+    assert len(outgoing_calls) >= 1, "Expected at least one publish to outgoing_pending for error reply"
+
+    # Parse the payload and verify it contains the synthesized message
+    payloads = [json.loads(c.args[1]["payload"]) for c in outgoing_calls]
+    error_replies = [p for p in payloads if "problem" in p.get("content", "").lower()]
+    assert len(error_replies) >= 1, f"Expected error reply with 'problem' in content, got: {payloads}"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_agent_execution_error_synthesizer_receives_messages_raw() -> None:
+    """ErrorSynthesizer.synthesize() is called with the messages_raw from the exception."""
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope()
+    redis_conn = _make_redis_mock()
+
+    partial_history = [
+        {"role": "user", "content": "send email to test@example.com"},
+        {"role": "assistant", "content": "Calling himalaya..."},
+    ]
+    error_with_history = AgentExecutionError(
+        "Tool loop",
+        messages_raw=partial_history,
+    )
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    synth_calls: list[dict] = []
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(side_effect=error_with_history)
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            with patch("atelier.main.ErrorSynthesizer") as MockSynth:
+                                mock_synth_inst = AsyncMock()
+
+                                async def capture_synthesize(messages_raw, error, profile):
+                                    synth_calls.append({
+                                        "messages_raw": messages_raw,
+                                        "error": error,
+                                        "profile": profile,
+                                    })
+                                    return "Désolé, je n'ai pas pu envoyer l'email."
+
+                                mock_synth_inst.synthesize = capture_synthesize
+                                MockSynth.return_value = mock_synth_inst
+
+                                try:
+                                    await atelier._run_stream_loop(
+                                        atelier.stream_specs()[0], redis_conn, asyncio.Event()
+                                    )
+                                except asyncio.CancelledError:
+                                    pass
+
+    assert len(synth_calls) == 1
+    assert synth_calls[0]["messages_raw"] == partial_history

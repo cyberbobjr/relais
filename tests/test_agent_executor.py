@@ -619,3 +619,86 @@ async def test_execute_raises_on_repeated_consecutive_tool_errors() -> None:
         )
         with pytest.raises(AgentExecutionError, match="write_todos"):
             await executor.execute(_make_envelope("Do something"))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — AgentExecutionError.messages_raw (partial conversation history)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_agent_execution_error_stores_messages_raw() -> None:
+    """AgentExecutionError must expose a messages_raw attribute."""
+    from atelier.agent_executor import AgentExecutionError
+
+    msgs = [{"role": "user", "content": "hello"}]
+    err = AgentExecutionError("failed", messages_raw=msgs)
+    assert err.messages_raw == msgs
+
+
+@pytest.mark.unit
+def test_agent_execution_error_defaults_messages_raw_to_empty_list() -> None:
+    """AgentExecutionError.messages_raw defaults to [] when not provided."""
+    from atelier.agent_executor import AgentExecutionError
+
+    err = AgentExecutionError("failed")
+    assert err.messages_raw == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_run_once_embeds_partial_state_on_agent_execution_error() -> None:
+    """When _stream() raises AgentExecutionError, _run_once captures graph state into messages_raw.
+
+    The partial conversation history must be embedded in the exception so that
+    the error synthesizer in main.py can produce a contextual error reply.
+    """
+    from atelier.agent_executor import AgentExecutor, AgentExecutionError
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        # Trigger the total-errors loop guard: 5 tool errors
+        for _ in range(5):
+            yield _v2_chunk("messages", (), (_tool_error_token("himalaya"), {}))
+
+    partial_msgs = [{"role": "user", "content": "send an email"}]
+
+    state = MagicMock()
+    state.values = {"messages": []}  # graph state after abort
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=state)
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        with patch(
+            "atelier.agent_executor.serialize_messages",
+            return_value=partial_msgs,
+        ):
+            executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+            with pytest.raises(AgentExecutionError) as exc_info:
+                await executor.execute(_make_envelope("send an email"))
+
+    # The exception must carry the partial message history
+    assert exc_info.value.messages_raw == partial_msgs
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_run_once_messages_raw_empty_when_state_unavailable() -> None:
+    """When aget_state() fails after AgentExecutionError, messages_raw stays []."""
+    from atelier.agent_executor import AgentExecutor, AgentExecutionError
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        for _ in range(5):
+            yield _v2_chunk("messages", (), (_tool_error_token("himalaya"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(side_effect=RuntimeError("checkpointer gone"))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        with pytest.raises(AgentExecutionError) as exc_info:
+            await executor.execute(_make_envelope("send an email"))
+
+    assert exc_info.value.messages_raw == []

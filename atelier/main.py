@@ -53,7 +53,11 @@ Produced:
   - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
   - relais:memory:request      — archive action with full messages_raw for Souvenir
   - relais:skill:trace         — per-turn skill execution trace → Forgeron (fire-and-forget,
-                                  only when skills were used and tool_call_count > 0);
+                                  only when skills were used).  Published in two cases:
+                                  (a) after a successful turn when tool_call_count > 0;
+                                  (b) on the DLQ path (AgentExecutionError) with
+                                  tool_error_count=-1 (sentinel: aborted turn) and
+                                  messages_raw=[].
                                   context[CTX_SKILL_TRACE] carries skill_names,
                                   tool_call_count, tool_error_count, messages_raw
   - relais:tasks:failed        — DLQ for exhausted retry attempts
@@ -155,7 +159,7 @@ from common.contexts import (
     PortailCtx,
     ensure_ctx,
 )
-from common.envelope_actions import ACTION_MEMORY_ARCHIVE, ACTION_SKILL_TRACE
+from common.envelope_actions import ACTION_MEMORY_ARCHIVE, ACTION_MESSAGE_OUTGOING_PENDING, ACTION_SKILL_TRACE
 from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
 from common.config_reload import watch_and_reload
@@ -163,6 +167,7 @@ from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
 from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult
+from atelier.error_synthesizer import ErrorSynthesizer
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
@@ -340,9 +345,8 @@ class Atelier(BrickBase):
                     await task
 
         stack.push_async_callback(_cancel_mcp_restart_task)
-        logger.info(
-            "Atelier: MCP singleton started — %d tools available",
-            len(self._mcp_tools),
+        await self.log.info(
+            f"Atelier: MCP singleton started — {len(self._mcp_tools)} tools available",
         )
 
     def _build_config_candidate(self) -> dict:
@@ -497,7 +501,7 @@ class Atelier(BrickBase):
         pubsub = redis_conn.pubsub()
         channel = "relais:config:reload:atelier"
         await pubsub.subscribe(channel)
-        logger.info("Atelier: subscribed to %s", channel)
+        await self.log.info(f"Atelier: subscribed to {channel}")
 
         async for message in pubsub.listen():
             if shutdown_event is not None and shutdown_event.is_set():
@@ -508,7 +512,7 @@ class Atelier(BrickBase):
             if isinstance(data, bytes):
                 data = data.decode()
             if data == "reload":
-                logger.info("Atelier: received reload signal — reloading config")
+                await self.log.info("Atelier: received reload signal — reloading config")
                 await self.reload_config()
 
     # ------------------------------------------------------------------
@@ -529,7 +533,7 @@ class Atelier(BrickBase):
                 try:
                     await self._mcp_manager.close()
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Atelier: error closing old MCP manager: %s", exc)
+                    await self.log.warning(f"Atelier: error closing old MCP manager: {exc}")
 
             try:
                 from common.profile_loader import resolve_profile as _resolve_profile
@@ -538,14 +542,12 @@ class Atelier(BrickBase):
                 await new_mgr.start()
                 self._mcp_manager = new_mgr
                 self._mcp_tools = await make_mcp_tools(new_mgr)
-                logger.info(
-                    "Atelier: MCP singleton restarted — %d tools available",
-                    len(self._mcp_tools),
+                await self.log.info(
+                    f"Atelier: MCP singleton restarted — {len(self._mcp_tools)} tools available",
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.critical(
-                    "Atelier: failed to restart MCP singleton — degrading to no MCP tools: %s",
-                    exc,
+                await self.log.error(
+                    f"Atelier: failed to restart MCP singleton — degrading to no MCP tools: {exc}",
                 )
                 self._mcp_manager = None
                 self._mcp_tools = []
@@ -586,10 +588,10 @@ class Atelier(BrickBase):
         logger.debug("_handle_envelope correlation_id: %s", envelope.correlation_id)
         skills_used: list[str] = []  # hoisted so the DLQ path can publish a failure trace
         try:
-            logger.info(
-                "[%s] Processing task for %s",
-                envelope.correlation_id,
-                envelope.sender_id,
+            await self.log.info(
+                f"[{envelope.correlation_id}] Processing task for {envelope.sender_id}",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
             )
 
             # 1. Resolve LLM profile — read from CTX_PORTAIL stamped by Portail
@@ -745,14 +747,20 @@ class Atelier(BrickBase):
                 "content_preview": (reply_text or "")[:60],
             })
 
-            logger.info(
-                "[%s] Answered via %s", envelope.correlation_id, out_stream
+            await self.log.info(
+                f"[{envelope.correlation_id}] Answered via {out_stream}",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
             )
             return True
 
         except AgentExecutionError as exc:
             # Non-recoverable agent failure — route to DLQ and ACK
-            logger.error("[%s] Agent execution error, routing to DLQ: %s", envelope.correlation_id, exc)
+            await self.log.error(
+                f"[{envelope.correlation_id}] Agent execution error, routing to DLQ: {exc}",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
+            )
             dlq_entry: dict = {
                 "payload": envelope.to_json(),
                 "reason": str(exc),
@@ -769,6 +777,29 @@ class Atelier(BrickBase):
                 "message": f"Agent execution error for {envelope.correlation_id}: {exc}",
                 "error": str(exc),
             })
+            # Synthesize an empathetic error reply so the user is not left in silence.
+            # Best-effort: if synthesis fails the user still gets a fallback reply.
+            try:
+                synth = ErrorSynthesizer()
+                error_reply = await synth.synthesize(
+                    messages_raw=exc.messages_raw,
+                    error=str(exc),
+                    profile=profile,
+                )
+                error_env = Envelope.from_parent(parent=envelope, content=error_reply)
+                error_env.action = ACTION_MESSAGE_OUTGOING_PENDING
+                await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": error_env.to_json()})
+                await self.log.info(
+                    f"[{envelope.correlation_id}] Error reply published to outgoing_pending for {envelope.sender_id}",
+                    correlation_id=envelope.correlation_id,
+                    sender_id=envelope.sender_id,
+                )
+            except Exception as synth_exc:
+                await self.log.warning(
+                    f"[{envelope.correlation_id}] Failed to publish error reply: {synth_exc}",
+                    correlation_id=envelope.correlation_id,
+                    sender_id=envelope.sender_id,
+                )
             # Publish failure trace so Forgeron can analyze aborted turns.
             # tool_error_count=-1 is the sentinel for turns that were aborted
             # (DLQ-routed) rather than completing normally.
@@ -794,18 +825,20 @@ class Atelier(BrickBase):
                         STREAM_SKILL_TRACE, {"payload": failure_trace_env.to_json()}
                     )
                 except Exception as trace_exc:
-                    logger.warning(
-                        "[%s] Failed to publish failure trace: %s",
-                        envelope.correlation_id,
-                        trace_exc,
+                    await self.log.warning(
+                        f"[{envelope.correlation_id}] Failed to publish failure trace: {trace_exc}",
+                        correlation_id=envelope.correlation_id,
                     )
             return True
 
         except Exception as exc:
             # Transient or unknown error — leave in PEL for re-delivery
-            logger.error(
-                "[%s] Unhandled exception, leaving in PEL: %s", envelope.correlation_id, exc, exc_info=True
+            await self.log.error(
+                f"[{envelope.correlation_id}] Unhandled exception, leaving in PEL: {exc}",
+                correlation_id=envelope.correlation_id,
+                sender_id=envelope.sender_id,
             )
+            logger.debug("%s", exc, exc_info=True)
             await redis_conn.xadd(STREAM_LOGS, {
                 "level": "ERROR",
                 "brick": "atelier",

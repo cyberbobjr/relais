@@ -4,6 +4,12 @@ Extracts concrete observations from agent conversation traces and appends
 them to a per-skill ``CHANGELOG.md`` file.  Each observation entry is
 timestamped and records the error count and trigger type.
 
+Trigger types:
+- ``error`` — tool errors detected during the turn.
+- ``aborted`` — turn was aborted before completion (``tool_error_count == -1``
+  sentinel published by Atelier on the DLQ path).
+- ``usage`` — cumulative call threshold reached with no errors.
+
 Two Redis TTL keys are used:
 - ``relais:skill:annotation_cooldown:{skill_name}`` — prevents annotation spam.
 - ``relais:skill:consolidation_cooldown:{skill_name}`` — checked (not set) to
