@@ -28,7 +28,8 @@ Key classes:
   and filters MCP tool definitions (enforces ``mcp_max_tools``).
 * ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
   system prompt from soul / role / user / channel / policy prompt files.
-* ``ProfileConfig`` — loaded from atelier/profiles.yaml; selects model, temperature,
+* ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
+  ``atelier/profiles.yaml``); selects model, temperature,
   max_tokens, mcp_timeout, mcp_max_tools per request.  Optional field
   ``parallel_tool_calls: bool | None`` forwards the OpenAI-compatible
   ``parallel_tool_calls`` parameter to the model (useful to disable it for
@@ -51,6 +52,10 @@ Produced:
   - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw)
   - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
   - relais:memory:request      — archive action with full messages_raw for Souvenir
+  - relais:skill:trace         — per-turn skill execution trace → Forgeron (fire-and-forget,
+                                  only when skills were used and tool_call_count > 0);
+                                  context[CTX_SKILL_TRACE] carries skill_names,
+                                  tool_call_count, tool_error_count, messages_raw
   - relais:tasks:failed        — DLQ for exhausted retry attempts
   - relais:logs                — operational log entries
 
@@ -78,11 +83,16 @@ Message flow (one task at a time):
     │  (4) AgentExecutor.execute(backend=SouvenirBackend, progress_callback=…)
     │      ├── token chunks   ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ─► relais:messages:streaming + relais:messages:outgoing:{channel}
-    │      └── AgentResult(reply_text, messages_raw)  ← full turn captured via aget_state()
-    │  (5) build response Envelope (without messages_raw to avoid serializing full
-    │      conversation history through every downstream consumer)
-    │  (6) publish archive action to relais:memory:request with envelope + messages_raw
+    │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count)
+    │          ← full turn captured via aget_state()
+    │  (5) publish archive action to relais:memory:request with envelope + messages_raw
     │      (Souvenir processes this to persist the full LangChain message history)
+    │  (6) if skill_used and tool_call_count > 0 → publish CTX_SKILL_TRACE envelope to
+    │      relais:skill:trace (fire-and-forget → Forgeron Solution B analysis)
+    │  (6b) if tool_error_count > 0 and forgeron.annotation_mode enabled →
+    │       SkillAnnotator.maybe_annotate() appends LESSONS LEARNED inline to the
+    │       SKILL.md (Solution D fast path; lazy import — no crash if forgeron absent)
+    │  (7) build response Envelope; stamp context["atelier"]["skills_used"] if any
     └──► relais:messages:outgoing_pending
 
 Loop guard (AgentExecutor):

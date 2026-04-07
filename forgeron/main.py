@@ -15,7 +15,7 @@ regression.
 **Auto-creation from archives (Solution D)**:
 Consumes Atelier session archives on ``relais:memory:request`` via a dedicated
 consumer group (``forgeron_archive_group``), independent of Souvenir's group.
-An ``IntentLabeler`` (Haiku LLM) extracts a normalized intent label from each
+An ``IntentLabeler`` (Fast LLM) extracts a normalized intent label from each
 session.  When N sessions share the same label, a ``SkillCreator`` (precise LLM)
 generates a new ``SKILL.md`` automatically.
 
@@ -39,7 +39,7 @@ Key classes:
 * ``SkillAnalyzer`` — LLM analysis → ``SkillPatchProposal`` (lazy import).
 * ``SkillPatcher`` — atomic write with ``.pending`` → ``.bak`` snapshot (lazy).
 * ``SkillValidator`` — post-patch regression monitor (lazy).
-* ``IntentLabeler`` — Haiku LLM, extracts snake_case intent label (lazy).
+* ``IntentLabeler`` — Fast LLM, extracts snake_case intent label (lazy).
 * ``SkillCreator`` — precise LLM, generates SKILL.md from examples (lazy).
 
 Redis channels
@@ -71,6 +71,7 @@ from common.config_loader import resolve_storage_dir
 from common.contexts import CTX_FORGERON, CTX_SKILL_TRACE, CTX_SOUVENIR_REQUEST, SkillTraceCtx, ensure_ctx
 from common.envelope import Envelope
 from common.envelope_actions import (
+    ACTION_MEMORY_ARCHIVE,
     ACTION_MESSAGE_OUTGOING_PENDING,
     ACTION_SKILL_CREATED,
     ACTION_SKILL_PATCH_APPLIED,
@@ -182,7 +183,7 @@ class Forgeron(BrickBase):
             envelope: Envelope carrying the trace in ``context[CTX_SKILL_TRACE]``.
             redis_conn: Active Redis connection.
         """
-        trace_ctx: SkillTraceCtx = envelope.context.get(CTX_SKILL_TRACE, {})
+        trace_ctx: SkillTraceCtx = envelope.context.get(CTX_SKILL_TRACE, {}) # type: ignore
 
         skill_names: list[str] = trace_ctx.get("skill_names", [])
         tool_call_count: int = trace_ctx.get("tool_call_count", 0)
@@ -476,6 +477,12 @@ class Forgeron(BrickBase):
             envelope: Archive envelope from ``relais:memory:request``.
             redis_conn: Active Redis connection.
         """
+        if envelope.action != ACTION_MEMORY_ARCHIVE:
+            logger.debug(
+                "Skipping non-archive action '%s' on memory:request.", envelope.action
+            )
+            return
+
         souvenir_ctx = envelope.context.get(CTX_SOUVENIR_REQUEST, {})
         envelope_json: str = souvenir_ctx.get("envelope_json", "")
         messages_raw_raw = souvenir_ctx.get("messages_raw", "[]")

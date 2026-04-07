@@ -952,7 +952,9 @@ Dans l'état actuel du code, le prompt système est uniquement la concaténation
 
 ## 16. Profils — config/atelier/profiles.yaml
 
-La structure réelle parsée par `atelier/profile_loader.py` est volontairement compacte. Les politiques d'accès aux skills et outils MCP sont portées par `portail.yaml` via `UserRecord`, pas par `atelier/profiles.yaml`.
+La structure réelle parsée par `common/profile_loader.py` est volontairement compacte. Les politiques d'accès aux skills et outils MCP sont portées par `portail.yaml` via `UserRecord`, pas par `atelier/profiles.yaml`.
+
+> **Note :** `atelier/profile_loader.py` est désormais un shim de rétrocompatibilité qui ré-exporte depuis `common/profile_loader.py`. Importer directement depuis `common.profile_loader` dans le nouveau code.
 
 ### Règle de résolution du profil
 
@@ -1138,7 +1140,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── config_loader.py               ← get_relais_home() + resolve_config_path()
 │   ├── init.py                        ← initialize_user_dir()
 │   ├── user_record.py                 ← UserRecord
-│   ├── profile_loader.py              ← (supprimé — déplacé vers atelier/profile_loader.py)
+│   ├── profile_loader.py              ← ProfileConfig + ResilienceConfig (common — partagé)
 │   └── markdown_converter.py
 │
 ├── aiguilleur/
@@ -1166,7 +1168,7 @@ Chaque brique implémente `GracefulShutdown` : handlers SIGTERM/SIGINT, tracking
 │   ├── soul_assembler.py
 │   ├── stream_publisher.py
 │   ├── souvenir_backend.py
-│   ├── profile_loader.py              ← ProfileConfig + ResilienceConfig (Atelier seul)
+│   ├── profile_loader.py              ← shim de rétrocompat → re-export depuis common/profile_loader.py
 │   └── progress_config.py             ← ProgressConfig (master switch + per-event flags)
 │
 ├── souvenir/
@@ -1379,25 +1381,50 @@ retention:
 
 ### 🔧 Le Forgeron — auto-apprentissage & versioning skills
 
-**Taxonomie :** Batch Processor — lit SQLite L'Archiviste, génère des skills, publie, exit.
+**Taxonomie :** BrickBase long-running — deux boucles consommateurs Redis ; `autostart=true`, `autorestart=true`.
 
-**Rôle :** Identifie les patterns répétés dans les logs de L'Archiviste, génère des `SKILL.md` automatiques, les publie dans `relais:skills:new`. Lancé quotidiennement par Le Veilleur (`SYSTEM:start_forgeron`), `autostart=false`, `autorestart=false`.
+**Rôle :** Améliore les skills existants par analyse statistique des traces d'exécution (Solution B) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (Solution D). Publie des notifications utilisateur quand un patch est appliqué ou un nouveau skill créé.
 
-**Versioning des skills — par nom de fichier :**
+**Pipeline trace analysis (Solution B) :**
+
+Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. Quand un skill dépasse un seuil d'erreurs persistant, `SkillAnalyzer` (LLM précis) génère une `SkillPatchProposal`. `SkillPatcher` applique le patch atomiquement (`.pending` → snapshot `.bak`). `SkillValidator` monitore la régression post-patch et peut déclencher un rollback.
+
+**Pipeline auto-création (Solution D) :**
+
+Consomme `relais:memory:request` via groupe dédié `forgeron_archive_group` (indépendant du groupe de Souvenir). `IntentLabeler` (Haiku LLM) extrait un label d'intention normalisé (snake_case) de chaque session. Quand N sessions partagent le même label, `SkillCreator` (LLM précis) génère un nouveau `SKILL.md` automatiquement.
+
+**Classes clés :**
+
+| Classe | Rôle |
+|--------|------|
+| `Forgeron` | BrickBase — deux boucles : `relais:skill:trace` + `relais:memory:request` |
+| `SkillTraceStore` | SQLite — accumule les traces par skill (tool_call_count, tool_error_count) |
+| `SkillPatchStore` | SQLite — patches versionnés (pending / applied / validated / rolled_back) |
+| `SessionStore` | SQLite — patterns d'intention par session (pipeline auto-création) |
+| `SkillAnalyzer` | LLM analysis → `SkillPatchProposal` (import paresseux) |
+| `SkillPatcher` | écriture atomique avec snapshot `.bak` (import paresseux) |
+| `SkillValidator` | moniteur de régression post-patch (import paresseux) |
+| `IntentLabeler` | Haiku LLM — extrait label snake_case depuis session (import paresseux) |
+| `SkillCreator` | LLM précis — génère SKILL.md depuis exemples (import paresseux) |
+
+**Redis channels :**
 
 ```
-Pas de Git, pas de SQLite de versioning.
-Les fichiers auto-générés sont nommés avec la date et jamais supprimés.
+Consommés :
+  relais:skill:trace         (consumer group: forgeron_group)
+  relais:memory:request      (consumer group: forgeron_archive_group)
 
-<RELAIS_HOME>/skills/auto/
-  SKILL_auto_mr_review_20260327.md    ← version courante dans CLAUDE.md
-  SKILL_auto_mr_review_20260315.md    ← version précédente — conservée
-  SKILL_auto_mr_review_20260301.md    ← version encore plus ancienne
+Produits :
+  relais:events:system       — skill_patch_applied / skill_patch_rolled_back / skill_created
+  relais:messages:outgoing_pending — notifications utilisateur
+  relais:logs                — logs opérationnels
 
-Rollback :
-  Le Vigile modifie CLAUDE.md pour pointer vers une version antérieure.
-  → La prochaine session charge l'ancienne version
+XACK : ack_mode="always" sur les deux streams (consumer advisory — perte acceptable).
 ```
+
+**Solution D fast path (SkillAnnotator inline dans Atelier) :**
+
+Si `tool_error_count > 0` après un tour, `SkillAnnotator.maybe_annotate()` est appelé inline dans Atelier (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé). Cela ajoute une section `LESSONS LEARNED` directement dans le `SKILL.md` concerné sans attendre le pipeline asynchrone de Forgeron.
 
 ---
 

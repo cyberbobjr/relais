@@ -73,7 +73,7 @@ Aiguilleur
 
 | Stream / clé | Producteur | Consommateur |
 |--------------|------------|--------------|
-| `relais:memory:request` | Atelier, Commandant | Souvenir |
+| `relais:memory:request` | Atelier, Commandant | Souvenir (`souvenir_group`), Forgeron (`forgeron_archive_group`) |
 | `relais:memory:response` | Souvenir | agents (via SouvenirBackend) |
 
 ### Amélioration autonome (Forgeron)
@@ -156,13 +156,15 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Consomme `relais:tasks`.
 - Gère l'historique conversationnel via un checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`). L'ID de thread est `user_id` (stable cross-session).
 - Assemble le prompt système avec `SoulAssembler`.
-- Exécute `AgentExecutor`.
+- Exécute `AgentExecutor` — retourne `AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count)`.
 - Publie :
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
   - certains événements de progression sur `relais:messages:outgoing:{channel}`
-  - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw` pour éviter de sérialiser l'historique complet dans chaque stream sortant)
   - une action `archive` sur `relais:memory:request` avec la réponse complète et `messages_raw` pour archivage Souvenir
+  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide **et** `tool_call_count > 0`) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`
+  - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
   - les erreurs finales sur `relais:tasks:failed`
+- **Solution D fast path** : si `tool_error_count > 0` et `annotation_mode` activé dans `forgeron.yaml`, `SkillAnnotator.maybe_annotate()` est appelé inline après l'exécution (import paresseux de `forgeron` — Atelier démarre même sans Forgeron installé).
 
 ### Commandant
 

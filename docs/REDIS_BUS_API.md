@@ -328,7 +328,7 @@ The payload is a serialized `Envelope` (`Envelope.to_json()`). The `action` fiel
 **Consumer group**: `forgeron_group`
 **XACK contract**: `ack_mode="always"` — traces are advisory; losing one is acceptable.
 
-Published by Atelier after each completed agent turn that used one or more skills.
+Published by Atelier after each completed agent turn where skills were used **and** `tool_call_count > 0`.  Turns where skills are loaded but no tool was invoked are not published (avoids polluting the trace stream with skill-less turns).
 
 ```
 XADD relais:skill:trace * payload <Envelope JSON>
