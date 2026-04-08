@@ -68,6 +68,17 @@ Long-term memory:
 - Before answering any question about the user or long-term memory, first check `/memories/` for relevant user and long-term information.
 """.strip()
 
+SELF_DIAGNOSIS_PROMPT = """
+Self-diagnosis on tool errors (IMPORTANT):
+If you encounter repeated tool errors (3+ in a row for the same tool, or 5+ total):
+1. STOP retrying the same approach immediately.
+2. Re-read the relevant SKILL.md troubleshooting section for the skill you are using.
+3. Analyze ALL error messages you have received to identify the root cause.
+4. Form a hypothesis about what is wrong (wrong syntax, wrong config key, wrong flag position, etc.).
+5. Try ONE corrected approach based on your diagnosis.
+Never blindly retry a failing command with minor variations — diagnose first.
+""".strip()
+
 
 # Error class names raised by LLM providers (anthropic, openai, google, …) that
 # indicate a transient condition — caller must NOT ACK the message so it stays in
@@ -197,6 +208,12 @@ class ToolErrorGuard:
 
     Raises ``AgentExecutionError`` when either the consecutive-error limit for
     a single tool or the total-error limit across all tools is exceeded.
+
+    The default ``max_total=8`` (up from 5) gives the agent three additional
+    attempts after hitting the diagnostic threshold.  Combined with the
+    self-diagnosis instructions in the system prompt, this allows the agent
+    to read SKILL.md troubleshooting sections and correct its approach
+    before being aborted.
 
     Args:
         max_consecutive: Maximum number of consecutive errors allowed for the
@@ -604,7 +621,7 @@ class AgentExecutor:
         last_tool_result: str = ""
         pending_tool_name: str = ""
 
-        guard = ToolErrorGuard(max_consecutive=5, max_total=5)
+        guard = ToolErrorGuard(max_consecutive=5, max_total=8)
 
         # No-op buffer when streaming is disabled
         async def _noop_callback(chunk: str) -> None:  # pragma: no cover
@@ -729,8 +746,13 @@ class AgentExecutor:
 def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> str:
     """Append operational rules to the assembled system prompt.
 
-    Appends long-term memory instructions unconditionally, and the
-    delegation prompt (assembled by ``SubagentRegistry``) when non-empty.
+    Appends long-term memory instructions, self-diagnosis instructions
+    for tool error recovery, and the delegation prompt (assembled by
+    ``SubagentRegistry``) when non-empty.
+
+    The self-diagnosis instructions tell the agent to stop and re-read
+    the relevant SKILL.md troubleshooting section when encountering
+    repeated tool errors, rather than blindly retrying.
 
     Args:
         soul_prompt: The base system prompt assembled by SoulAssembler.
@@ -743,6 +765,8 @@ def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> s
     parts = [soul_prompt.rstrip()]
     if LONG_TERM_MEMORY_PROMPT not in soul_prompt:
         parts.append(LONG_TERM_MEMORY_PROMPT)
+    if SELF_DIAGNOSIS_PROMPT not in soul_prompt:
+        parts.append(SELF_DIAGNOSIS_PROMPT)
     if delegation_prompt:
         parts.append(delegation_prompt)
     return "\n\n".join(parts)

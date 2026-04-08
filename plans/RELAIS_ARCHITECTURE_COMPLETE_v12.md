@@ -652,7 +652,7 @@ L'`AgentExecutor` gère un cycle multi-tour via `deepagents.create_deep_agent()`
 4. Dispatch des tool calls ; injection des résultats (`tool_result`)
 5. Rebouclage jusqu'à `end_turn` ou `max_turns`
 
-**Loop guard** : si le même outil nommé retourne `status="error"` 5 fois consécutives, `AgentExecutor.execute()` lève `AgentExecutionError` pour interrompre la requête et éviter les boucles infinies (ex: bug Mistral avec appels parallèles sur `write_todos`). Les outils sans nom (`name == "?"`) sont exclus du comptage pour éviter les faux positifs.
+**Loop guard** : `ToolErrorGuard` surveille les erreurs d'outils — si le même outil nommé retourne `status="error"` 5 fois consécutives, ou si 8 erreurs totales sont atteintes, `AgentExecutor.execute()` lève `AgentExecutionError` pour interrompre la requête et éviter les boucles infinies. Le seuil total (8) est volontairement supérieur au seuil consécutif (5) : le prompt système inclut des instructions de self-diagnostic qui poussent l'agent à relire les sections troubleshooting du SKILL.md après des erreurs répétées, ce qui nécessite quelques tentatives supplémentaires. Sur `AgentExecutionError`, l'état partiel de la conversation est capturé dans `exc.messages_raw` et transmis à `ErrorSynthesizer` (réponse d'erreur visible par l'utilisateur) et à Forgeron (trace avec le contexte conversationnel complet). Les outils sans nom (`name == "?"`) sont exclus du comptage consécutif pour éviter les faux positifs.
 
 ### Outils skills — ToolPolicy + deepagents natif
 
@@ -706,7 +706,7 @@ default:
 
 **Règle fondamentale :** ne jamais XACK avant le succès ou l'épuisement des retries.
 
-- `AgentExecutionError` → DLQ (`relais:tasks:failed`) + ACK
+- `AgentExecutionError` → `ErrorSynthesizer` produit une réponse d'erreur empathique via appel LLM léger (historique partiel dans `exc.messages_raw`) → publiée sur `relais:messages:outgoing_pending` → DLQ (`relais:tasks:failed`) + ACK
 - Exception transiente (réseau, timeout) → pas d'ACK → reste en PEL pour re-livraison
 - Succès → ACK après publication dans `relais:messages:outgoing_pending`
 

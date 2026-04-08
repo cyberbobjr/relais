@@ -163,8 +163,9 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
   - certains événements de progression sur `relais:messages:outgoing:{channel}`
   - une action `archive` sur `relais:memory:request` avec la réponse complète et `messages_raw` pour archivage Souvenir
-  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`. Publié dans deux cas : (a) après un tour réussi quand `tool_call_count > 0`, (b) sur le chemin DLQ (`AgentExecutionError`) avec `tool_error_count = -1` (sentinelle : tour avorté) et `messages_raw = []`
+  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`. Publié dans deux cas : (a) après un tour réussi quand `tool_call_count > 0`, (b) sur le chemin DLQ (`AgentExecutionError`) avec `tool_error_count = -1` (sentinelle : tour avorté) et `messages_raw = exc.messages_raw` (conversation partielle capturée depuis le graph state)
   - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
+  - en cas d'échec agent (`AgentExecutionError`) : une réponse d'erreur synthétisée par `ErrorSynthesizer` (appel LLM léger) publiée sur `relais:messages:outgoing_pending` pour que l'utilisateur reçoive un message empathique au lieu d'un silence
   - les erreurs finales sur `relais:tasks:failed`
 - **Note** : l'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
 
@@ -202,7 +203,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 
 **Phase 1 — Changelog (chaque trigger, LLM fast)** :
 - `ChangelogWriter` (profil `annotation_profile`, LLM rapide) extrait 1-3 observations concrètes et les écrit dans un `CHANGELOG.md` séparé du SKILL.md.
-- Déclenché par erreurs d'outils (`tool_error_count >= annotation_min_tool_errors`), par seuil d'appels cumulés (`annotation_call_threshold`), ou par tours avortés (`tool_error_count == -1`, sentinelle DLQ).
+- Déclenché par quatre conditions (dès qu'au moins une est vraie) : erreurs d'outils (`tool_error_count >= annotation_min_tool_errors`), tours avortés (`tool_error_count == -1`, sentinelle DLQ), **success after failure** (le tour courant a 0 erreurs mais le tour précédent du même skill en avait — c'est le "tour de correction" où l'agent a trouvé la bonne approche), ou seuil d'appels cumulés (`annotation_call_threshold`, défaut 5).
 - Rate-limité par cooldown Redis `relais:skill:annotation_cooldown:{skill_name}` (TTL `annotation_cooldown_seconds`).
 - Le SKILL.md n'est **jamais touché** en Phase 1.
 
@@ -210,7 +211,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 - Déclenchée juste après une écriture Phase 1 si le CHANGELOG.md dépasse `consolidation_line_threshold` lignes (défaut 80) et que le cooldown `relais:skill:consolidation_cooldown:{skill_name}` est expiré.
 - `SkillConsolidator` (profil `consolidation_profile`, LLM precise) relit SKILL.md + CHANGELOG.md, réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail), et vide le changelog.
 - Toutes les écritures sont atomiques (`.tmp` + `Path.replace()`).
-- Le cooldown de consolidation est posé après succès (`consolidation_cooldown_seconds`, défaut 7 jours).
+- Le cooldown de consolidation est posé après succès (`consolidation_cooldown_seconds`, défaut 30 min).
 - Si `notify_user_on_consolidation` est activé, une notification est publiée sur `relais:messages:outgoing_pending`.
 
 **Fichiers par skill** :

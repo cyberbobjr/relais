@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MEMORY_CLEAR
 from common.streams import STREAM_MEMORY_REQUEST, stream_outgoing
 from common.text_utils import strip_outer_quotes
 
@@ -74,7 +75,7 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
         channel=envelope.channel,
         session_id=envelope.session_id,
         correlation_id=envelope.correlation_id,
-        action="clear",
+        action=ACTION_MEMORY_CLEAR,
         context={CTX_SOUVENIR_REQUEST: {"session_id": envelope.session_id, "user_id": user_id, "envelope_json": envelope.to_json()}},
     )
 

@@ -38,6 +38,11 @@ import redis as redis_sync
 from common.config_loader import get_relais_home
 from common.contexts import CTX_SOUVENIR_REQUEST
 from common.envelope import Envelope
+from common.envelope_actions import (
+    ACTION_MEMORY_FILE_LIST,
+    ACTION_MEMORY_FILE_READ,
+    ACTION_MEMORY_FILE_WRITE,
+)
 from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from deepagents.backends import BackendProtocol
 from deepagents.backends.protocol import (
@@ -175,7 +180,7 @@ class SouvenirBackend(BackendProtocol):
         Returns:
             :class:`WriteResult` with ``files_update=None`` (external persistence).
         """
-        resp = self._request("file_write", path=file_path, content=content, overwrite=False)
+        resp = self._request(ACTION_MEMORY_FILE_WRITE, path=file_path, content=content, overwrite=False)
         if not resp.get("ok"):
             return WriteResult(error=resp.get("error", "write failed"))
         return WriteResult(path=file_path, files_update=None)
@@ -192,7 +197,7 @@ class SouvenirBackend(BackendProtocol):
             File content formatted with line numbers (``cat -n`` format),
             or an error message if the file is not found.
         """
-        resp = self._request("file_read", path=file_path)
+        resp = self._request(ACTION_MEMORY_FILE_READ, path=file_path)
         if not resp.get("ok"):
             return f"Error: {resp.get('error', 'read failed')}"
         raw: str = resp.get("content") or ""
@@ -221,7 +226,7 @@ class SouvenirBackend(BackendProtocol):
         Returns:
             :class:`EditResult` with ``files_update=None`` (external persistence).
         """
-        read_resp = self._request("file_read", path=file_path)
+        read_resp = self._request(ACTION_MEMORY_FILE_READ, path=file_path)
         if not read_resp.get("ok"):
             return EditResult(error=read_resp.get("error", "file not found"))
 
@@ -239,7 +244,7 @@ class SouvenirBackend(BackendProtocol):
             updated = current.replace(old_string, new_string, 1)
             occurrences = 1
 
-        write_resp = self._request("file_write", path=file_path, content=updated, overwrite=True)
+        write_resp = self._request(ACTION_MEMORY_FILE_WRITE, path=file_path, content=updated, overwrite=True)
         if not write_resp.get("ok"):
             return EditResult(error=write_resp.get("error", "write failed"))
         return EditResult(path=file_path, occurrences=occurrences, files_update=None)
@@ -255,7 +260,7 @@ class SouvenirBackend(BackendProtocol):
             ``modified_at`` for each file.
         """
         prefix = path if path.endswith("/") else path + "/"
-        resp = self._request("file_list", path=prefix)
+        resp = self._request(ACTION_MEMORY_FILE_LIST, path=prefix)
         if not resp.get("ok"):
             return []
         files: list[dict[str, Any]] = resp.get("files") or []
@@ -309,7 +314,7 @@ class SouvenirBackend(BackendProtocol):
 
         matches: list[GrepMatch] = []
         for file_info in candidates:
-            read_resp = self._request("file_read", path=file_info["path"])
+            read_resp = self._request(ACTION_MEMORY_FILE_READ, path=file_info["path"])
             if not read_resp.get("ok"):
                 continue
             content: str = read_resp.get("content") or ""
@@ -334,7 +339,7 @@ class SouvenirBackend(BackendProtocol):
             except UnicodeDecodeError:
                 results.append(FileUploadResponse(path=fpath, error="invalid_path"))
                 continue
-            resp = self._request("file_write", path=fpath, content=content, overwrite=True)
+            resp = self._request(ACTION_MEMORY_FILE_WRITE, path=fpath, content=content, overwrite=True)
             if resp.get("ok"):
                 results.append(FileUploadResponse(path=fpath, error=None))
             else:
@@ -352,7 +357,7 @@ class SouvenirBackend(BackendProtocol):
         """
         results: list[FileDownloadResponse] = []
         for fpath in paths:
-            resp = self._request("file_read", path=fpath)
+            resp = self._request(ACTION_MEMORY_FILE_READ, path=fpath)
             if resp.get("ok"):
                 content: str = resp.get("content") or ""
                 results.append(FileDownloadResponse(path=fpath, content=content.encode("utf-8"), error=None))

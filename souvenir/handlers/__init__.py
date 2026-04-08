@@ -10,6 +10,13 @@ Usage::
         await handler.handle(ctx)
 """
 
+from common.envelope_actions import (
+    ACTION_MEMORY_ARCHIVE,
+    ACTION_MEMORY_CLEAR,
+    ACTION_MEMORY_FILE_LIST,
+    ACTION_MEMORY_FILE_READ,
+    ACTION_MEMORY_FILE_WRITE,
+)
 from souvenir.handlers.archive_handler import ArchiveHandler
 from souvenir.handlers.base import BaseActionHandler, HandlerContext
 from souvenir.handlers.clear_handler import ClearHandler
@@ -25,11 +32,11 @@ def build_registry() -> dict[str, BaseActionHandler]:
         Dict mapping each supported action string to its handler.
     """
     return {
-        "archive": ArchiveHandler(),
-        "clear": ClearHandler(),
-        "file_write": FileWriteHandler(),
-        "file_read": FileReadHandler(),
-        "file_list": FileListHandler(),
+        ACTION_MEMORY_ARCHIVE: ArchiveHandler(),
+        ACTION_MEMORY_CLEAR: ClearHandler(),
+        ACTION_MEMORY_FILE_WRITE: FileWriteHandler(),
+        ACTION_MEMORY_FILE_READ: FileReadHandler(),
+        ACTION_MEMORY_FILE_LIST: FileListHandler(),
     }
 
 

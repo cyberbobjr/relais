@@ -23,7 +23,7 @@ class ForgeonConfig:
     annotation_mode: bool = True
     annotation_min_tool_errors: int = 1
     annotation_cooldown_seconds: int = 300
-    annotation_call_threshold: int = 10
+    annotation_call_threshold: int = 5
     """Annotate a skill after this many cumulative calls, even without errors."""
     skills_dir: Path | None = None
     # --- Automatic skill creation from session archives ---
@@ -41,8 +41,8 @@ class ForgeonConfig:
     # --- Changelog-based periodic consolidation ---
     consolidation_line_threshold: int = 80
     """Consolidate SKILL.md when CHANGELOG.md exceeds this many lines."""
-    consolidation_cooldown_seconds: int = 604800
-    """Minimum interval between two consolidations for the same skill (seconds, default 7 days).
+    consolidation_cooldown_seconds: int = 1800
+    """Minimum interval between two consolidations for the same skill (seconds, default 30 min).
     Redis TTL key: relais:skill:consolidation_cooldown:{skill_name}"""
     consolidation_profile: str = "precise"
     """LLM profile to use for consolidation (heavier model than annotation)."""
@@ -85,7 +85,7 @@ def load_forgeron_config() -> ForgeonConfig:
             section.get("annotation_cooldown_seconds", 300)
         ),
         annotation_call_threshold=int(
-            section.get("annotation_call_threshold", 10)
+            section.get("annotation_call_threshold", 5)
         ),
         skills_dir=skills_dir,
         creation_mode=bool(section.get("creation_mode", True)),
@@ -95,7 +95,7 @@ def load_forgeron_config() -> ForgeonConfig:
         notify_user_on_creation=bool(section.get("notify_user_on_creation", True)),
         consolidation_line_threshold=int(section.get("consolidation_line_threshold", 80)),
         consolidation_cooldown_seconds=int(
-            section.get("consolidation_cooldown_seconds", 604800)
+            section.get("consolidation_cooldown_seconds", 1800)
         ),
         consolidation_profile=str(section.get("consolidation_profile", "precise")),
         notify_user_on_consolidation=bool(section.get("notify_user_on_consolidation", True)),

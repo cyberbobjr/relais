@@ -23,11 +23,14 @@ def get_relais_home() -> Path:
         return Path(custom).expanduser().resolve()
     return (Path(__file__).parent.parent / ".relais").resolve()
 
-# Search path — user config always takes priority
+# Search path — user config always takes priority.
+# Note: dev mode is covered by get_relais_home() which defaults to
+# <project_root>/.relais when RELAIS_HOME is not set.  The project root
+# itself is intentionally excluded — ./config/ contains only .default
+# template files, not live configuration.
 CONFIG_SEARCH_PATH = [
-    get_relais_home(),          # 1. ~/.relais/      (user — highest priority)
-    Path("/opt/relais"),        # 2. /opt/relais/    (system installation)
-    Path("./"),                 # 3. ./              (current dir — dev mode)
+    get_relais_home(),    # 1. ~/.relais/   (user / dev — highest priority)
+    Path("/opt/relais"),  # 2. /opt/relais/ (system installation)
 ]
 
 def resolve_config_path(filename: str) -> Path:
@@ -63,7 +66,8 @@ def resolve_prompts_dir() -> Path:
     """Prompt templates directory.
 
     Searches the config cascade so users can override prompts in
-    ``~/.relais/prompts/``.  Falls back to ``./prompts`` in dev mode.
+    ``~/.relais/prompts/``.  Falls back to the user home path if no
+    directory is found in the cascade.
     The directory is NOT auto-created here — it is initialised by
     ``initialize_user_dir`` on first run.
     """

@@ -113,9 +113,23 @@ async def test_clear_handler_handles_missing_envelope_json() -> None:
 
 def test_build_registry_contains_all_actions() -> None:
     """build_registry() must return the 5 expected actions."""
+    from common.envelope_actions import (
+        ACTION_MEMORY_ARCHIVE,
+        ACTION_MEMORY_CLEAR,
+        ACTION_MEMORY_FILE_LIST,
+        ACTION_MEMORY_FILE_READ,
+        ACTION_MEMORY_FILE_WRITE,
+    )
+
     registry = build_registry()
-    assert set(registry.keys()) == {"archive", "clear", "file_write", "file_read", "file_list"}
-    assert isinstance(registry["clear"], ClearHandler)
-    assert isinstance(registry["file_write"], FileWriteHandler)
-    assert isinstance(registry["file_read"], FileReadHandler)
-    assert isinstance(registry["file_list"], FileListHandler)
+    assert set(registry.keys()) == {
+        ACTION_MEMORY_ARCHIVE,
+        ACTION_MEMORY_CLEAR,
+        ACTION_MEMORY_FILE_WRITE,
+        ACTION_MEMORY_FILE_READ,
+        ACTION_MEMORY_FILE_LIST,
+    }
+    assert isinstance(registry[ACTION_MEMORY_CLEAR], ClearHandler)
+    assert isinstance(registry[ACTION_MEMORY_FILE_WRITE], FileWriteHandler)
+    assert isinstance(registry[ACTION_MEMORY_FILE_READ], FileReadHandler)
+    assert isinstance(registry[ACTION_MEMORY_FILE_LIST], FileListHandler)

@@ -112,9 +112,34 @@ flowchart TD
 - `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents déclarés dans `config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels et `skills/` optionnels) ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
 - `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
-- `Forgeron` dispose de deux mécanismes d'amélioration des skills :
-  - **Changelog + consolidation (S3)** : consomme `relais:skill:trace` (`forgeron_group`). À chaque tour avec des erreurs d'outils ou après N appels cumulés, `ChangelogWriter` (LLM rapide) extrait 1-3 observations et les écrit dans un `CHANGELOG.md` séparé (le SKILL.md n'est jamais touché en Phase 1). Quand le changelog dépasse un seuil de lignes (`consolidation_line_threshold`, défaut 80), `SkillConsolidator` (LLM precise) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail) et vide le changelog. Un cooldown Redis par skill empêche les consolidations trop fréquentes (`consolidation_cooldown_seconds`, défaut 7 jours). Si `notify_user_on_consolidation` est activé, une notification est publiée.
-  - **Auto-création de skills** : consomme `relais:memory:request` (`forgeron_archive_group`, fan-out indépendant de Souvenir). Pour chaque session archivée, `IntentLabeler` (LLM Haiku) extrait un label d'intention normalisé. Quand `min_sessions_for_creation` sessions partagent le même label, `SkillCreator` (LLM precise) génère un `SKILL.md` complet. L'événement `skill.created` est publié sur `relais:events:system`. Si `notify_user_on_creation` est activé, une notification est publiée sur `relais:messages:outgoing_pending`.
+- `Forgeron` dispose de deux pipelines autonomes :
+
+  **Pipeline 1 — Amélioration des skills existants** (changelog + consolidation)
+
+  Consomme `relais:skill:trace` (`forgeron_group`). Pour chaque trace, Forgeron évalue quatre conditions de déclenchement par skill. L'analyse se déclenche dès qu'**au moins une** est vraie (et que `annotation_mode` est activé) :
+
+  | Condition | Seuil | Ce qui est capturé |
+  |-----------|-------|--------------------|
+  | **Erreurs d'outils** | `tool_error_count >= 1` | Turns où l'agent a échoué |
+  | **Turn avorté (DLQ)** | `tool_error_count == -1` | Turns avortés par `ToolErrorGuard` — `messages_raw` contient la conversation partielle |
+  | **Success after failure** | Turn courant 0 erreurs, turn précédent (même skill) avait des erreurs | Le "turn de correction" — là où l'agent a trouvé la bonne approche |
+  | **Seuil d'usage** | `annotation_call_threshold` appels cumulés (défaut 5) | Patterns d'utilisation normaux, même sans erreur |
+
+  Un **cooldown Redis** par skill (`annotation_cooldown_seconds`, défaut 300 s) empêche le spam d'annotations.
+
+  L'amélioration se fait en deux phases :
+  - **Phase 1 — Changelog** : `ChangelogWriter` (LLM rapide) extrait 1–3 observations depuis le SKILL.md actuel + la conversation, et les ajoute à `CHANGELOG.md`. Le SKILL.md n'est **jamais modifié** en Phase 1.
+  - **Phase 2 — Consolidation** : quand `CHANGELOG.md` dépasse `consolidation_line_threshold` lignes (défaut 80) et que le cooldown de consolidation a expiré (défaut 30 min), `SkillConsolidator` (LLM precise) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail) et vide le changelog. Notification optionnelle à l'utilisateur.
+
+  **Pipeline 2 — Création automatique de skills**
+
+  Consomme `relais:memory:request` (`forgeron_archive_group`, fan-out indépendant de Souvenir). Pour chaque session archivée :
+  1. `IntentLabeler` (LLM rapide) extrait un label d'intention normalisé (ex: `"send_email"`). Si aucun pattern clair → arrêt.
+  2. La session est enregistrée en SQLite avec son label.
+  3. Quand `min_sessions_for_creation` sessions (défaut 3) partagent le même label ET que le cooldown de création a expiré (défaut 24h) :
+     - `SkillCreator` (LLM precise) génère un `SKILL.md` complet à partir des sessions représentatives.
+     - L'événement `skill.created` est publié sur `relais:events:system`.
+     - Notification optionnelle à l'utilisateur via `relais:messages:outgoing_pending`.
 
 ---
 

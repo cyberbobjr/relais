@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.envelope import Envelope
 from common.contexts import CTX_SOUVENIR_REQUEST
+from common.envelope_actions import ACTION_MEMORY_CLEAR
 from souvenir.main import Souvenir
 
 
@@ -42,7 +43,7 @@ def _make_clear_request(
         channel="internal",
         session_id=session_id,
         correlation_id=correlation_id,
-        action="clear",
+        action=ACTION_MEMORY_CLEAR,
         context={CTX_SOUVENIR_REQUEST: souvenir_ctx},
     )
     return [(b"relais:memory:request", [(b"1-1", {b"payload": envelope.to_json().encode()})])]

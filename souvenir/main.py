@@ -66,12 +66,25 @@ from typing import Any
 from common.brick_base import BrickBase, StreamSpec
 from common.contexts import CTX_SOUVENIR_REQUEST, SouvenirRequest
 from common.envelope import Envelope
+from common.envelope_actions import (
+    ACTION_MEMORY_ARCHIVE,
+    ACTION_MEMORY_CLEAR,
+    ACTION_MEMORY_FILE_LIST,
+    ACTION_MEMORY_FILE_READ,
+    ACTION_MEMORY_FILE_WRITE,
+)
 from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
 
-_ALLOWED_ACTIONS: frozenset[str] = frozenset({"archive", "clear", "file_write", "file_read", "file_list"})
+_ALLOWED_ACTIONS: frozenset[str] = frozenset({
+    ACTION_MEMORY_ARCHIVE,
+    ACTION_MEMORY_CLEAR,
+    ACTION_MEMORY_FILE_WRITE,
+    ACTION_MEMORY_FILE_READ,
+    ACTION_MEMORY_FILE_LIST,
+})
 
 
 class Souvenir(BrickBase):

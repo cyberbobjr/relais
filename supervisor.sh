@@ -278,7 +278,7 @@ force_kill_launchers() {
             kill -9 "$pid" >/dev/null 2>&1 || true
             killed=$((killed + 1))
         fi
-    done < <(pgrep -f "python.*launcher" 2>/dev/null || true)
+    done < <(pgrep -if "python.*launcher" 2>/dev/null || true)
 
     # Kill all processes listening on debugpy ports (5670-5689 only, LISTEN state)
     while IFS= read -r pid; do

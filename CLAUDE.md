@@ -40,7 +40,7 @@ The main pipeline flows through these bricks in order:
    - Loads SOUL personality + context, executes agentic loop via `AgentExecutor` (`atelier/agent_executor.py`)
    - Tool access controlled by `ToolPolicy` (`atelier/tool_policy.py`); skill dirs resolved per-role and passed as `skills=` to `create_deep_agent()`
    - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by singleton `McpSessionManager` (started once at brick startup, shared across requests; per-server locks; dead-session eviction)
-   - Handles `AgentExecutionError` → DLQ (`relais:tasks:failed`)
+   - Handles `AgentExecutionError` → synthesizes user-visible error reply via `ErrorSynthesizer` (`atelier/error_synthesizer.py`) → publishes to `relais:messages:outgoing_pending` → routes original to DLQ (`relais:tasks:failed`)
    - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `aiguilleur.yaml` per-request
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
@@ -143,7 +143,7 @@ Bricks use:
 ```
 On exception:
   - RETRIABLE (ConnectError, TimeoutException): Do NOT ACK → stays in PEL, re-delivered
-  - AgentExecutionError or success: Route to output/DLQ, then ACK only on success or final error
+  - AgentExecutionError: Synthesize error reply via ErrorSynthesizer → publish to outgoing_pending → route to DLQ, then ACK
   - ExhaustedRetriesError: Route to DLQ relais:tasks:failed, then ACK (avoid poisoning PEL)
 
 XACK pattern (critical):
@@ -155,9 +155,8 @@ XACK pattern (critical):
 ### Configuration Cascade
 
 Priority order (highest to lowest):
-1. `~/.relais/config/` - User overrides
+1. `~/.relais/config/` - User overrides (also serves as dev mode when `RELAIS_HOME` is unset, defaulting to `<project_root>/.relais`)
 2. `/opt/relais/config/` - System defaults
-3. `./config/` - Project defaults
 
 Environment variables override YAML configs (e.g., `REDIS_SOCKET_PATH`, `REDIS_PASSWORD`, per-brick `REDIS_PASS_*`)
 
@@ -326,7 +325,9 @@ executor = AgentExecutor(
 reply = await executor.execute(envelope, context, stream_callback=...)
 ```
 
-Streaming is token-by-token via `agent.astream(stream_mode="messages")`.
+Streaming is token-by-token via `agent.astream(stream_mode="messages")`, buffered by `StreamBuffer` (flushes at `STREAM_BUFFER_CHARS` threshold).
+
+Tool error limits are enforced by `ToolErrorGuard` (max 5 consecutive errors per tool, max 8 total errors) — raises `AgentExecutionError` to abort runaway loops.  The higher total limit (8 vs the consecutive limit of 5) gives the agent diagnostic room: the system prompt includes self-diagnosis instructions that tell the agent to re-read SKILL.md troubleshooting sections after encountering repeated errors.  On `AgentExecutionError`, the partial conversation state is captured into `exc.messages_raw` and forwarded to both `ErrorSynthesizer` (user-visible error reply) and `Forgeron` (skill improvement trace with full conversation context).
 
 Per-profile MCP constraints (fields in `ProfileConfig`):
 - `mcp_timeout` — seconds before a single MCP tool call is cancelled (returns an error string to the model; loop continues)

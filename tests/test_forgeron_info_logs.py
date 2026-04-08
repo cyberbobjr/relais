@@ -77,6 +77,7 @@ def _make_forgeron():
     forgeron._annotation_profile = profile
     forgeron._consolidation_profile = profile
     forgeron._skill_call_counts = {}
+    forgeron._last_had_errors = {}
     forgeron._trace_store = AsyncMock()
     forgeron._trace_store.add_trace = AsyncMock()
 
@@ -215,4 +216,116 @@ async def test_forgeron_logs_info_skipped_when_no_errors(caplog) -> None:
     assert len(info_logs) >= 1, (
         f"Expected at least one INFO log for trace reception, "
         f"got: {[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — INFO log when aborted turn is detected (tool_error_count == -1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_forgeron_logs_info_on_aborted_turn(caplog) -> None:
+    """An INFO log mentioning 'aborted' is emitted for tool_error_count == -1 traces.
+
+    Aborted turns (DLQ-routed) use the sentinel value -1 and should produce
+    a clearly labeled INFO log so operators can spot them in the log stream.
+    """
+    forgeron = _make_forgeron()
+    envelope = _make_trace_envelope(
+        tool_error_count=-1,
+        skill_name="mail-agent",
+        correlation_id="corr-aborted-001",
+    )
+    redis_conn = AsyncMock()
+
+    with patch("forgeron.main.ChangelogWriter") as MockWriter:
+        mock_writer = AsyncMock()
+        mock_writer.observe = AsyncMock(return_value=False)
+        mock_writer.changelog_path = MagicMock(return_value=None)
+        MockWriter.return_value = mock_writer
+
+        with caplog.at_level(logging.INFO, logger="forgeron"):
+            await forgeron._handle_trace(envelope, redis_conn)
+
+    aborted_logs = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "aborted" in r.message.lower()
+    ]
+    assert len(aborted_logs) >= 1, (
+        f"Expected at least one INFO log mentioning 'aborted', "
+        f"got: {[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — INFO log includes trace-stored confirmation per skill
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_forgeron_logs_trace_stored_per_skill(caplog) -> None:
+    """An INFO log confirming trace storage is emitted for each skill in the trace.
+
+    This log must include the skill name and error/call counts so operators
+    can monitor skill health at a glance.
+    """
+    forgeron = _make_forgeron()
+    envelope = _make_trace_envelope(
+        skill_name="search-web",
+        tool_call_count=4,
+        tool_error_count=0,
+        correlation_id="corr-stored-001",
+    )
+    redis_conn = AsyncMock()
+
+    with caplog.at_level(logging.INFO, logger="forgeron"):
+        await forgeron._handle_trace(envelope, redis_conn)
+
+    stored_logs = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO
+        and "search-web" in r.message
+        and ("stored" in r.message.lower() or "trace" in r.message.lower())
+    ]
+    assert len(stored_logs) >= 1, (
+        f"Expected INFO log confirming trace stored for 'search-web', "
+        f"got: {[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — File-level logger also emits on trace reception (visibility fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_forgeron_file_logger_emits_on_trace(caplog) -> None:
+    """The module-level 'forgeron' logger must emit an INFO record on trace
+    reception, ensuring the log appears in the supervisord stdout log file
+    even if BrickLogger's Redis side fails.
+    """
+    forgeron = _make_forgeron()
+    envelope = _make_trace_envelope(correlation_id="corr-file-log-001")
+    redis_conn = AsyncMock()
+
+    with patch("forgeron.main.ChangelogWriter") as MockWriter:
+        mock_writer = AsyncMock()
+        mock_writer.observe = AsyncMock(return_value=False)
+        MockWriter.return_value = mock_writer
+
+        with caplog.at_level(logging.INFO, logger="forgeron"):
+            await forgeron._handle_trace(envelope, redis_conn)
+
+    # At least one record must come from the module-level logger (not just BrickLogger)
+    forgeron_records = [
+        r for r in caplog.records
+        if r.name == "forgeron" and r.levelno == logging.INFO
+    ]
+    assert len(forgeron_records) >= 1, (
+        f"Expected at least one INFO from the 'forgeron' logger, "
+        f"got records from: {set(r.name for r in caplog.records)}"
     )

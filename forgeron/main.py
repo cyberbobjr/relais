@@ -2,31 +2,107 @@
 
 Functional role
 ---------------
-Forgeron improves existing skills via S3 (changelog + periodic consolidation)
-AND auto-creates new skills from recurring session patterns.
+Forgeron has two independent pipelines:
 
-**Changelog + consolidation (S3)**:
-Consumes skill execution traces published by Atelier on ``relais:skill:trace``.
-Traces are published both after successful turns (when tools were called) and
-on the DLQ path for aborted turns (``tool_error_count == -1`` sentinel).
-Phase 1: ``ChangelogWriter`` (fast LLM) extracts 1-3 observations per turn and
-writes them to a per-skill ``CHANGELOG.md``.  Triggered by tool errors, aborted
-turns, or cumulative usage threshold.  The SKILL.md is never touched.
-Phase 2: when the changelog exceeds a line threshold, ``SkillConsolidator``
-(precise LLM) rewrites SKILL.md by absorbing the observations, produces an
-audit trail in ``CHANGELOG_DIGEST.md``, and clears the changelog.
+1. **Skill improvement** (changelog + consolidation) — consumes execution
+   traces from Atelier and progressively improves existing SKILL.md files.
+2. **Skill auto-creation** — consumes session archives and detects recurring
+   user intent patterns to generate new skills from scratch.
 
-**Auto-creation from session archives**:
-Consumes Atelier session archives on ``relais:memory:request`` via a dedicated
-consumer group (``forgeron_archive_group``), independent of Souvenir's group.
-An ``IntentLabeler`` (Fast LLM) extracts a normalized intent label from each
-session.  When N sessions share the same label, a ``SkillCreator`` (precise LLM)
-generates a new ``SKILL.md`` automatically.
+Skill improvement — trigger rules
+----------------------------------
+Atelier publishes a trace on ``relais:skill:trace`` after every agent turn
+that used skills and made at least one tool call.  The trace carries
+``skill_names``, ``tool_call_count``, ``tool_error_count``, and the full
+``messages_raw`` conversation history.
 
-**User notifications**:
-When Forgeron creates or consolidates a skill, it publishes a human-readable
-notification to ``relais:messages:outgoing_pending``.  Sentinelle picks it up
-and routes it to the user via the channel adapter.
+For each skill in the trace, Forgeron evaluates **four** trigger conditions.
+Analysis fires when **any one** is true (AND ``annotation_mode`` is enabled):
+
+1. **Tool errors** — ``tool_error_count >= annotation_min_tool_errors``
+   (default 1).  Captures turns where the agent struggled.
+2. **Aborted turn** — ``tool_error_count == -1`` (sentinel value published
+   by Atelier on the DLQ path when ``ToolErrorGuard`` aborts the loop).
+   ``messages_raw`` contains the partial conversation captured from the
+   LangGraph state so the LLM can diagnose the root cause.
+3. **Success after failure** — the current turn has 0 errors, but the
+   *previous* turn for the **same skill** had errors.  This is the
+   "correction turn" where the agent found the right approach; its
+   ``messages_raw`` contains the fix that should be captured.  The flag
+   is tracked in-memory per skill (``_last_had_errors``) and resets after
+   being consumed (no double-trigger on consecutive successes).
+4. **Usage threshold** — cumulative call count for a skill reaches
+   ``annotation_call_threshold`` (default 5).  Captures usage patterns
+   even when there are no errors.  Counter resets after each trigger.
+
+A per-skill **cooldown** (Redis TTL key
+``relais:skill:annotation_cooldown:{skill_name}``, default 300 s) prevents
+annotation spam.  If the cooldown is active, the trigger is silently
+skipped regardless of the condition that fired.
+
+Skill improvement — two-phase pipeline
+---------------------------------------
+**Phase 1 — Changelog** (``ChangelogWriter``, fast LLM):
+  Receives the current SKILL.md + the full conversation trace.  Extracts
+  1–3 concrete, dated observations and appends them to a per-skill
+  ``CHANGELOG.md``.  The SKILL.md is never modified in this phase.
+  Returns ``wrote=True`` if new observations were added, ``False`` if the
+  LLM found nothing new or the cooldown was active.
+
+**Phase 2 — Consolidation** (``SkillConsolidator``, precise LLM):
+  Triggered when ``CHANGELOG.md`` exceeds ``consolidation_line_threshold``
+  lines (default 80) AND the consolidation cooldown has expired
+  (``consolidation_cooldown_seconds``, default 30 min).  Reads the current
+  SKILL.md + CHANGELOG.md, rewrites SKILL.md by absorbing the accumulated
+  observations, moves the old changelog to ``CHANGELOG_DIGEST.md`` (audit
+  trail), and empties CHANGELOG.md.  Optionally notifies the user via
+  ``relais:messages:outgoing_pending``.
+
+Skill auto-creation — trigger rules
+-------------------------------------
+Forgeron consumes ``relais:memory:request`` via a dedicated consumer group
+(``forgeron_archive_group``), independent of Souvenir.  Only envelopes with
+``action=ACTION_MEMORY_ARCHIVE`` are processed; others are silently skipped.
+
+For each archive:
+
+1. ``IntentLabeler`` (fast LLM) extracts a normalized snake_case intent
+   label (e.g. ``"send_email"``) from ``messages_raw``.  If no clear
+   reusable pattern is detected, the label is ``None`` and processing
+   stops.
+2. The session is recorded in ``SessionStore`` (SQLite) with its label.
+3. When ``min_sessions_for_creation`` sessions (default 3) share the same
+   label **AND** the creation cooldown has expired
+   (``creation_cooldown_seconds``, default 24 h, Redis TTL key
+   ``relais:skill:creation_cooldown:{intent_label}``):
+   - ``SkillCreator`` (precise LLM) generates a complete ``SKILL.md``
+     based on representative session examples.
+   - The skill directory is created under ``skills_dir``.
+   - A ``skill.created`` event is published on ``relais:events:system``.
+   - If ``notify_user_on_creation`` is enabled, a notification is sent
+     to the user via ``relais:messages:outgoing_pending``.
+
+Configuration reference (forgeron.yaml)
+----------------------------------------
+::
+
+    forgeron:
+      annotation_mode: true               # enable Phase 1 changelog writing
+      annotation_profile: "fast"          # LLM profile for observations
+      annotation_min_tool_errors: 1       # min errors to trigger on error condition
+      annotation_cooldown_seconds: 300    # per-skill cooldown between annotations
+      annotation_call_threshold: 5        # usage-based trigger every N calls
+      consolidation_line_threshold: 80    # CHANGELOG lines before Phase 2
+      consolidation_cooldown_seconds: 1800    # 30 min between consolidations
+      consolidation_profile: "precise"    # LLM profile for SKILL.md rewrite
+      notify_user_on_consolidation: true
+      creation_mode: true                 # enable auto-creation pipeline
+      min_sessions_for_creation: 3        # sessions with same intent before creating
+      creation_cooldown_seconds: 86400    # 24h between creation attempts per intent
+      max_sessions_for_labeling: 5        # max examples passed to SkillCreator
+      notify_user_on_creation: true
+      llm_profile: "default"             # LLM profile for SkillCreator
+      skills_dir: null                    # resolved from config cascade if null
 
 Technical overview
 ------------------
@@ -36,12 +112,11 @@ Key classes:
   ``relais:skill:trace`` and ``relais:memory:request``.
 * ``SkillTraceStore`` — SQLite accumulator; tracks one row per agent turn
   that used skills.
-* ``ChangelogWriter`` — Phase 1: appends observations to CHANGELOG.md (fast LLM).
-* ``SkillConsolidator`` — Phase 2: rewrites SKILL.md from changelog (precise LLM).
-* ``SessionStore`` — SQLite accumulator for per-session intent patterns;
-  drives the auto-creation pipeline.
-* ``IntentLabeler`` — Fast LLM, extracts snake_case intent label (lazy).
-* ``SkillCreator`` — precise LLM, generates SKILL.md from examples (lazy).
+* ``ChangelogWriter`` — Phase 1: appends observations to CHANGELOG.md.
+* ``SkillConsolidator`` — Phase 2: rewrites SKILL.md from changelog.
+* ``SessionStore`` — SQLite accumulator for per-session intent patterns.
+* ``IntentLabeler`` — fast LLM, extracts snake_case intent label.
+* ``SkillCreator`` — precise LLM, generates SKILL.md from examples.
 
 Redis channels
 --------------
@@ -63,6 +138,7 @@ XACK contract
 import asyncio
 import json
 import logging
+import sys
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
@@ -89,6 +165,18 @@ from forgeron.trace_store import SkillTraceStore
 
 logger = logging.getLogger("forgeron")
 
+# Ensure the forgeron logger has at least one handler writing to stdout,
+# even if configure_logging_once() was skipped or root-level handlers were
+# removed.  This guarantees that logger.info() calls always appear in the
+# supervisord stdout log file.
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s"
+    ))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.DEBUG)
+
 
 class Forgeron(BrickBase):
     """Autonomous skill improvement brick.
@@ -109,6 +197,10 @@ class Forgeron(BrickBase):
         self._session_store = SessionStore(db_path=db_path)
         # In-memory call counter per skill — triggers annotation every N calls.
         self._skill_call_counts: dict[str, int] = {}
+        # Per-skill flag: True when the last turn had errors. Used to trigger
+        # analysis on the "success after failure" turn (the correction turn).
+        self._last_had_errors: dict[str, bool] = {}
+        self._load()
 
     def _load(self) -> None:
         """Reload Forgeron configuration from YAML.
@@ -121,12 +213,14 @@ class Forgeron(BrickBase):
         self._annotation_profile = resolve_profile(profiles, self._config.annotation_profile)
         self._consolidation_profile = resolve_profile(profiles, self._config.consolidation_profile)
         logger.info(
-            "Forgeron config loaded: annotation_mode=%s llm_profile=%s "
-            "annotation_profile=%s consolidation_profile=%s",
+            "Config loaded: annotation_mode=%s creation_mode=%s "
+            "llm=%s annotation=%s consolidation=%s skills_dir=%s",
             self._config.annotation_mode,
+            self._config.creation_mode,
             self._config.llm_profile,
             self._config.annotation_profile,
             self._config.consolidation_profile,
+            self._config.skills_dir,
         )
 
     async def on_startup(self, redis: Any) -> None:
@@ -163,30 +257,38 @@ class Forgeron(BrickBase):
             ),
         ]
 
+    # ------------------------------------------------------------------ #
+    # Trace consumer — skill improvement pipeline                        #
+    # ------------------------------------------------------------------ #
+
     async def _handle_trace(self, envelope: Envelope, redis_conn: Any) -> bool:
         """Process a single skill trace message from the stream.
 
-        Reads the trace payload from ``envelope.context[CTX_SKILL_TRACE]``,
-        persists it to SQLite, and triggers Phase 1 changelog writing and
-        Phase 2 consolidation when thresholds are met.
+        Emits file-level ``logger.info()`` at every decision point for full
+        observability in the supervisord stdout log.
 
         Args:
-            envelope: Envelope with ``action=ACTION_SKILL_TRACE`` carrying
-                the trace payload in ``context[CTX_SKILL_TRACE]``.
+            envelope: Envelope with ``action=ACTION_SKILL_TRACE``.
             redis_conn: Active Redis connection.
 
         Returns:
             Always ``True`` — traces are advisory, XACK unconditionally.
         """
-        await self.log.info(
-            f"Trace received — correlation_id={envelope.correlation_id} sender={envelope.sender_id}",
-            correlation_id=envelope.correlation_id,
-            sender_id=envelope.sender_id,
+        logger.info(
+            "[TRACE] received — corr=%s sender=%s action=%s",
+            envelope.correlation_id,
+            envelope.sender_id,
+            envelope.action,
         )
         try:
             await self._process_trace(envelope, redis_conn)
         except Exception as exc:
-            logger.error("Error processing skill trace: %s", exc, exc_info=True)
+            logger.error(
+                "[TRACE] ERROR processing trace corr=%s: %s",
+                envelope.correlation_id,
+                exc,
+                exc_info=True,
+            )
         return True
 
     async def _process_trace(self, envelope: Envelope, redis_conn: Any) -> None:
@@ -196,7 +298,7 @@ class Forgeron(BrickBase):
             envelope: Envelope carrying the trace in ``context[CTX_SKILL_TRACE]``.
             redis_conn: Active Redis connection.
         """
-        trace_ctx: SkillTraceCtx = envelope.context.get(CTX_SKILL_TRACE, {}) # type: ignore
+        trace_ctx: SkillTraceCtx = envelope.context.get(CTX_SKILL_TRACE, {})  # type: ignore
 
         skill_names: list[str] = trace_ctx.get("skill_names", [])
         tool_call_count: int = trace_ctx.get("tool_call_count", 0)
@@ -204,9 +306,24 @@ class Forgeron(BrickBase):
         messages_raw_list: list[dict] = trace_ctx.get("messages_raw", [])
         messages_raw: str = json.dumps(messages_raw_list)
         correlation_id: str = envelope.correlation_id
+        is_aborted = tool_error_count == -1
+
+        logger.info(
+            "[TRACE] parsed — corr=%s skills=%s calls=%d errors=%d "
+            "aborted=%s messages_count=%d",
+            correlation_id,
+            skill_names,
+            tool_call_count,
+            tool_error_count,
+            is_aborted,
+            len(messages_raw_list),
+        )
 
         if not skill_names:
-            logger.debug("Trace has no skill_names, skipping.")
+            logger.info(
+                "[TRACE] SKIP — no skill_names in trace corr=%s",
+                correlation_id,
+            )
             return
 
         for skill_name in skill_names:
@@ -218,64 +335,133 @@ class Forgeron(BrickBase):
                 messages_raw=messages_raw,
             )
             await self._trace_store.add_trace(trace)
-
-            await self.log.info(
-                f"Trace stored for skill '{skill_name}' "
-                f"(calls={tool_call_count} errors={tool_error_count})",
-                correlation_id=correlation_id,
-                sender_id=envelope.sender_id,
+            logger.info(
+                "[TRACE] stored — skill='%s' corr=%s calls=%d errors=%d messages=%d",
+                skill_name,
+                correlation_id,
+                tool_call_count,
+                tool_error_count,
+                len(messages_raw_list),
             )
 
-            # Write observations to CHANGELOG.md on errors or after N calls.
-            # tool_error_count == -1 is the sentinel for turns aborted before completion
-            # (DLQ-routed by Atelier); these should always trigger analysis.
-            is_aborted = tool_error_count == -1
+            # Decide whether to trigger changelog analysis.
             call_count = self._skill_call_counts.get(skill_name, 0) + 1
             self._skill_call_counts[skill_name] = call_count
             threshold_reached = call_count >= self._config.annotation_call_threshold
             if threshold_reached:
-                self._skill_call_counts[skill_name] = 0  # reset so it fires every N calls
-            if (tool_error_count > 0 or is_aborted or threshold_reached) and self._config.annotation_mode:
-                if self._annotation_profile is not None:
-                    reason = (
-                        "aborted" if is_aborted
-                        else f"{tool_error_count} errors" if tool_error_count > 0
-                        else f"threshold ({call_count} calls)"
-                    )
-                    await self.log.info(
-                        f"Analysis triggered for skill '{skill_name}' — reason: {reason}",
-                        correlation_id=correlation_id,
-                        sender_id=envelope.sender_id,
-                    )
-                    writer = ChangelogWriter(
-                        profile=self._annotation_profile,
-                        skills_dir=self._config.skills_dir,
-                    )
-                    wrote = await writer.observe(
-                        skill_name=skill_name,
-                        tool_error_count=tool_error_count,
-                        messages_raw=messages_raw_list,
-                        config=self._config,
-                        redis_conn=redis_conn,
-                        force=threshold_reached,
-                    )
+                self._skill_call_counts[skill_name] = 0
 
-                    # Check whether the changelog warrants consolidation.
-                    if wrote and self._consolidation_profile is not None:
-                        cl_path = writer.changelog_path(skill_name)
-                        if cl_path is not None and await writer.should_consolidate(
-                            cl_path, self._config, redis_conn, skill_name
-                        ):
-                            await self.log.info(
-                                f"Consolidation triggered for skill '{skill_name}'",
-                                correlation_id=correlation_id,
-                                sender_id=envelope.sender_id,
-                            )
-                            await self._maybe_consolidate(
-                                skill_name=skill_name,
-                                envelope=envelope,
-                                redis_conn=redis_conn,
-                            )
+            # "Success after failure" — the previous turn for this skill had
+            # errors, but this one succeeded. This is the correction turn where
+            # the agent found the right approach; its messages_raw contains the
+            # fix that should be captured in the changelog.
+            prev_had_errors = self._last_had_errors.get(skill_name, False)
+            success_after_failure = (
+                prev_had_errors
+                and tool_error_count == 0
+                and not is_aborted
+            )
+
+            # Update the flag for the next turn.
+            self._last_had_errors[skill_name] = (
+                tool_error_count > 0 or is_aborted
+            )
+
+            should_analyze = (
+                (tool_error_count > 0
+                 or is_aborted
+                 or threshold_reached
+                 or success_after_failure)
+                and self._config.annotation_mode
+            )
+
+            if not should_analyze:
+                logger.info(
+                    "[TRACE] analysis NOT triggered — skill='%s' corr=%s "
+                    "errors=%d aborted=%s threshold=%s/%d saf=%s mode=%s",
+                    skill_name,
+                    correlation_id,
+                    tool_error_count,
+                    is_aborted,
+                    call_count,
+                    self._config.annotation_call_threshold,
+                    success_after_failure,
+                    self._config.annotation_mode,
+                )
+                continue
+
+            if self._annotation_profile is None:
+                logger.warning(
+                    "[TRACE] analysis SKIPPED — annotation_profile is None "
+                    "for skill='%s' corr=%s",
+                    skill_name,
+                    correlation_id,
+                )
+                continue
+
+            reason = (
+                "aborted" if is_aborted
+                else f"{tool_error_count} errors" if tool_error_count > 0
+                else "success after failure" if success_after_failure
+                else f"threshold ({call_count} calls)"
+            )
+            logger.info(
+                "[TRACE] analysis TRIGGERED — skill='%s' reason=%s corr=%s "
+                "profile=%s skills_dir=%s",
+                skill_name,
+                reason,
+                correlation_id,
+                self._annotation_profile.model,
+                self._config.skills_dir,
+            )
+
+            writer = ChangelogWriter(
+                profile=self._annotation_profile,
+                skills_dir=self._config.skills_dir,
+            )
+            wrote = await writer.observe(
+                skill_name=skill_name,
+                tool_error_count=tool_error_count,
+                messages_raw=messages_raw_list,
+                config=self._config,
+                redis_conn=redis_conn,
+                force=threshold_reached,
+            )
+            logger.info(
+                "[TRACE] changelog observe result — skill='%s' wrote=%s corr=%s",
+                skill_name,
+                wrote,
+                correlation_id,
+            )
+
+            # Check whether the changelog warrants consolidation.
+            if wrote and self._consolidation_profile is not None:
+                cl_path = writer.changelog_path(skill_name)
+                if cl_path is not None:
+                    should_consolidate = await writer.should_consolidate(
+                        cl_path, self._config, redis_conn, skill_name
+                    )
+                    logger.info(
+                        "[TRACE] consolidation check — skill='%s' "
+                        "should_consolidate=%s cl_path=%s corr=%s",
+                        skill_name,
+                        should_consolidate,
+                        cl_path,
+                        correlation_id,
+                    )
+                    if should_consolidate:
+                        await self._maybe_consolidate(
+                            skill_name=skill_name,
+                            envelope=envelope,
+                            redis_conn=redis_conn,
+                        )
+                else:
+                    logger.info(
+                        "[TRACE] consolidation SKIP — no changelog path "
+                        "for skill='%s' corr=%s",
+                        skill_name,
+                        correlation_id,
+                    )
 
     async def _maybe_consolidate(
         self,
@@ -292,6 +478,11 @@ class Forgeron(BrickBase):
         """
         from forgeron.skill_consolidator import SkillConsolidator  # noqa: PLC0415
 
+        logger.info(
+            "[CONSOLIDATION] starting — skill='%s' corr=%s",
+            skill_name,
+            envelope.correlation_id,
+        )
         consolidator = SkillConsolidator(
             profile=self._consolidation_profile,  # type: ignore[arg-type]
             skills_dir=self._config.skills_dir,  # type: ignore[arg-type]
@@ -299,12 +490,13 @@ class Forgeron(BrickBase):
         consolidated = await consolidator.consolidate(
             skill_name, redis_conn, self._config
         )
+        logger.info(
+            "[CONSOLIDATION] result — skill='%s' consolidated=%s corr=%s",
+            skill_name,
+            consolidated,
+            envelope.correlation_id,
+        )
         if consolidated:
-            await self.log.info(
-                f"Consolidation completed for skill '{skill_name}'",
-                correlation_id=envelope.correlation_id,
-                sender_id=envelope.sender_id,
-            )
             if self._config.notify_user_on_consolidation:
                 await self._notify_user(
                     channel=envelope.channel,
@@ -325,10 +517,6 @@ class Forgeron(BrickBase):
     async def _handle_archive(self, envelope: Envelope, redis_conn: Any) -> bool:
         """Consume an Atelier session archive and detect recurring intent patterns.
 
-        Extracts ``messages_raw`` and the original channel/sender_id from
-        ``CTX_SOUVENIR_REQUEST``, runs ``IntentLabeler``, records the session
-        in ``SessionStore``, and triggers ``SkillCreator`` when thresholds are met.
-
         Args:
             envelope: Archive envelope with ``action=ACTION_MEMORY_ARCHIVE``.
             redis_conn: Active Redis connection.
@@ -336,12 +524,28 @@ class Forgeron(BrickBase):
         Returns:
             Always ``True`` — advisory consumer, ACK unconditionally.
         """
+        logger.info(
+            "[ARCHIVE] received — corr=%s action=%s sender=%s session=%s",
+            envelope.correlation_id,
+            envelope.action,
+            envelope.sender_id,
+            envelope.session_id,
+        )
         if not self._config.creation_mode:
+            logger.info(
+                "[ARCHIVE] SKIP — creation_mode=False corr=%s",
+                envelope.correlation_id,
+            )
             return True
         try:
             await self._process_archive(envelope, redis_conn)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Error processing archive: %s", exc, exc_info=True)
+            logger.error(
+                "[ARCHIVE] ERROR processing archive corr=%s: %s",
+                envelope.correlation_id,
+                exc,
+                exc_info=True,
+            )
         return True
 
     async def _process_archive(self, envelope: Envelope, redis_conn: Any) -> None:
@@ -354,8 +558,10 @@ class Forgeron(BrickBase):
         corr = envelope.correlation_id
 
         if envelope.action != ACTION_MEMORY_ARCHIVE:
-            logger.debug(
-                "Skipping non-archive action '%s' on memory:request.", envelope.action
+            logger.info(
+                "[ARCHIVE] SKIP non-archive action='%s' corr=%s",
+                envelope.action,
+                corr,
             )
             return
 
@@ -364,18 +570,15 @@ class Forgeron(BrickBase):
         messages_raw_raw = souvenir_ctx.get("messages_raw", "[]")
 
         if not envelope_json:
-            logger.debug("Archive has no envelope_json, skipping intent labeling.")
+            logger.info(
+                "[ARCHIVE] SKIP — no envelope_json in souvenir_request corr=%s",
+                corr,
+            )
             return
 
         original_env = Envelope.from_json(envelope_json)
         channel = original_env.channel
         sender_id = original_env.sender_id
-
-        await self.log.info(
-            f"Archive received from {channel}/{sender_id}",
-            correlation_id=corr,
-            sender_id=sender_id,
-        )
 
         # Deserialize messages_raw (can be str or list depending on serialization)
         if isinstance(messages_raw_raw, str):
@@ -393,25 +596,50 @@ class Forgeron(BrickBase):
                 user_preview = str(msg.get("content", ""))[:200]
                 break
 
-        # Run intent labeling with the cheap annotation profile (Haiku)
+        logger.info(
+            "[ARCHIVE] parsed — corr=%s channel=%s sender=%s "
+            "messages=%d preview='%s'",
+            corr,
+            channel,
+            sender_id,
+            len(messages_raw),
+            user_preview[:80],
+        )
+
+        # Run intent labeling with the cheap annotation profile
         intent_label: str | None = None
         if self._annotation_profile is not None:
+            logger.info(
+                "[ARCHIVE] intent labeling — corr=%s model=%s",
+                corr,
+                self._annotation_profile.model,
+            )
             try:
                 from forgeron.intent_labeler import IntentLabeler  # noqa: PLC0415
 
                 labeler = IntentLabeler(profile=self._annotation_profile)
                 intent_label = await labeler.label(messages_raw)
+                logger.info(
+                    "[ARCHIVE] intent result — corr=%s label='%s'",
+                    corr,
+                    intent_label,
+                )
             except ImportError:
-                await self.log.warning(
-                    "IntentLabeler not available, skipping.",
-                    correlation_id=corr,
+                logger.warning(
+                    "[ARCHIVE] IntentLabeler not importable — skipping corr=%s",
+                    corr,
                 )
             except Exception as exc:  # noqa: BLE001
-                await self.log.warning(
-                    f"IntentLabeler failed: {exc}",
-                    correlation_id=corr,
-                    sender_id=sender_id,
+                logger.warning(
+                    "[ARCHIVE] IntentLabeler failed — corr=%s error=%s",
+                    corr,
+                    exc,
                 )
+        else:
+            logger.info(
+                "[ARCHIVE] SKIP intent labeling — annotation_profile=None corr=%s",
+                corr,
+            )
 
         # Record in SQLite
         await self._session_store.record_session(
@@ -422,15 +650,18 @@ class Forgeron(BrickBase):
             intent_label=intent_label,
             user_content_preview=user_preview,
         )
-
-        await self.log.info(
-            f"Session recorded (intent={intent_label or 'none'}, "
-            f"preview='{user_preview[:50]}...')",
-            correlation_id=corr,
-            sender_id=sender_id,
+        logger.info(
+            "[ARCHIVE] session recorded — corr=%s intent=%s session=%s",
+            corr,
+            intent_label or "none",
+            envelope.session_id,
         )
 
         if intent_label is None:
+            logger.info(
+                "[ARCHIVE] STOP — no intent label, skipping creation check corr=%s",
+                corr,
+            )
             return
 
         # Check creation thresholds
@@ -439,13 +670,15 @@ class Forgeron(BrickBase):
             min_sessions=self._config.min_sessions_for_creation,
             redis_conn=redis_conn,
         )
+        logger.info(
+            "[ARCHIVE] creation check — intent='%s' should_create=%s "
+            "min_sessions=%d corr=%s",
+            intent_label,
+            should,
+            self._config.min_sessions_for_creation,
+            corr,
+        )
         if should:
-            await self.log.info(
-                f"Creation threshold reached for intent '{intent_label}' "
-                f"(min={self._config.min_sessions_for_creation})",
-                correlation_id=corr,
-                sender_id=sender_id,
-            )
             await self._trigger_creation(
                 intent_label=intent_label,
                 channel=channel,
@@ -466,11 +699,6 @@ class Forgeron(BrickBase):
     ) -> None:
         """Create a new skill from recurring session patterns.
 
-        Sets the cooldown key immediately, then calls ``SkillCreator`` with
-        representative session examples.  On success, records the result in
-        ``SessionStore``, publishes a ``skill.created`` event, and notifies
-        the user.
-
         Args:
             intent_label: Normalized intent label (e.g. ``"send_email"``).
             channel: Original channel (e.g. ``"discord"``).
@@ -479,35 +707,37 @@ class Forgeron(BrickBase):
             correlation_id: Correlation ID for tracking.
             redis_conn: Active Redis connection.
         """
+        logger.info(
+            "[CREATION] starting — intent='%s' corr=%s sender=%s",
+            intent_label,
+            correlation_id,
+            sender_id,
+        )
+
         # Set cooldown to prevent concurrent triggers for the same label
         cooldown_key = f"relais:skill:creation_cooldown:{intent_label}"
         await redis_conn.set(cooldown_key, "1", ex=self._config.creation_cooldown_seconds)
 
-        await self.log.info(
-            f"Triggering skill creation for intent '{intent_label}'",
-            correlation_id=correlation_id,
-            sender_id=sender_id,
-        )
-
         try:
             from forgeron.skill_creator import SkillCreator  # noqa: PLC0415
         except ImportError as exc:
-            await self.log.warning(
-                f"SkillCreator not available: {exc}",
-                correlation_id=correlation_id,
+            logger.warning(
+                "[CREATION] SkillCreator not importable: %s corr=%s",
+                exc,
+                correlation_id,
             )
             return
 
         if self._config.skills_dir is None:
-            await self.log.warning(
-                "skills_dir is None — cannot create skill.",
-                correlation_id=correlation_id,
+            logger.warning(
+                "[CREATION] ABORT — skills_dir is None corr=%s",
+                correlation_id,
             )
             return
         if self._llm_profile is None:
-            await self.log.warning(
-                "llm_profile not loaded — cannot create skill.",
-                correlation_id=correlation_id,
+            logger.warning(
+                "[CREATION] ABORT — llm_profile not loaded corr=%s",
+                correlation_id,
             )
             return
 
@@ -518,17 +748,35 @@ class Forgeron(BrickBase):
             {"user_content_preview": s.user_content_preview}
             for s in representative
         ]
+        logger.info(
+            "[CREATION] calling SkillCreator — intent='%s' examples=%d "
+            "model=%s corr=%s",
+            intent_label,
+            len(session_examples),
+            self._llm_profile.model,
+            correlation_id,
+        )
 
         creator = SkillCreator(profile=self._llm_profile, skills_dir=self._config.skills_dir)
         result = await creator.create(intent_label, session_examples)
         if result is None:
-            await self.log.warning(
-                f"SkillCreator returned None for intent '{intent_label}'",
-                correlation_id=correlation_id,
+            logger.warning(
+                "[CREATION] SkillCreator returned None — intent='%s' corr=%s",
+                intent_label,
+                correlation_id,
             )
             return
 
         await self._session_store.mark_created(intent_label, result.skill_name)
+        logger.info(
+            "[CREATION] SUCCESS — skill='%s' intent='%s' path=%s "
+            "sessions=%d corr=%s",
+            result.skill_name,
+            intent_label,
+            result.skill_path,
+            len(representative),
+            correlation_id,
+        )
 
         # Publish skill.created event on relais:events:system
         event_env = Envelope(
@@ -548,12 +796,6 @@ class Forgeron(BrickBase):
             "contributing_sessions": len(representative),
         })
         await redis_conn.xadd(STREAM_EVENTS_SYSTEM, {"payload": event_env.to_json()})
-        await self.log.info(
-            f"Skill '{result.skill_name}' created for intent '{intent_label}' "
-            f"({len(representative)} contributing sessions)",
-            correlation_id=correlation_id,
-            sender_id=sender_id,
-        )
 
         if self._config.notify_user_on_creation:
             await self._notify_user(
@@ -580,10 +822,6 @@ class Forgeron(BrickBase):
     ) -> None:
         """Publish a notification to the user via relais:messages:outgoing_pending.
 
-        Sentinelle's outgoing loop picks it up, applies guardrails, and routes
-        it to ``relais:messages:outgoing:{channel}`` for the channel adapter to
-        deliver.
-
         Args:
             channel: Original channel (e.g. ``"discord"``).
             sender_id: Original sender_id.
@@ -601,10 +839,12 @@ class Forgeron(BrickBase):
         )
         notif_env.action = ACTION_MESSAGE_OUTGOING_PENDING
         await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": notif_env.to_json()})
-        await self.log.info(
-            f"Notification sent to {channel}/{sender_id}: {message[:60]}",
-            correlation_id=correlation_id,
-            sender_id=sender_id,
+        logger.info(
+            "[NOTIFY] sent to %s/%s — '%s' corr=%s",
+            channel,
+            sender_id,
+            message[:60],
+            correlation_id,
         )
 
 if __name__ == "__main__":

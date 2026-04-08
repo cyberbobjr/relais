@@ -41,6 +41,15 @@ Key classes:
   and ``relais:messages:outgoing:{channel}`` for real-time rendering.
 * ``SouvenirBackend`` (atelier.souvenir_backend) — ``BackendProtocol`` impl
   that routes ``/memories/`` paths to the Souvenir brick via Redis.
+* ``ErrorSynthesizer`` (atelier.error_synthesizer) — on ``AgentExecutionError``,
+  performs a lightweight LLM call with the partial conversation history
+  (captured in ``AgentExecutionError.messages_raw``) to produce an empathetic
+  user-visible error reply.  Falls back to a static message on LLM failure.
+* ``ToolErrorGuard`` (atelier.agent_executor) — tracks consecutive and total
+  tool errors during the agentic loop; raises ``AgentExecutionError`` when
+  limits are exceeded to prevent runaway loops.
+* ``StreamBuffer`` (atelier.agent_executor) — accumulates text tokens and
+  flushes to a callback when a character threshold is reached.
 
 Redis channels
 --------------
@@ -49,7 +58,12 @@ Consumed:
   - relais:config:reload:atelier  (Pub/Sub channel for hot-reload trigger)
 
 Produced:
-  - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw)
+  - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw).
+                                  Also used for synthesized error replies: on AgentExecutionError,
+                                  ``ErrorSynthesizer`` (atelier/error_synthesizer.py) performs a
+                                  lightweight LLM call with the partial conversation history
+                                  (``AgentExecutionError.messages_raw``) and publishes an
+                                  empathetic error message so the user is not left in silence.
   - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
   - relais:memory:request      — archive action with full messages_raw for Souvenir
   - relais:skill:trace         — per-turn skill execution trace → Forgeron (fire-and-forget,
@@ -57,7 +71,8 @@ Produced:
                                   (a) after a successful turn when tool_call_count > 0;
                                   (b) on the DLQ path (AgentExecutionError) with
                                   tool_error_count=-1 (sentinel: aborted turn) and
-                                  messages_raw=[].
+                                  messages_raw=exc.messages_raw (partial conversation
+                                  captured from the graph state).
                                   context[CTX_SKILL_TRACE] carries skill_names,
                                   tool_call_count, tool_error_count, messages_raw
   - relais:tasks:failed        — DLQ for exhausted retry attempts
@@ -180,6 +195,19 @@ from atelier.subagents import SubagentRegistry
 from atelier.tools._registry import ToolRegistry
 
 logger = logging.getLogger("atelier")
+
+# Ensure the atelier logger has at least one handler writing to stdout,
+# even if configure_logging_once() was skipped or root-level handlers were
+# removed.  This guarantees that logger.info() calls always appear in the
+# supervisord stdout log file.
+import sys as _sys
+if not logger.handlers:
+    _handler = logging.StreamHandler(_sys.stdout)
+    _handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s"
+    ))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.DEBUG)
 
 # Directory containing soul/channels/roles/policies prompts.
 # Resolved via the config cascade so users can override in ~/.relais/prompts/.
@@ -585,13 +613,13 @@ class Atelier(BrickBase):
             False when a transient error occurred and the message should
             remain in the PEL for re-delivery.
         """
-        logger.debug("_handle_envelope correlation_id: %s", envelope.correlation_id)
+        corr = envelope.correlation_id
+        sender = envelope.sender_id
         skills_used: list[str] = []  # hoisted so the DLQ path can publish a failure trace
         try:
-            await self.log.info(
-                f"[{envelope.correlation_id}] Processing task for {envelope.sender_id}",
-                correlation_id=envelope.correlation_id,
-                sender_id=envelope.sender_id,
+            logger.info(
+                "[TASK] received — corr=%s sender=%s channel=%s content='%s'",
+                corr, sender, envelope.channel, envelope.content[:100],
             )
 
             # 1. Resolve LLM profile — read from CTX_PORTAIL stamped by Portail
@@ -599,9 +627,11 @@ class Atelier(BrickBase):
             ur: dict = portail_ctx.get("user_record") or {}
             profile_name = portail_ctx.get("llm_profile") or "default"
             profile = resolve_profile(self._profiles, profile_name)
-
-            # Resolve unique user_id for SouvenirBackend
-            user_id: str = portail_ctx.get("user_id") or envelope.sender_id
+            user_id: str = portail_ctx.get("user_id") or sender
+            logger.info(
+                "[TASK] profile resolved — corr=%s profile=%s model=%s user_id=%s",
+                corr, profile_name, profile.model, user_id,
+            )
 
             # 2. Assemble soul system prompt
             soul_prompt = assemble_system_prompt(
@@ -610,39 +640,41 @@ class Atelier(BrickBase):
                 user_prompt_path=ur.get("prompt_path"),
                 channel_prompt_path=portail_ctx.get("channel_prompt_path"),
             )
-
-            # 3. Resolve per-user skills and MCP tool policy from user_record
-            # dict stamped by Portail (consolidated identity envelope).
-            skills = self._tool_policy.resolve_skills(
-                ur.get("skills_dirs")
+            logger.info(
+                "[TASK] soul prompt assembled — corr=%s len=%d role=%s",
+                corr, len(soul_prompt), ur.get("role_prompt_path", "none"),
             )
+
+            # 3. Resolve per-user skills and MCP tool policy
+            skills = self._tool_policy.resolve_skills(ur.get("skills_dirs"))
             skills_used = [Path(s).name for s in skills]
-            mcp_patterns = self._tool_policy.parse_mcp_patterns(
-                ur.get("allowed_mcp_tools")
+            mcp_patterns = self._tool_policy.parse_mcp_patterns(ur.get("allowed_mcp_tools"))
+            logger.info(
+                "[TASK] skills resolved — corr=%s skills=%s mcp_patterns=%s",
+                corr, skills_used, mcp_patterns,
             )
 
-            # 4. Read MCP tools from the singleton — no per-request session creation.
-            # all profiles share the single global McpSessionManager.
-            # The lock ensures we snapshot _mcp_tools safely during a hot-reload restart.
-            # list() copies the reference list before releasing the lock so that a
-            # concurrent _restart_mcp_sessions() cannot mutate self._mcp_tools under us.
+            # 4. Read MCP tools from the singleton
             async with self._mcp_lock:
                 if mcp_patterns and self._mcp_manager and self._mcp_manager.is_running:
                     mcp_tools = self._tool_policy.filter_mcp_tools(
-                        list(self._mcp_tools),
-                        ur.get("allowed_mcp_tools"),
+                        list(self._mcp_tools), ur.get("allowed_mcp_tools"),
                     )
                 else:
                     mcp_tools = []
+            logger.info(
+                "[TASK] MCP tools filtered — corr=%s mcp_tools=%d names=%s",
+                corr, len(mcp_tools), [t.name for t in mcp_tools][:10],
+            )
 
-            # 5. Resolve subagents and delegation prompt from the registry,
-            # filtered by the user's allowed_subagents patterns.
-            # Pass mcp_tools as request_tools so mcp:<glob> and inherit
-            # tokens resolve against the per-request ToolPolicy-filtered pool.
+            # 5. Resolve subagents and delegation prompt
             stream_pub: StreamPublisher | None = None
-
             subagents = self._subagent_registry.specs_for_user(ur, request_tools=mcp_tools)
             delegation_prompt = self._subagent_registry.delegation_prompt_for_user(ur)
+            logger.info(
+                "[TASK] subagents resolved — corr=%s count=%d delegation_len=%d",
+                corr, len(subagents), len(delegation_prompt),
+            )
 
             agent_executor = AgentExecutor(
                 profile=profile,
@@ -655,13 +687,13 @@ class Atelier(BrickBase):
                 delegation_prompt=delegation_prompt,
             )
 
-            # 6. Execute — streaming only for capable channels; progress for all.
+            # 6. Execute
             aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
             streaming = aig_ctx.get("streaming", False)
             stream_pub = StreamPublisher(
                 redis_conn,
                 channel=envelope.channel,
-                correlation_id=envelope.correlation_id,
+                correlation_id=corr,
                 source_envelope=envelope,
                 progress_config=self._progress_config,
             )
@@ -670,6 +702,10 @@ class Atelier(BrickBase):
                     f"relais:streaming:start:{envelope.channel}",
                     envelope.to_json(),
                 )
+            logger.info(
+                "[TASK] executing agent — corr=%s streaming=%s model=%s",
+                corr, streaming, profile.model,
+            )
 
             agent_result = await agent_executor.execute(
                 envelope=envelope,
@@ -677,17 +713,21 @@ class Atelier(BrickBase):
                 progress_callback=stream_pub.push_progress,
             )
             reply_text = agent_result.reply_text
+            logger.info(
+                "[TASK] agent done — corr=%s reply_len=%d tool_calls=%d "
+                "tool_errors=%d messages=%d",
+                corr, len(reply_text), agent_result.tool_call_count,
+                agent_result.tool_error_count, len(agent_result.messages_raw),
+            )
 
-            # 7. Publish skill trace for Forgeron analysis (fire-and-forget side channel).
-            # Only published when skills were used and at least one tool call was made,
-            # to avoid polluting the trace stream with skill-less turns.
+            # 7. Publish skill trace for Forgeron (fire-and-forget)
             if skills_used and agent_result.tool_call_count > 0:
                 trace_env = Envelope(
                     content="",
-                    sender_id=f"atelier:{envelope.sender_id}",
+                    sender_id=f"atelier:{sender}",
                     channel="internal",
                     session_id=envelope.session_id,
-                    correlation_id=envelope.correlation_id,
+                    correlation_id=corr,
                     action=ACTION_SKILL_TRACE,
                     context={CTX_SKILL_TRACE: {
                         "skill_names": skills_used,
@@ -699,9 +739,20 @@ class Atelier(BrickBase):
                 await redis_conn.xadd(
                     STREAM_SKILL_TRACE, {"payload": trace_env.to_json()}
                 )
+                logger.info(
+                    "[TASK] skill trace published — corr=%s skills=%s "
+                    "calls=%d errors=%d",
+                    corr, skills_used, agent_result.tool_call_count,
+                    agent_result.tool_error_count,
+                )
+            else:
+                logger.info(
+                    "[TASK] skill trace SKIP — corr=%s skills_used=%s "
+                    "tool_calls=%d",
+                    corr, skills_used, agent_result.tool_call_count,
+                )
 
-
-            # 8. Build and publish response envelope.
+            # 8. Build and publish response envelope
             response_env = Envelope.create_response_to(envelope, reply_text)
             atelier_ctx = ensure_ctx(response_env, CTX_ATELIER)
             atelier_ctx["user_message"] = envelope.content
@@ -714,19 +765,18 @@ class Atelier(BrickBase):
 
             out_stream = STREAM_OUTGOING_PENDING
             await redis_conn.xadd(out_stream, {"payload": response_env.to_json()})
+            logger.info(
+                "[TASK] response published — corr=%s stream=%s reply='%s'",
+                corr, out_stream, reply_text[:80],
+            )
 
-            # Archive the turn directly to Souvenir via relais:memory:request.
-            # messages_raw stays off the outgoing envelope to avoid serializing
-            # the full conversation history through every downstream consumer.
-            # The Envelope format is required: Souvenir's BrickBase loop parses
-            # each message via Envelope.from_json(), and action + parameters are
-            # carried in envelope.action and envelope.context[CTX_SOUVENIR_REQUEST].
+            # 9. Archive turn to Souvenir
             archive_env = Envelope(
                 content="",
-                sender_id=f"atelier:{envelope.sender_id}",
+                sender_id=f"atelier:{sender}",
                 channel="internal",
                 session_id=envelope.session_id,
-                correlation_id=envelope.correlation_id,
+                correlation_id=corr,
                 action=ACTION_MEMORY_ARCHIVE,
                 context={CTX_SOUVENIR_REQUEST: {
                     "envelope_json": response_env.to_json(),
@@ -734,32 +784,26 @@ class Atelier(BrickBase):
                 }},
             )
             await redis_conn.xadd(
-                STREAM_MEMORY_REQUEST,
-                {"payload": archive_env.to_json()},
+                STREAM_MEMORY_REQUEST, {"payload": archive_env.to_json()},
+            )
+            logger.info(
+                "[TASK] archive published — corr=%s messages=%d",
+                corr, len(agent_result.messages_raw),
             )
 
-            await redis_conn.xadd(STREAM_LOGS, {
-                "level": "INFO",
-                "brick": "atelier",
-                "correlation_id": envelope.correlation_id,
-                "sender_id": envelope.sender_id,
-                "message": f"Answered {envelope.correlation_id} via {out_stream}",
-                "content_preview": (reply_text or "")[:60],
-            })
-
-            await self.log.info(
-                f"[{envelope.correlation_id}] Answered via {out_stream}",
-                correlation_id=envelope.correlation_id,
-                sender_id=envelope.sender_id,
+            logger.info(
+                "[TASK] DONE — corr=%s sender=%s model=%s reply_len=%d",
+                corr, sender, profile.model, len(reply_text),
             )
             return True
 
         except AgentExecutionError as exc:
             # Non-recoverable agent failure — route to DLQ and ACK
-            await self.log.error(
-                f"[{envelope.correlation_id}] Agent execution error, routing to DLQ: {exc}",
-                correlation_id=envelope.correlation_id,
-                sender_id=envelope.sender_id,
+            logger.error(
+                "[TASK] AgentExecutionError — corr=%s error='%s' "
+                "tool_calls=%d tool_errors=%d messages_raw=%d skills=%s",
+                corr, exc, exc.tool_call_count, exc.tool_error_count,
+                len(exc.messages_raw), skills_used,
             )
             dlq_entry: dict = {
                 "payload": envelope.to_json(),
@@ -769,18 +813,19 @@ class Atelier(BrickBase):
             if exc.response_body:
                 dlq_entry["error_detail"] = exc.response_body[:4000]
             await redis_conn.xadd(STREAM_TASKS_FAILED, dlq_entry)
-            await redis_conn.xadd(STREAM_LOGS, {
-                "level": "ERROR",
-                "brick": "atelier",
-                "correlation_id": envelope.correlation_id,
-                "sender_id": envelope.sender_id,
-                "message": f"Agent execution error for {envelope.correlation_id}: {exc}",
-                "error": str(exc),
-            })
-            # Synthesize an empathetic error reply so the user is not left in silence.
-            # Best-effort: if synthesis fails the user still gets a fallback reply.
+            logger.info(
+                "[TASK] DLQ published — corr=%s stream=%s",
+                corr, STREAM_TASKS_FAILED,
+            )
+
+            # Synthesize an empathetic error reply
             try:
                 synth = ErrorSynthesizer()
+                logger.info(
+                    "[TASK] synthesizing error reply — corr=%s model=%s "
+                    "messages_raw=%d",
+                    corr, profile.model, len(exc.messages_raw),
+                )
                 error_reply = await synth.synthesize(
                     messages_raw=exc.messages_raw,
                     error=str(exc),
@@ -789,64 +834,60 @@ class Atelier(BrickBase):
                 error_env = Envelope.from_parent(parent=envelope, content=error_reply)
                 error_env.action = ACTION_MESSAGE_OUTGOING_PENDING
                 await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": error_env.to_json()})
-                await self.log.info(
-                    f"[{envelope.correlation_id}] Error reply published to outgoing_pending for {envelope.sender_id}",
-                    correlation_id=envelope.correlation_id,
-                    sender_id=envelope.sender_id,
+                logger.info(
+                    "[TASK] error reply published — corr=%s reply='%s'",
+                    corr, error_reply[:80],
                 )
             except Exception as synth_exc:
-                await self.log.warning(
-                    f"[{envelope.correlation_id}] Failed to publish error reply: {synth_exc}",
-                    correlation_id=envelope.correlation_id,
-                    sender_id=envelope.sender_id,
+                logger.warning(
+                    "[TASK] error reply FAILED — corr=%s error=%s",
+                    corr, synth_exc,
                 )
-            # Publish failure trace so Forgeron can analyze aborted turns.
-            # tool_error_count=-1 is the sentinel for turns that were aborted
-            # (DLQ-routed) rather than completing normally.
-            # Guarded in its own try/except: a Redis failure here must not
-            # propagate out of this handler and re-route the message to the PEL.
+
+            # Publish failure trace so Forgeron can analyze aborted turns
             if skills_used:
                 try:
                     failure_trace_env = Envelope(
                         content="",
-                        sender_id=f"atelier:{envelope.sender_id}",
+                        sender_id=f"atelier:{sender}",
                         channel="internal",
                         session_id=envelope.session_id,
-                        correlation_id=envelope.correlation_id,
+                        correlation_id=corr,
                         action=ACTION_SKILL_TRACE,
                         context={CTX_SKILL_TRACE: {
                             "skill_names": skills_used,
                             "tool_call_count": exc.tool_call_count,
                             "tool_error_count": -1,  # sentinel: aborted turn
-                            "messages_raw": [],
+                            "messages_raw": exc.messages_raw,
                         }},
                     )
                     await redis_conn.xadd(
                         STREAM_SKILL_TRACE, {"payload": failure_trace_env.to_json()}
                     )
-                except Exception as trace_exc:
-                    await self.log.warning(
-                        f"[{envelope.correlation_id}] Failed to publish failure trace: {trace_exc}",
-                        correlation_id=envelope.correlation_id,
+                    logger.info(
+                        "[TASK] failure trace published — corr=%s skills=%s "
+                        "messages_raw=%d",
+                        corr, skills_used, len(exc.messages_raw),
                     )
+                except Exception as trace_exc:
+                    logger.warning(
+                        "[TASK] failure trace FAILED — corr=%s error=%s",
+                        corr, trace_exc,
+                    )
+            else:
+                logger.info(
+                    "[TASK] failure trace SKIP — no skills_used corr=%s",
+                    corr,
+                )
             return True
 
         except Exception as exc:
             # Transient or unknown error — leave in PEL for re-delivery
-            await self.log.error(
-                f"[{envelope.correlation_id}] Unhandled exception, leaving in PEL: {exc}",
-                correlation_id=envelope.correlation_id,
-                sender_id=envelope.sender_id,
+            logger.error(
+                "[TASK] UNHANDLED exception — corr=%s error='%s' "
+                "leaving in PEL for re-delivery",
+                corr, exc, exc_info=True,
             )
-            logger.debug("%s", exc, exc_info=True)
-            await redis_conn.xadd(STREAM_LOGS, {
-                "level": "ERROR",
-                "brick": "atelier",
-                "correlation_id": envelope.correlation_id,
-                "sender_id": envelope.sender_id,
-                "message": f"Unhandled exception for {envelope.correlation_id}: {exc}",
-                "error": str(exc),
-            })
             return False
 
 
