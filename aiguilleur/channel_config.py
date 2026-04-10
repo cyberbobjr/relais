@@ -140,6 +140,12 @@ def load_channels_config() -> dict[str, ChannelConfig]:
         config_path: Path = resolve_config_path(_CHANNELS_CONFIG_FILE)
         raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
     except FileNotFoundError:
+        import logging
+        logging.getLogger("aiguilleur.config").warning(
+            "aiguilleur.yaml not found — falling back to discord-only default. "
+            "Run initialize_user_dir() or copy config/aiguilleur.yaml.default to %s",
+            _CHANNELS_CONFIG_FILE,
+        )
         return {
             "discord": ChannelConfig(name="discord", enabled=True, streaming=True)
         }

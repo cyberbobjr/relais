@@ -11,6 +11,7 @@ import pytest_asyncio
 import yaml
 
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_OUTGOING_PENDING
 
 from sentinelle.acl import ACLManager
 
@@ -244,6 +245,7 @@ def _make_outgoing_envelope(channel: str = "discord") -> Envelope:
         session_id="sess-001",
         correlation_id="corr-001",
         timestamp=0.0,
+        action=ACTION_MESSAGE_OUTGOING_PENDING,
         media_refs=[],
     )
 

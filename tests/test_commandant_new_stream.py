@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_COMMAND
 
 
 def _make_envelope(content: str, channel: str = "discord") -> Envelope:
@@ -20,6 +21,7 @@ def _make_envelope(content: str, channel: str = "discord") -> Envelope:
         channel=channel,
         session_id="sess-001",
         correlation_id="corr-001",
+        action=ACTION_MESSAGE_COMMAND,
     )
 
 

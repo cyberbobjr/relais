@@ -164,12 +164,14 @@ async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> 
     profile_mock.max_turns = 5
     atelier._profiles = {"default": profile_mock}
 
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
     envelope = Envelope(
         content="hello",
         sender_id="discord:111",
         channel="discord",
         session_id="sess-stream",
         correlation_id="corr-stream-001",
+        action=ACTION_MESSAGE_INCOMING,
         context={
             CTX_AIGUILLEUR: {"streaming": True, "reply_to": "999"},
             CTX_PORTAIL: {
@@ -254,12 +256,14 @@ async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false()
     profile_mock.max_turns = 5
     atelier._profiles = {"default": profile_mock}
 
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
     envelope = Envelope(
         content="hello",
         sender_id="discord:111",
         channel="discord",
         session_id="sess-nostream",
         correlation_id="corr-nostream-001",
+        action=ACTION_MESSAGE_INCOMING,
         context={
             CTX_AIGUILLEUR: {"streaming": False, "reply_to": "999"},
             CTX_PORTAIL: {

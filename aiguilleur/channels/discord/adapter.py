@@ -38,6 +38,7 @@ from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_INCOMING, ACTION_MESSAGE_PROGRESS
 from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER, AiguilleurCtx, AtelierCtx
 from common.config_loader import get_default_llm_profile
+from common.streams import STREAM_OUTGOING_FAILED
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
 
@@ -508,7 +509,7 @@ class _RelaisDiscordClient(discord.Client):
                                 exc,
                             )
                             await self._redis_conn.xadd(
-                                "relais:messages:outgoing:failed",
+                                STREAM_OUTGOING_FAILED,
                                 {
                                     "source": self.stream_out,
                                     "message_id": message_id,

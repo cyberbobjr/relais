@@ -19,6 +19,7 @@ import pytest
 
 from common.envelope import Envelope
 from common.contexts import CTX_PORTAIL
+from common.envelope_actions import ACTION_MESSAGE_INCOMING
 from atelier.agent_executor import AgentExecutionError
 
 
@@ -49,6 +50,7 @@ def _make_envelope(
         session_id="sess-abc",
         correlation_id="corr-ur-001",
         context=context or {},
+        action=ACTION_MESSAGE_INCOMING,
     )
 
 

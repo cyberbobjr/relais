@@ -1,7 +1,7 @@
 """Markdown conversion utilities for RELAIS outgoing channels.
 
 Converts standard Markdown to the platform-specific dialects required
-by Telegram (MarkdownV2), Slack (mrkdwn), and plain-text output.
+by Telegram (MarkdownV2), Slack (mrkdwn), WhatsApp, and plain-text output.
 
 No external dependencies — stdlib ``re`` only.
 """
@@ -161,6 +161,48 @@ def convert_md_to_slack_mrkdwn(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Plain text (strip all Markdown)
 # ---------------------------------------------------------------------------
+
+_WB_OPEN = "\x00WB\x00"
+_WB_CLOSE = "\x00WC\x00"
+
+
+def convert_md_to_whatsapp(text: str) -> str:
+    """Converts standard Markdown to WhatsApp native formatting.
+
+    WhatsApp supports a limited set of formatting:
+    ``*bold*``, ``_italic_``, ``~strikethrough~``, and monospace via
+    triple backticks.  Headings, horizontal rules, and links are
+    simplified to plain text.
+
+    Args:
+        text: Input text in standard Markdown format.
+
+    Returns:
+        Text formatted for WhatsApp display.
+    """
+    # Fenced code blocks — keep content, remove fences
+    result = re.sub(r"```(?:[^\n]*\n)?([\s\S]*?)```", r"\1", text)
+    # Inline code — remove backticks
+    result = re.sub(r"`([^`]+)`", r"\1", result)
+    # Bold **text** or __text__ → *text* (WhatsApp bold)
+    # Null-byte placeholders avoid italic pass re-matching
+    result = re.sub(r"\*\*(.+?)\*\*", rf"{_WB_OPEN}\1{_WB_CLOSE}", result)
+    result = re.sub(r"__(.+?)__", rf"{_WB_OPEN}\1{_WB_CLOSE}", result)
+    # Italic *text* → _text_ (WhatsApp italic)
+    result = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"_\1_", result)
+    # Restore bold placeholders → WhatsApp *
+    result = result.replace(_WB_OPEN, "*").replace(_WB_CLOSE, "*")
+    # Italic _text_ already correct for WhatsApp — leave as-is
+    # Strikethrough ~~text~~ → ~text~
+    result = re.sub(r"~~(.+?)~~", r"~\1~", result)
+    # Links [text](url) → url (plain URL, WhatsApp auto-links)
+    result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\2", result)
+    # Headings — strip # prefix
+    result = re.sub(r"^#{1,6}\s+(.+)$", r"\1", result, flags=re.MULTILINE)
+    # Horizontal rules — remove
+    result = re.sub(r"^[-*_]{3,}\s*$", "", result, flags=re.MULTILINE)
+    return result
+
 
 def strip_markdown(text: str) -> str:
     """Removes all Markdown formatting, returning plain text.

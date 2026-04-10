@@ -9,6 +9,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_COMMAND
 
 
 @pytest.fixture
@@ -20,6 +21,7 @@ def sample_envelope() -> Envelope:
         channel="discord",
         session_id="session_abc",
         correlation_id="corr_001",
+        action=ACTION_MESSAGE_COMMAND,
     )
 
 
@@ -222,6 +224,7 @@ async def test_handle_help_publishes_outgoing(mock_redis):
         sender_id="discord:123456",
         channel="discord",
         session_id="session_abc",
+        action=ACTION_MESSAGE_COMMAND,
     )
     await handle_help(envelope, mock_redis)
 
@@ -241,6 +244,7 @@ async def test_handle_help_lists_all_command_names(mock_redis):
         sender_id="discord:123456",
         channel="discord",
         session_id="session_abc",
+        action=ACTION_MESSAGE_COMMAND,
     )
     await handle_help(envelope, mock_redis)
 
@@ -268,6 +272,7 @@ async def test_handle_help_includes_descriptions(mock_redis):
         sender_id="discord:123456",
         channel="discord",
         session_id="session_abc",
+        action=ACTION_MESSAGE_COMMAND,
     )
     await handle_help(envelope, mock_redis)
 
@@ -320,6 +325,7 @@ async def test_handle_non_command_returns_true(mock_redis):
         channel="discord",
         session_id="s1",
         correlation_id="c1",
+        action=ACTION_MESSAGE_COMMAND,
     )
 
     result = await commandant._handle(envelope, mock_redis)
@@ -343,6 +349,7 @@ async def test_handle_clear_command_dispatches(mock_redis):
         channel="discord",
         session_id="s1",
         correlation_id="c1",
+        action=ACTION_MESSAGE_COMMAND,
     )
 
     result = await commandant._handle(envelope, mock_redis)

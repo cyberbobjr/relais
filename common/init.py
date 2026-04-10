@@ -13,6 +13,7 @@ DEFAULT_FILES = [
     ("config/atelier/mcp_servers.yaml",       "config/atelier/mcp_servers.yaml.default"),
     ("config/atelier.yaml",                   "config/atelier.yaml.default"),
     ("config/atelier/subagents/relais-config/subagent.yaml", "config/atelier/subagents/relais-config/subagent.yaml.default"),
+    ("config/aiguilleur.yaml",                 "config/aiguilleur.yaml.default"),
     ("config/HEARTBEAT.md",                   "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
     ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),

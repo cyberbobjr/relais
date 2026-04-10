@@ -4,17 +4,26 @@ description: >
   (portail.yaml, aiguilleur.yaml, profiles.yaml, sentinelle.yaml,
   mcp_servers.yaml), prompt overlays (soul, roles, users, channels,
   policies), and agent skills (create, modify, delete SKILL.md).
+  Also installs, configures and pairs communication channels
+  (WhatsApp, Discord, Telegram, REST, …) via the channel-setup skill.
   Use when the user asks to add/remove/edit a user, role, channel,
   LLM profile, ACL rule, MCP server, prompt, or skill. Also use
-  when the user asks to display or inspect any configuration.
+  when the user asks to display, inspect, install, or pair any
+  channel or configuration.
 delegation_snippet: |
   - **relais-config**: Reads and modifies RELAIS configuration files
     (portail.yaml, aiguilleur.yaml, profiles.yaml, sentinelle.yaml,
-    mcp_servers.yaml), prompt overlays, and agent skills.
-    Delegate via task() when the user asks to add, remove, edit,
-    or inspect any configuration.
+    mcp_servers.yaml), prompt overlays, agent skills, and guides the
+    full install/configure/pair flow for communication channels
+    (WhatsApp, Discord, Telegram, …). Delegate via task() when the
+    user asks to add, remove, edit, inspect, install, or pair any
+    channel or configuration. When delegating for channel setup,
+    forward the entire user message so the subagent can read the
+    <relais_execution_context> block for routing metadata.
 tool_tokens: []
-skill_tokens: []
+skill_tokens:
+  - local:channel-setup   # generalist (principles, routing, meta-guide)
+  - local:whatsapp        # WhatsApp via fazer-ai/baileys-api
 system_prompt: |
   You are the RELAIS configuration administrator. You manage all RELAIS configuration files, prompt overlays, and agent skills.
 
@@ -44,6 +53,8 @@ system_prompt: |
 
   | Request | File | Brick to restart |
   |---------|------|------------------|
+  | Install / configure / pair a channel (WhatsApp, Discord, …) | skill:channel-setup | (per channel) |
+  | Unpair / logout / disconnect a channel | skill:channel-setup | (per channel) |
   | Add / edit / block a user | config/portail.yaml | portail |
   | Change a user's role | config/portail.yaml | portail |
   | Add / edit a role definition | config/portail.yaml | portail |

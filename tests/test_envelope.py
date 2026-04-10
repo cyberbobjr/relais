@@ -146,7 +146,7 @@ class TestEnvelopeFromJson:
         assert restored.action == ACTION_MESSAGE_VALIDATED
 
     def test_context_preserved_in_roundtrip(self):
-        env = _make_envelope()
+        env = _make_envelope(action=ACTION_MESSAGE_INCOMING)
         ensure_ctx(env, CTX_PORTAIL).update({"user_id": "usr_admin", "llm_profile": "precise"})
         restored = Envelope.from_json(env.to_json())
         assert restored.context[CTX_PORTAIL]["user_id"] == "usr_admin"
@@ -226,3 +226,16 @@ class TestEnvelopeAction:
         env = _make_envelope()
         env.action = ACTION_MESSAGE_VALIDATED
         assert env.action == ACTION_MESSAGE_VALIDATED
+
+    def test_to_json_raises_when_action_empty(self):
+        """Envelope.to_json() must reject empty action to prevent silent bugs."""
+        env = _make_envelope()  # action defaults to ""
+        with pytest.raises(ValueError, match="action must be set"):
+            env.to_json()
+
+    def test_to_json_raises_when_action_none(self):
+        """Envelope.to_json() must reject None action."""
+        env = _make_envelope()
+        env.action = None  # type: ignore[assignment]
+        with pytest.raises(ValueError, match="action must be set"):
+            env.to_json()

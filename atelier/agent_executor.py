@@ -25,7 +25,7 @@ from deepagents import create_deep_agent
 from common.config_loader import get_relais_home
 from common.profile_loader import ProfileConfig
 from atelier.message_serializer import serialize_messages
-from common.contexts import CTX_PORTAIL, PortailCtx
+from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, AiguilleurCtx, PortailCtx
 from common.envelope import Envelope
 
 logger = logging.getLogger(__name__)
@@ -528,7 +528,9 @@ class AgentExecutor:
         Returns:
             An ``AgentResult`` for this single attempt.
         """
-        messages = [{"role": "user", "content": envelope.content}]
+        exec_context = _build_execution_context(envelope)
+        user_content = f"{exec_context}\n\n{envelope.content}" if exec_context else envelope.content
+        messages = [{"role": "user", "content": user_content}]
         logger.info(
             "agent.execute start — correlation_id=%s sender=%s",
             envelope.correlation_id,
@@ -741,6 +743,42 @@ class AgentExecutor:
                 full_reply = REPLY_PLACEHOLDER
 
         return full_reply, guard.total_calls, guard.total_errors
+
+
+def _build_execution_context(envelope: Envelope) -> str:
+    """Render envelope routing metadata as a plain-text context block.
+
+    The block is prepended to the first user message on every agent turn so
+    that skills which need routing information (e.g. ``channel-setup`` for
+    WhatsApp pairing) can read the current ``sender_id``, ``channel``,
+    ``session_id``, ``correlation_id`` and ``reply_to`` directly from the
+    conversation state.
+
+    The block is wrapped in explicit ``<relais_execution_context>`` tags so
+    that the LLM recognises it as technical metadata and does NOT echo it
+    back to the user.  Skills reference the tag by name.
+
+    Args:
+        envelope: The inbound envelope being processed.
+
+    Returns:
+        A formatted string ready to prepend to the user message, or an
+        empty string if no metadata is available.
+    """
+    aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore
+    reply_to = aig_ctx.get("reply_to", "")
+    lines = [
+        "<relais_execution_context>",
+        "This block is RELAIS pipeline metadata, not user input. Do NOT echo it.",
+        "Use it only when a skill explicitly requires routing information.",
+        f"sender_id: {envelope.sender_id}",
+        f"channel: {envelope.channel}",
+        f"session_id: {envelope.session_id}",
+        f"correlation_id: {envelope.correlation_id}",
+        f"reply_to: {reply_to}",
+        "</relais_execution_context>",
+    ]
+    return "\n".join(lines)
 
 
 def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> str:

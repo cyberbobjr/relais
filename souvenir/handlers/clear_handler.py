@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_OUTGOING
 from souvenir.handlers.base import BaseActionHandler, HandlerContext
 
 logger = logging.getLogger("souvenir")
@@ -39,6 +40,7 @@ class ClearHandler(BaseActionHandler):
                     orig,
                     "✓ Conversation history cleared.",
                 )
+                confirmation.action = ACTION_MESSAGE_OUTGOING
                 await ctx.redis_conn.xadd(
                     f"relais:messages:outgoing:{orig.channel}",
                     {"payload": confirmation.to_json()},

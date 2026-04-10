@@ -469,6 +469,7 @@ async def test_process_pipeline_streams_logs_envelope_fields(
     """
     import logging
     from common.envelope import Envelope
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
 
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
@@ -479,6 +480,7 @@ async def test_process_pipeline_streams_logs_envelope_fields(
         channel="discord",
         session_id="sess-abc",
         correlation_id="9b8ddb16-0000-0000-0000-000000000000",
+        action=ACTION_MESSAGE_INCOMING,
     )
     envelope.add_trace("portail", "received")
     envelope.add_trace("sentinelle", "ACL verified")

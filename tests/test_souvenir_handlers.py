@@ -60,6 +60,7 @@ async def test_clear_handler_clears_long_term_store() -> None:
 async def test_clear_handler_sends_confirmation_envelope() -> None:
     """ClearHandler publishes a confirmation envelope when envelope_json is present."""
     from common.envelope import Envelope
+    from common.envelope_actions import ACTION_MEMORY_CLEAR
 
     mock_redis = AsyncMock()
     mock_redis.xadd = AsyncMock()
@@ -72,6 +73,7 @@ async def test_clear_handler_sends_confirmation_envelope() -> None:
         channel="discord",
         session_id="sess-b",
         correlation_id="corr-b",
+        action=ACTION_MEMORY_CLEAR,
     )
 
     ctx = _make_ctx(

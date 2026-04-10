@@ -117,11 +117,21 @@ Message flow (one task at a time):
     └──► relais:messages:outgoing_pending
 
 Loop guard (AgentExecutor):
-  If the same named tool returns ``status="error"`` 5 consecutive times,
-  ``AgentExecutor.execute()`` raises ``AgentExecutionError`` to abort the
-  request and prevent infinite tool-error loops (e.g. Mistral parallel-tool-
-  call bug with ``write_todos``).  Unnamed tools (name == "?") are excluded
-  from grouping to avoid false positives.
+  ``ToolErrorGuard`` tracks tool errors during the agentic loop.  If the same
+  named tool returns ``status="error"`` 5 consecutive times, or if 8 total
+  errors accumulate across all tools, ``AgentExecutor.execute()`` raises
+  ``AgentExecutionError`` to abort the request and prevent infinite tool-error
+  loops (e.g. Mistral parallel-tool-call bug with ``write_todos``).  The total
+  limit (8) is intentionally higher than the consecutive limit (5): the system
+  prompt includes a ``SELF_DIAGNOSIS_PROMPT`` that instructs the agent to stop
+  and re-read the SKILL.md troubleshooting sections after repeated errors
+  instead of blindly retrying — the extra headroom lets the self-diagnosis
+  loop actually exercise the fix.  Unnamed tools (name == "?") are excluded
+  from consecutive grouping to avoid false positives.  On
+  ``AgentExecutionError``, the partial conversation state is captured into
+  ``exc.messages_raw`` and forwarded to both ``ErrorSynthesizer`` (user-
+  visible error reply) and Forgeron (skill improvement trace with full
+  conversation context).
 
 XACK contract:
   - Return True  → ACK (success, or AgentExecutionError/ExhaustedRetriesError
@@ -754,6 +764,7 @@ class Atelier(BrickBase):
 
             # 8. Build and publish response envelope
             response_env = Envelope.create_response_to(envelope, reply_text)
+            response_env.action = ACTION_MESSAGE_OUTGOING_PENDING
             atelier_ctx = ensure_ctx(response_env, CTX_ATELIER)
             atelier_ctx["user_message"] = envelope.content
             if skills_used:

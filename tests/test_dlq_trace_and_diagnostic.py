@@ -105,6 +105,7 @@ async def test_dlq_trace_includes_messages_raw_from_exception() -> None:
     )
 
     from common.contexts import CTX_PORTAIL
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
 
     envelope = Envelope(
         content="send an email",
@@ -112,6 +113,7 @@ async def test_dlq_trace_includes_messages_raw_from_exception() -> None:
         channel="discord",
         session_id="sess-1",
         correlation_id="corr-dlq-test",
+        action=ACTION_MESSAGE_INCOMING,
         context={CTX_PORTAIL: {
             "user_record": {"skills_dirs": ["*"]},
             "llm_profile": "default",

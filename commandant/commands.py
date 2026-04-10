@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
-from common.envelope_actions import ACTION_MEMORY_CLEAR
+from common.envelope_actions import ACTION_MEMORY_CLEAR, ACTION_MESSAGE_OUTGOING
 from common.streams import STREAM_MEMORY_REQUEST, stream_outgoing
 from common.text_utils import strip_outer_quotes
 
@@ -102,6 +102,7 @@ async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
     help_text = "\n".join(lines)
 
     response = Envelope.from_parent(envelope, help_text)
+    response.action = ACTION_MESSAGE_OUTGOING
     await redis_conn.xadd(
         stream_outgoing(envelope.channel),
         {"payload": response.to_json()},
@@ -111,6 +112,14 @@ async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
 # ---------------------------------------------------------------------------
 # Registry — single source of truth
 # ---------------------------------------------------------------------------
+#
+# Channel installation, configuration and pairing (including the WhatsApp
+# QR flow that used to live behind `/settings whatsapp`) are now handled
+# end-to-end by the ``relais-config`` subagent via the ``channel-setup``
+# skill. Users ask the agent in natural language ("install WhatsApp",
+# "pair my phone") and the subagent runs the install script, edits
+# ``aiguilleur.yaml``, restarts bricks, and invokes
+# ``scripts/pair_whatsapp.py`` for the deterministic pairing step.
 
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
     "clear": CommandSpec(
