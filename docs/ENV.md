@@ -29,6 +29,7 @@ Chaque `RedisClient("<brick>")` cherche d'abord `REDIS_PASS_<BRICK>`, puis retom
 | `REDIS_PASS_SOUVENIR` | `souvenir` |
 | `REDIS_PASS_COMMANDANT` | `commandant` |
 | `REDIS_PASS_ARCHIVISTE` | `archiviste` |
+| `REDIS_PASS_BAILEYS` | passerelle externe `baileys-api` (WhatsApp) — utilisée par le programme supervisord `baileys-api`, pas par une brique Python |
 
 Les autres mots de passe présents dans `.env.example` correspondent à des briques futures ou absentes de ce dépôt.
 
@@ -53,6 +54,22 @@ Les autres mots de passe présents dans `.env.example` correspondent à des briq
 | `TELEGRAM_BOT_TOKEN` | Optionnel | Prévue si un adaptateur Telegram est activé. |
 | `SLACK_BOT_TOKEN` | Optionnel | Présente dans le template d'env, mais pas utilisée par un adaptateur complet dans ce dépôt. |
 | `SLACK_SIGNING_SECRET` | Optionnel | Même remarque que ci-dessus. |
+
+### Canal WhatsApp (passerelle `baileys-api`)
+
+Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L'adaptateur Python (`aiguilleur/channels/whatsapp/adapter.py`) parle à la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) lancée par supervisord (programme `baileys-api`, groupe `optional`, autostart désactivé). Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md) pour la procédure complète.
+
+| Variable | Requis | Utilisation réelle |
+|----------|--------|--------------------|
+| `WHATSAPP_GATEWAY_URL` | Oui | URL HTTP de la passerelle baileys-api (défaut : `http://localhost:3025`). |
+| `WHATSAPP_PHONE_NUMBER` | Oui | Numéro de téléphone du bot au format E.164 (ex. `+33612345678`). |
+| `WHATSAPP_API_KEY` | Oui | Clé API générée côté passerelle via `bun scripts/manage-api-keys.ts create user relais`. |
+| `WHATSAPP_WEBHOOK_SECRET` | Oui | Secret partagé entre la passerelle et l'adaptateur pour authentifier les webhooks entrants. |
+| `WHATSAPP_WEBHOOK_PORT` | Non | Port d'écoute du serveur webhook aiohttp de l'adaptateur (défaut : `8765`). |
+| `WHATSAPP_WEBHOOK_HOST` | Non | Hôte d'écoute ET URL de callback passée à la passerelle. Défaut : `127.0.0.1` (colocation obligatoire). |
+| `REDIS_PASS_BAILEYS` | Oui | Mot de passe Redis de l'utilisateur ACL `baileys` (voir `config/redis.conf`). Consommé par supervisord pour construire `REDIS_URL` du programme `baileys-api`. |
+
+Dépendances optionnelles Python à installer en plus : `uv sync --extra whatsapp` (ajoute `aiohttp>=3.9` et `qrcode>=7.0`).
 
 ---
 

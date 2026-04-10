@@ -57,6 +57,15 @@ Processing flow
   (3) Extract action from envelope.action and parameters from envelope.context[CTX_SOUVENIR_REQUEST].
   (4) Dispatch to registered handler (archive / clear / file_write / file_read / file_list).
   (5) XACK (ack_mode="always").
+
+Envelope.action contract
+------------------------
+``Envelope.to_json()`` now raises when ``action`` is unset.  Handlers that
+publish downstream envelopes (notably ``ClearHandler``, which emits a
+"✓ Conversation history cleared." confirmation on
+``relais:messages:outgoing:{channel}``) explicitly stamp
+``confirmation.action = ACTION_MESSAGE_OUTGOING`` before calling
+``xadd``.
 """
 
 import asyncio

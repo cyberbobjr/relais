@@ -17,7 +17,12 @@ Les briques actives du repo sont :
 - `archiviste` : logs et observation partielle du pipeline
 - `forgeron` : amélioration autonome des skills (changelog + consolidation périodique) et création automatique de skills depuis les archives
 
-L'implémentation locale inclut surtout un adaptateur Discord complet. La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
+Adaptateurs de canaux réellement livrés :
+
+- **Discord** : adaptateur natif Python complet (`aiguilleur/channels/discord/adapter.py`)
+- **WhatsApp** : adaptateur natif Python complet via la passerelle [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client HTTP vers la passerelle. Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md).
+
+La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
 
 ---
 
@@ -169,12 +174,17 @@ alembic upgrade head
 
 ### Ce que fait l'initialisation
 
-`initialize_user_dir()` crée `RELAIS_HOME` et y copie seulement certains templates. En particulier :
+`initialize_user_dir()` crée `RELAIS_HOME` et y copie l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, notamment :
 
-- copiés : `config/config.yaml`, `config/portail.yaml`, `config/sentinelle.yaml`, `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/HEARTBEAT.md`, les prompts livrés
-- non copié aujourd'hui : `config/aiguilleur.yaml`
+- `config/config.yaml`
+- `config/portail.yaml`, `config/sentinelle.yaml`
+- `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
+- `config/atelier/subagents/relais-config/subagent.yaml`
+- `config/aiguilleur.yaml`
+- `config/HEARTBEAT.md`
+- les prompts livrés (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
-Si vous voulez surcharger `aiguilleur.yaml`, créez-le vous-même dans `RELAIS_HOME/config/aiguilleur.yaml` à partir de [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default).
+Si `config/aiguilleur.yaml` est supprimé après coup, `load_channels_config()` loggue un WARNING et retombe sur un fallback Discord-only.
 
 ### `RELAIS_HOME`
 
@@ -201,10 +211,14 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 │   ├── portail.yaml
 │   ├── sentinelle.yaml
 │   ├── atelier.yaml
+│   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
 │   └── atelier/
 │       ├── profiles.yaml
-│       └── mcp_servers.yaml
+│       ├── mcp_servers.yaml
+│       └── subagents/
+│           └── relais-config/
+│               └── subagent.yaml
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -406,7 +420,7 @@ mcp_servers:
 
 ### `config/aiguilleur.yaml`
 
-`load_channels_config()` charge ce fichier via la cascade de config. S'il est absent, le code retombe sur un fallback minimal Discord.
+`load_channels_config()` charge ce fichier via la cascade de config. Le template est copié par `initialize_user_dir()`. S'il est supprimé manuellement après coup, un WARNING est loggué et le code retombe sur un fallback minimal Discord-only.
 
 Exemple :
 
@@ -420,13 +434,23 @@ channels:
     enabled: false
     streaming: true
     profile: fast
+
+  whatsapp:
+    enabled: false          # activer dans ~/.relais/config/aiguilleur.yaml
+    streaming: false        # baileys-api ne supporte pas le streaming en MVP
+    profile: default
+    prompt_path: "channels/whatsapp_default.md"
+    max_restarts: 5
 ```
 
 Points importants :
 
-- `streaming` est lu par l'Atelier au démarrage pour déterminer les canaux à streaming incrémental
+- `streaming` est lu par chaque adaptateur et estampillé dans `context.aiguilleur["streaming"]` ; l'Atelier lit cette valeur par message (pas de cache au démarrage)
 - `profile` force un profil LLM pour tout message du canal
-- `type: external`, `command`, `args`, `class` et `max_restarts` sont pris en charge par le superviseur d'adaptateurs
+- `prompt_path` force un overlay de prompt de canal (Layer 4)
+- `type: external`, `command`, `args`, `class_path` et `max_restarts` sont pris en charge par le superviseur d'adaptateurs
+
+> L'installation et la configuration du canal WhatsApp (install de la passerelle baileys-api, création de la clé API, pairing QR) sont prises en charge de bout en bout par le sous-agent `relais-config` via les skills `channel-setup` et `whatsapp`. Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md) pour le guide pas-à-pas manuel.
 
 ---
 
@@ -464,8 +488,11 @@ Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](/Use
 - `OPENROUTER_API_KEY`
 - `RELAIS_DB_PATH`
 - `DISCORD_BOT_TOKEN`
+- Canal WhatsApp (optionnel) : `WHATSAPP_GATEWAY_URL`, `WHATSAPP_PHONE_NUMBER`, `WHATSAPP_API_KEY`, `WHATSAPP_WEBHOOK_SECRET`, `WHATSAPP_WEBHOOK_PORT`, `WHATSAPP_WEBHOOK_HOST`, `REDIS_PASS_BAILEYS`
 
 Pour les exemples MCP livrés dans les templates, `GITHUB_TOKEN` et `BRAVE_API_KEY` peuvent aussi être nécessaires selon les serveurs activés.
+
+Pour activer WhatsApp, installez aussi les dépendances optionnelles : `uv sync --extra whatsapp` (ajoute `aiohttp>=3.9` et `qrcode>=7.0`).
 
 ---
 
@@ -489,8 +516,9 @@ Le chemin le plus complet du dépôt est le couple `supervisord.conf` + `supervi
 Le wrapper :
 
 - démarre `supervisord` si nécessaire
-- lance Redis local via `config/redis.conf`
-- démarre les briques `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
+- lance Redis local via `config/redis.conf` (socket Unix + port TCP `127.0.0.1:6379` pour les services annexes)
+- démarre les briques des groupes `infra`, `core` et `relays` : `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
+- ne démarre **pas** automatiquement le groupe `optional` (qui contient la passerelle `baileys-api` pour WhatsApp). L'installation/activation du canal WhatsApp est pilotée par le sous-agent `relais-config`.
 
 ### Démarrage manuel
 

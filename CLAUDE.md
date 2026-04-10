@@ -44,6 +44,7 @@ The main pipeline flows through these bricks in order:
    - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `aiguilleur.yaml` per-request
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
+   - **Execution context block**: `AgentExecutor._build_execution_context()` prepends a `<relais_execution_context>` block to the first user message on every agent turn, carrying `sender_id`, `channel`, `session_id`, `correlation_id` and `reply_to` extracted from the envelope. Skills (notably `channel-setup` for WhatsApp pairing) can read this metadata directly from the conversation state; the system prompt instructs the model NOT to echo it back to the user.
    - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `common/profile_loader.py`)
    - **Subagent registry**: YAML files in `config/atelier/subagents/*.yaml` loaded by `SubagentRegistry.load()` from the config cascade (user > system > project); user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `relais-config` (configuration CRUD); tool tokens support `mcp:<glob>` (MCP pool filter), `inherit` (all request_tools), or `<static_name>` (ToolRegistry lookup); hot-reload swaps the registry atomically when the `config/atelier/subagents/` directory changes
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
@@ -134,8 +135,11 @@ Namespace constants are in `common/contexts.py` (`CTX_AIGUILLEUR`, `CTX_PORTAIL`
 Bricks use:
 - `Envelope.from_json()` to deserialize from Redis
 - `Envelope.from_parent()` to derive child envelopes (deep-copies `traces` and `context`, clears `action`)
+- `Envelope.create_response_to()` to build a reply envelope (also clears `action`)
 - `Envelope.add_trace(brick, action)` to record pipeline progression
 - `Envelope.to_json()` to serialize for Redis
+
+**Action is mandatory at serialization**: `Envelope.to_json()` raises `ValueError` if `envelope.action` is empty. Because `from_parent()` and `create_response_to()` intentionally clear the parent action, every producing site must set the target action explicitly before calling `xadd` — e.g. `response.action = ACTION_MESSAGE_OUTGOING_PENDING`. This prevents enveloppes without a declared intent from traversing the pipeline.
 
 ### Error Handling & Resilience
 

@@ -18,7 +18,13 @@ Key classes:
   ``agent.astream(stream_mode=["updates", "messages"], subgraphs=True,
   version="v2")``; accepts an optional ``backend: BackendProtocol`` (for
   DeepAgents persistent memory) and ``progress_callback`` forwarded from
-  the caller.
+  the caller.  Before dispatching to the model, the executor prepends a
+  ``<relais_execution_context>`` block to the first user message containing
+  ``sender_id``, ``channel``, ``session_id``, ``correlation_id`` and
+  ``reply_to``.  This block is technical metadata used by skills that need
+  routing information (notably ``channel-setup`` for WhatsApp pairing); the
+  system prompt explicitly instructs the model not to echo it back to the
+  user.
 * ``McpSessionManager`` (atelier.mcp_session_manager) — **singleton** managing
   stdio/SSE MCP server lifecycle; started once at brick startup via ``start()``,
   shared across all requests; per-server ``asyncio.Lock`` serializes stdio pipe
@@ -112,8 +118,10 @@ Message flow (one task at a time):
     │  (7) if skills_used and tool_call_count > 0 → publish ACTION_SKILL_TRACE envelope
     │      to relais:skill:trace (fire-and-forget → Forgeron stores the trace)
     │      └── Forgeron handles changelog + consolidation autonomously
-    │  (8) build response Envelope; stamp context["atelier"]["skills_used"] if any;
-    │      publish archive to relais:memory:request (Souvenir persists full LangChain history)
+    │  (8) build response Envelope, stamp response_env.action = ACTION_MESSAGE_OUTGOING_PENDING
+    │      (required: Envelope.to_json() raises if action is unset), stamp
+    │      context["atelier"]["skills_used"] if any; publish archive to relais:memory:request
+    │      (Souvenir persists full LangChain history)
     └──► relais:messages:outgoing_pending
 
 Loop guard (AgentExecutor):

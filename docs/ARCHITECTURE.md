@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-07
+**Dernière mise à jour :** 2026-04-10
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -94,9 +94,16 @@ Aiguilleur
 |--------|------------|--------------|
 | `relais:messages:streaming:{channel}:{correlation_id}` | Atelier | adaptateur de canal streaming |
 | `relais:tasks:failed` | Atelier | observation / diagnostic |
+| `relais:messages:outgoing:failed` | adaptateurs Aiguilleur | observation / diagnostic — DLQ pour les messages sortants non livrables (`STREAM_OUTGOING_FAILED`) |
 | `relais:admin:pending_users` | Portail | revue manuelle |
 | `relais:logs` | toutes les briques | Archiviste |
 | `relais:events:messages` | divers | Archiviste |
+
+### Clés Redis spécifiques canal
+
+| Clé | Producteur | Consommateur | Description |
+|-----|------------|--------------|-------------|
+| `relais:whatsapp:pairing` (Redis String JSON, TTL 300s) | `scripts/pair_whatsapp.py` | Adaptateur WhatsApp / opérateur | Contexte de pairing QR actif (`KEY_WHATSAPP_PAIRING`) |
 
 ---
 
@@ -123,12 +130,14 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 
 ### Aiguilleur
 
-- Charge les canaux via `load_channels_config()`.
+- Charge les canaux via `load_channels_config()`. En l'absence de `config/aiguilleur.yaml` (fichier supprimé manuellement ou répertoire non initialisé), un WARNING est loggué et le code retombe sur un fallback `discord` minimal.
 - Démarre un adaptateur par canal activé.
-- L'implémentation complète présente dans le dépôt est surtout l'adaptateur Discord.
-- Côté Discord, l'entrée est `relais:messages:incoming` et la sortie `relais:messages:outgoing:discord`.
+- Adaptateurs natifs Python complets présents dans le dépôt :
+  - **Discord** (`aiguilleur/channels/discord/adapter.py`) — entrée `relais:messages:incoming`, sortie `relais:messages:outgoing:discord`.
+  - **WhatsApp** (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp écoutant la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, lancée par `scripts/run_baileys.py` sous supervisord, programme `baileys-api` dans le groupe `optional`). L'adaptateur transcrit les events WhatsApp entrants en Envelope → `relais:messages:incoming`, et envoie les réponses sortantes via l'API REST de la passerelle après conversion Markdown→WhatsApp (`common/markdown_converter.convert_md_to_whatsapp()` pour `*bold*`, `_italic_`, `~strike~` natifs).
 - Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (aiguilleur.yaml).
 - Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
+- Chaque adaptateur estampille `context.aiguilleur["streaming"]` (`bool`) depuis `ChannelConfig.streaming` (lu par Atelier par message, pas au démarrage).
 
 ### Portail
 
@@ -158,6 +167,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Consomme `relais:tasks`.
 - Gère l'historique conversationnel via un checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`). L'ID de thread est `user_id` (stable cross-session).
 - Assemble le prompt système avec `SoulAssembler`.
+- Pour chaque appel, `AgentExecutor` préfixe le premier message utilisateur par un bloc `<relais_execution_context>` qui contient `sender_id`, `channel`, `session_id`, `correlation_id` et `reply_to` extraits de l'enveloppe. Ce bloc est strictement de la métadonnée technique — les skills (notamment `channel-setup` pour le pairing WhatsApp) peuvent le lire pour router correctement leurs actions, et le prompt système demande au modèle de **ne pas** le renvoyer à l'utilisateur.
 - Exécute `AgentExecutor` — retourne `AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count)`.
 - Publie :
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
@@ -261,10 +271,10 @@ La résolution suit :
 | `config/atelier.yaml` | configuration des progress events |
 | `config/atelier/profiles.yaml` | profils LLM |
 | `config/atelier/mcp_servers.yaml` | serveurs MCP |
-| `config/aiguilleur.yaml` | canaux Aiguilleur si fichier présent ; sinon fallback Discord |
+| `config/aiguilleur.yaml` | canaux Aiguilleur ; copié par `initialize_user_dir()` ; fallback Discord-only si supprimé manuellement |
 | `config/forgeron.yaml` | profils LLM (`annotation_profile`, `consolidation_profile`), seuils (`consolidation_line_threshold`, `annotation_call_threshold`), cooldowns, `skills_dir`, `creation_mode` |
 
-`initialize_user_dir()` ne copie pas `aiguilleur.yaml` actuellement.
+`initialize_user_dir()` copie désormais l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, y compris `config/aiguilleur.yaml` et `config/atelier/subagents/relais-config/subagent.yaml`.
 
 ### Rechargement à chaud de la configuration
 
@@ -329,12 +339,25 @@ Les fichiers `prompts/policies/*.md` existent dans les templates, mais ils ne so
 
 ---
 
+## Envelope — contrat `action`
+
+Depuis 2026-04-10, `Envelope.to_json()` **lève `ValueError`** si `envelope.action` est vide. Chaque site producteur doit positionner explicitement `action` avant publication :
+
+- les réponses dérivées via `Envelope.create_response_to()` ou `Envelope.from_parent()` ne conservent pas l'action source — le code appelant doit affecter l'action cible (`ACTION_MESSAGE_OUTGOING_PENDING`, `ACTION_MESSAGE_OUTGOING`, etc.) avant d'appeler `xadd`.
+- Sites mis à jour lors de l'introduction de cette contrainte : `atelier/main.py` (réponse finale), `sentinelle/main.py` (rejection inline), `commandant/commands.py` (`/help`), `souvenir/handlers/clear_handler.py` (confirmation `/clear`).
+- Les fixtures de tests construisent désormais les enveloppes avec `action=` explicite.
+
+Cette contrainte évite qu'une enveloppe sans intent déclaré ne traverse la pipeline.
+
+---
+
 ## Stockage
 
 ### Redis
 
 - transport principal du pipeline
 - socket local par défaut : `<RELAIS_HOME>/redis.sock`
+- port TCP `127.0.0.1:6379` ouvert en plus du socket Unix pour les services externes (typiquement la passerelle `baileys-api`)
 
 ### SQLite
 
@@ -358,6 +381,15 @@ Le chemin recommandé est :
 ```
 
 Cela démarre Redis local puis les briques Python via `launcher.py`. Le flag `--verbose` affiche les logs de toutes les briques après le démarrage (Ctrl+C pour détacher sans arrêter supervisord).
+
+Groupes supervisord :
+
+| Groupe | Contenu | Auto-start `supervisor.sh start all` |
+|--------|---------|--------------------------------------|
+| `infra` | `courier` (Redis) | oui |
+| `core` | `portail`, `sentinelle`, `atelier`, `souvenir`, `commandant`, `archiviste`, `forgeron` | oui |
+| `relays` | `aiguilleur` | oui |
+| `optional` | `baileys-api` (passerelle Node.js WhatsApp, lancée via `scripts/run_baileys.py`) | **non** — démarré à la demande par le sous-agent `relais-config` ou manuellement via `supervisorctl start baileys-api` |
 
 ### Manuel
 

@@ -62,7 +62,7 @@ Every pipeline stream message wraps its content in an **Envelope**.
 | `session_id` | `string` | Stable session identifier (used by Souvenir for context lookup) |
 | `correlation_id` | `string` | UUID, propagated end-to-end for tracing |
 | `timestamp` | `float` | Unix epoch (seconds) |
-| `action` | `string` | Self-describing action token (e.g. `message_incoming`, `message_validated`, `message_task`) from `common/envelope_actions.py` |
+| `action` | `string` | Self-describing action token (e.g. `message_incoming`, `message_validated`, `message_task`) from `common/envelope_actions.py`. **Required** — `Envelope.to_json()` raises `ValueError` if `action` is empty. Producing sites must set it explicitly after `Envelope.from_parent()` / `Envelope.create_response_to()` (both intentionally clear the parent action). |
 | `traces` | `array` | Pipeline trace list (each entry: `{brick: string, action: string, timestamp: float}`) |
 | `context` | `object` | Namespaced context dictionary. Each brick writes only to `context[CTX_SELF]` but may read any namespace. Namespace constants defined in `common/contexts.py` |
 | `media_refs` | `array` | List of `MediaRef` objects (see below) |
@@ -181,6 +181,34 @@ XADD relais:tasks:failed * payload <original Envelope JSON>
 | Field | Type | Description |
 |-------|------|-------------|
 | `payload` | `string` | Original Envelope JSON that failed |
+| `reason` | `string` | Human-readable error message |
+| `failed_at` | `string` | Unix epoch float as string |
+
+---
+
+### `relais:messages:outgoing:failed` (DLQ)
+
+**Direction**: Aiguilleur channel adapters → (monitoring / manual review)
+**Consumer group**: none (manual consumption)
+**Stream name constant**: `common.streams.STREAM_OUTGOING_FAILED`
+
+Dead-Letter Queue for outgoing messages that a channel adapter failed to deliver to the
+external platform (e.g. Discord message send exceptions, WhatsApp gateway HTTP errors).
+Written by the adapter that owns `relais:messages:outgoing:{channel}`.
+
+```
+XADD relais:messages:outgoing:failed * source      "relais:messages:outgoing:discord"
+                                       message_id  "<stream entry id>"
+                                       payload     "<original Envelope JSON>"
+                                       reason      "<error string>"
+                                       failed_at   "<Unix epoch float as string>"
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source` | `string` | Origin outgoing stream (e.g. `relais:messages:outgoing:discord`) |
+| `message_id` | `string` | Entry ID of the failed message in its source stream |
+| `payload` | `string` | Original Envelope JSON that failed to deliver |
 | `reason` | `string` | Human-readable error message |
 | `failed_at` | `string` | Unix epoch float as string |
 
@@ -464,6 +492,24 @@ Hash fields: `{channel_name}` → `{Unix epoch float as string}`
 
 ---
 
+### `relais:whatsapp:pairing` (String, not Stream)
+
+**Type**: Redis String (JSON-encoded)
+**TTL**: 300 seconds
+**Direction**: `scripts/pair_whatsapp.py` writes, WhatsApp adapter / operator reads
+**Key name constant**: `common.streams.KEY_WHATSAPP_PAIRING`
+
+Holds the context of an active WhatsApp QR pairing flow so the operator running
+`scripts/pair_whatsapp.py` can correlate QR display with gateway state. Cleared
+by `scripts/unpair_whatsapp.py` or when the TTL expires.
+
+```
+SET relais:whatsapp:pairing '{"phone":"+33612345678","started_at":1711234567.890,"correlation_id":"..."}' EX 300
+```
+
+The exact JSON schema is owned by `scripts/pair_whatsapp.py` — see the script
+for the current field set.
+
 ---
 
 ## Pub/Sub Channels
@@ -528,6 +574,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:commands` | `commandant_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group` | Aiguilleur |
+| `relais:messages:outgoing:failed` | none (manual) | — (DLQ) |
 | `relais:memory:request` | `souvenir_group` | Souvenir |
 | `relais:memory:request` | `forgeron_archive_group` | Forgeron (archive action only — intent labeling + skill creation) |
 | `relais:skill:trace` | `forgeron_group` | Forgeron |

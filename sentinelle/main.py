@@ -77,6 +77,12 @@ Processing flow — outgoing
 XACK contract:
   - Both loops ACK unconditionally after processing (errors are logged, not
     retried via PEL, to avoid blocking the outgoing path on transient issues).
+
+Envelope.action contract:
+  Since ``Envelope.to_json()`` now raises when ``action`` is unset, every
+  response envelope built here (inline rejections via ``_send_rejection``)
+  explicitly sets ``reply.action = ACTION_MESSAGE_OUTGOING`` before
+  publishing to ``relais:messages:outgoing:{channel}``.
 """
 
 import asyncio
