@@ -252,24 +252,18 @@ async def test_process_stream_busygroup_error_is_silenced(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_process_stream_non_busygroup_error_is_logged(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+async def test_process_stream_non_busygroup_error_raises(
+    tmp_path: Path,
 ) -> None:
-    """Non-BUSYGROUP errors from xgroup_create must be logged as warnings."""
-    import logging
-
+    """Non-BUSYGROUP errors from xgroup_create must propagate (not be silenced)."""
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
     conn.xgroup_create.side_effect = Exception("Some other Redis error")
-    conn.xreadgroup.side_effect = asyncio.CancelledError()
 
     event = asyncio.Event()
-    with caplog.at_level(logging.WARNING, logger="archiviste"):
-        with pytest.raises(asyncio.CancelledError):
-            await arc._process_stream(conn, event)
-
-    assert any("Consumer group error" in r.message for r in caplog.records)
+    with pytest.raises(Exception, match="Some other Redis error"):
+        await arc._process_stream(conn, event)
 
 
 @pytest.mark.unit

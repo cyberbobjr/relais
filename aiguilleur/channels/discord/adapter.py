@@ -356,10 +356,10 @@ class _RelaisDiscordClient(discord.Client):
             logger.warning("Redis connection not available for consumer group creation")
             return
         try:
-            await self._redis_conn.xgroup_create(stream, group, mkstream=True)
+            await self._redis_conn.xgroup_create(stream, group, id="$", mkstream=True)
         except Exception as exc:
             if "BUSYGROUP" not in str(exc):
-                logger.warning("Consumer group error: %s", exc)
+                raise
 
     async def _resolve_discord_channel(
         self, envelope: Envelope
@@ -452,7 +452,7 @@ class _RelaisDiscordClient(discord.Client):
             return
 
         preview = envelope.content[:80] + "…" if len(envelope.content) > 80 else envelope.content
-        logger.debug(
+        logger.info(
             "SEND discord | corr=%s | channel=%s | content=%r",
             envelope.correlation_id[:8],
             channel,

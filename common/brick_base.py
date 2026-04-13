@@ -411,12 +411,10 @@ class BrickBase(abc.ABC):
         _name = getattr(self, "_brick_name", "brick")
 
         try:
-            await redis.xgroup_create(spec.stream, spec.group, mkstream=True)
-        except Exception as exc:  # noqa: BLE001
+            await redis.xgroup_create(spec.stream, spec.group, id="$", mkstream=True)
+        except Exception as exc:
             if "BUSYGROUP" not in str(exc):
-                _log.warning(
-                    "%s: consumer group error for %s: %s", _name, spec.stream, exc
-                )
+                raise
 
         _log.info(
             "%s: listening on %s (group=%s, ack_mode=%s)",

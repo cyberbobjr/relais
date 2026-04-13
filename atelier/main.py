@@ -175,7 +175,6 @@ from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
 from common.streams import (
-    STREAM_LOGS,
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
@@ -267,6 +266,7 @@ class Atelier(BrickBase):
         # Tests may override this attribute after construction; _tool_policy is
         # a property that always derives from _skills_base_dir so the override
         # is automatically picked up.
+        # TODO : set the skills_dir as an array of Path (user skill & default skill)
         self._skills_base_dir: Path = resolve_skills_dir()
 
         # Static tool registry — discovers @tool-decorated functions in atelier/tools/.

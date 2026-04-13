@@ -45,7 +45,6 @@ from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_INCOMING
 from common.streams import (
     STREAM_INCOMING,
-    stream_outgoing,
     stream_streaming,
 )
 

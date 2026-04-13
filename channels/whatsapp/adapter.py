@@ -160,14 +160,15 @@ class WhatsAppAiguilleur(NativeAiguilleur):
             )
             return
 
-        redis_conn = await RedisClient.create("aiguilleur")
+        redis_client = RedisClient("aiguilleur")
+        redis_conn = await redis_client.get_connection()
         client = _RelaisWhatsAppClient(adapter=self, redis=redis_conn)
         try:
             await client.ensure_gateway_ready()
             await client.start()
         finally:
             await client.close()
-            await redis_conn.aclose()
+            await redis_client.close()
 
 
 # ---------------------------------------------------------------------------

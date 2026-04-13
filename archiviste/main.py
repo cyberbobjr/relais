@@ -166,10 +166,10 @@ class Archiviste(BrickBase):
         # Create consumer group if it doesn't exist
         for stream in streams.keys():
             try:
-                await redis_conn.xgroup_create(stream, group_name, mkstream=True)
+                await redis_conn.xgroup_create(stream, group_name, id="$", mkstream=True)
             except Exception as e:
                 if "BUSYGROUP" not in str(e):
-                    await self.log.warning(f"Consumer group error for {stream}: {e}")
+                    raise
 
         # Emit the startup log *after* the consumer group exists so this
         # brick's own archiviste_group will receive the message.
@@ -241,10 +241,10 @@ class Archiviste(BrickBase):
         streams: dict[str, str] = {}
         for stream in _PIPELINE_STREAMS:
             try:
-                await redis_conn.xgroup_create(stream, group_name, mkstream=True)
+                await redis_conn.xgroup_create(stream, group_name, id="$", mkstream=True)
             except Exception as e:
                 if "BUSYGROUP" not in str(e):
-                    await self.log.warning(f"Consumer group error for {stream}: {e}")
+                    raise
             streams[stream] = ">"
 
         await self.log.info(f"Archiviste pipeline observer started on {len(streams)} streams")
