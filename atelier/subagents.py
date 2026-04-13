@@ -276,6 +276,47 @@ def _validate_and_build_spec(data: dict, yaml_path: Path, pack_dir: Path) -> Sub
     )
 
 
+def _load_tools_from_import(module_path: str, spec_name: str) -> dict[str, Any]:
+    """Import a dotted module path and collect all BaseTool instances.
+
+    Uses standard ``importlib.import_module`` so the target module must
+    be on ``sys.path`` (e.g. via ``PYTHONPATH=.`` in supervisord).
+
+    Args:
+        module_path: Dotted module path (e.g. ``channels.whatsapp.tools``).
+        spec_name: Subagent name used in log messages.
+
+    Returns:
+        A dict mapping tool names to their callable/tool instances.
+        Empty dict on any import error (fail-closed; ERROR logged).
+    """
+    try:
+        module = importlib.import_module(module_path)
+    except Exception as exc:
+        logger.error(
+            "SubagentRegistry: failed to import module '%s' for subagent '%s' — %s",
+            module_path, spec_name, exc,
+        )
+        return {}
+
+    tools: dict[str, Any] = {}
+    for attr_name in dir(module):
+        if attr_name.startswith("_"):
+            continue
+        obj = getattr(module, attr_name, None)
+        if obj is None:
+            continue
+        # Duck-type: BaseTool has .name and .run
+        tool_name = getattr(obj, "name", None)
+        if tool_name and hasattr(obj, "run") and callable(getattr(obj, "run", None)):
+            tools[str(tool_name)] = obj
+            logger.debug(
+                "SubagentRegistry: subagent '%s' — loaded module tool '%s' from %s",
+                spec_name, tool_name, module_path,
+            )
+    return tools
+
+
 def _load_tools_from_module(py_path: Path, spec_name: str) -> dict[str, Any]:
     """Load all BaseTool instances from a Python module file.
 
@@ -654,6 +695,11 @@ def _resolve_tool_tokens(
                 )
             else:
                 _add(tool)
+        elif token.startswith("module:"):
+            mod_path = token[len("module:"):]
+            imported = _load_tools_from_import(mod_path, spec_name)
+            for t in imported.values():
+                _add(t)
         elif token.startswith("mcp:"):
             glob = token[len("mcp:"):]
             matched = [t for t in request_tools if fnmatch.fnmatch(t.name, glob)]

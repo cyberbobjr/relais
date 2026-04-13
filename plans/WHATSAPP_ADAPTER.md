@@ -1,3 +1,12 @@
+> **NOTE (2026-04-10):** This plan has been fully implemented. The WhatsApp channel
+> code has been consolidated into the `channels/whatsapp/` package (adapter, core
+> logic, tools, CLI). The old paths referenced below (`aiguilleur/channels/whatsapp/`,
+> `scripts/install_whatsapp.sh`, `scripts/pair_whatsapp.py`, `scripts/unpair_whatsapp.py`)
+> no longer exist. The `relais-config` subagent now uses three LangChain `BaseTool`
+> implementations (`whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall`)
+> loaded via `tool_tokens: [module:channels.whatsapp.tools]`. The CLI entry point is
+> `python -m channels.whatsapp`. This document is preserved as historical context.
+
 # Plan — WhatsApp Aiguilleur Adapter (Baileys Gateway)
 
 **Objective:** Implement a `WhatsAppAiguilleur` NativeAiguilleur adapter for the RELAIS pipeline that bridges a Baileys-based HTTP gateway ([fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api)) with the Redis Streams bus. The admin's personal WhatsApp number is used as the RELAIS channel (shared bot number model). Session pairing is triggered via `/settings whatsapp` (admin-only) in Commandant, which displays a QR code as ASCII art in the admin's current channel.

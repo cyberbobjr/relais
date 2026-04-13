@@ -47,11 +47,13 @@ packages = [
     "atelier",
     "souvenir",
     "archiviste",
+    "channels/whatsapp",
 ]
 
 [tool.pytest.ini_options]
 timeout = 30
 asyncio_mode = "strict"
+testpaths = ["tests", "channels"]
 markers = [
     "unit: fast, isolated unit tests",
     "integration: tests that require external services (Redis, LiteLLM, etc.)",

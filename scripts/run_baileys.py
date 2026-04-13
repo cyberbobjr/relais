@@ -17,7 +17,7 @@ def main() -> None:
     if not os.path.isdir(vendor_dir):
         print(
             f"baileys-api not installed at {vendor_dir}. "
-            "Run: scripts/install_whatsapp.sh",
+            "Run: python -m channels.whatsapp install",
             file=sys.stderr,
         )
         sys.exit(0)

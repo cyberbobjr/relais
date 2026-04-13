@@ -65,7 +65,7 @@ fields to pass.
 
 | Channel | Dedicated skill | Install script | Pairing | Unpair |
 |---------|-----------------|----------------|---------|--------|
-| whatsapp | `whatsapp` | `scripts/install_whatsapp.sh` | `scripts/pair_whatsapp.py` (QR via webhook) | `scripts/unpair_whatsapp.py` (DELETE gateway) |
+| whatsapp | `whatsapp` | `whatsapp_install` tool / `python -m channels.whatsapp install` | `whatsapp_configure(action="pair")` (QR via webhook) | `whatsapp_configure(action="unpair")` (DELETE gateway) |
 | discord | *(future)* | — | OAuth invite URL (manual) | Disable + revoke via Developer Portal |
 | telegram | *(future)* | — | BotFather (manual) | Disable + revoke via BotFather |
 | slack | *(future)* | — | OAuth (manual) | Disable + uninstall from workspace |
@@ -147,17 +147,16 @@ To add support for a new channel `X`:
 4. **Update this file's Channel registry table** with a new row.
 
 5. **If the channel needs deterministic HTTP / Redis operations**
-   (pairing, logout, credential rotation), create dedicated scripts at
-   `scripts/pair_X.py` / `scripts/unpair_X.py` following
-   `scripts/pair_whatsapp.py` and `scripts/unpair_whatsapp.py` as
-   templates. Keep them:
+   (pairing, logout, credential rotation), create LangChain `BaseTool`
+   implementations in `channels/X/tools.py` following the WhatsApp
+   tools (`channels/whatsapp/tools.py`) as templates. Also provide a
+   CLI entry point via `channels/X/__main__.py`. Keep them:
 
    - Idempotent.
-   - Self-contained (no imports from the brick code beyond
-     `common.redis_client` and `common.streams`).
+   - Self-contained (core logic in `channels/X/core.py`, no imports
+     from brick code beyond `common.redis_client` and `common.streams`).
    - Exit-code driven (same `EXIT_*` constants for consistency).
-   - Covered by unit tests at `tests/test_pair_X.py` /
-     `tests/test_unpair_X.py`.
+   - Covered by unit tests at `tests/test_X_tools.py`.
 
 6. **Hot-reload is automatic** — any change inside
    `config/atelier/subagents/` triggers a `SubagentRegistry` reload.
@@ -184,9 +183,10 @@ To add support for a new channel `X`:
 - Channel-specific skills (siblings under
   `config/atelier/subagents/relais-config/skills/`):
   - `whatsapp` — WhatsApp via fazer-ai/baileys-api.
-- `scripts/install_whatsapp.sh`, `scripts/pair_whatsapp.py`,
-  `scripts/unpair_whatsapp.py` — deterministic CLIs called by the
-  channel skills.
+- `channels/whatsapp/` — WhatsApp channel package (adapter, core logic,
+  tools, CLI). The `relais-config` subagent uses `whatsapp_install`,
+  `whatsapp_configure`, and `whatsapp_uninstall` LangChain tools loaded
+  via `tool_tokens: [module:channels.whatsapp.tools]`.
 - `common/streams.py` — canonical Redis key and stream names.
 - `config/aiguilleur.yaml.default` — channel enable/disable entries.
 - `plans/WHATSAPP_ADAPTER.md` — architectural context for WhatsApp.

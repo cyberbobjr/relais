@@ -119,7 +119,7 @@ async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
 # skill. Users ask the agent in natural language ("install WhatsApp",
 # "pair my phone") and the subagent runs the install script, edits
 # ``aiguilleur.yaml``, restarts bricks, and invokes
-# ``scripts/pair_whatsapp.py`` for the deterministic pairing step.
+# ``python -m channels.whatsapp configure --action pair`` for the deterministic pairing step.
 
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
     "clear": CommandSpec(

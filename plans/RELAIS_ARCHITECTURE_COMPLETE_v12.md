@@ -469,7 +469,7 @@ channels:
 | Slack | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
 | REST | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
 | TUI | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
-| WhatsApp | Implémenté (2026-04-10) | Adaptateur Python natif (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client REST vers la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, programme supervisord `baileys-api` dans le groupe `optional`). Installation, config et pairing QR pris en charge par le sous-agent `relais-config` via les skills `channel-setup` et `whatsapp`. Voir `docs/WHATSAPP_SETUP.md` et `plans/WHATSAPP_ADAPTER.md`. |
+| WhatsApp | Implémenté (2026-04-10) | Adaptateur Python natif (`channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client REST vers la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, programme supervisord `baileys-api` dans le groupe `optional`). Installation, config et pairing QR pris en charge par le sous-agent `relais-config` via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall` (chargés via `tool_tokens: [module:channels.whatsapp.tools]`). CLI : `python -m channels.whatsapp`. Voir `docs/WHATSAPP_SETUP.md` et `plans/WHATSAPP_ADAPTER.md`. |
 
 ### Streaming progressif — édition temps réel
 

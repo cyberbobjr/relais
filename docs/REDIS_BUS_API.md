@@ -496,18 +496,19 @@ Hash fields: `{channel_name}` → `{Unix epoch float as string}`
 
 **Type**: Redis String (JSON-encoded)
 **TTL**: 300 seconds
-**Direction**: `scripts/pair_whatsapp.py` writes, WhatsApp adapter / operator reads
+**Direction**: `whatsapp_configure` tool / `python -m channels.whatsapp configure --action pair` writes, WhatsApp adapter / operator reads
 **Key name constant**: `common.streams.KEY_WHATSAPP_PAIRING`
 
 Holds the context of an active WhatsApp QR pairing flow so the operator running
-`scripts/pair_whatsapp.py` can correlate QR display with gateway state. Cleared
-by `scripts/unpair_whatsapp.py` or when the TTL expires.
+`python -m channels.whatsapp configure --action pair` (or the `whatsapp_configure` LangChain tool)
+can correlate QR display with gateway state. Cleared
+by `python -m channels.whatsapp configure --action unpair` (or `whatsapp_configure(action="unpair")`) or when the TTL expires.
 
 ```
 SET relais:whatsapp:pairing '{"phone":"+33612345678","started_at":1711234567.890,"correlation_id":"..."}' EX 300
 ```
 
-The exact JSON schema is owned by `scripts/pair_whatsapp.py` — see the script
+The exact JSON schema is owned by `channels/whatsapp/core.py` — see the module
 for the current field set.
 
 ---

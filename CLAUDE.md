@@ -18,7 +18,7 @@ The main pipeline flows through these bricks in order:
    - `NativeAiguilleur` (thread + asyncio.run) for Python adapters (e.g., DiscordAiguilleur)
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
-   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
+   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter`, `channels.{name}.adapter`, or `class_path` override
    - **Profile stamping**: each adapter stamps `context["aiguilleur"]["channel_profile"]` from `ChannelConfig.profile` (aiguilleur.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams

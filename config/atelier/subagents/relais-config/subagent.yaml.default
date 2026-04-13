@@ -20,7 +20,8 @@ delegation_snippet: |
     channel or configuration. When delegating for channel setup,
     forward the entire user message so the subagent can read the
     <relais_execution_context> block for routing metadata.
-tool_tokens: []
+tool_tokens:
+  - module:channels.whatsapp.tools
 skill_tokens:
   - local:channel-setup   # generalist (principles, routing, meta-guide)
   - local:whatsapp        # WhatsApp via fazer-ai/baileys-api

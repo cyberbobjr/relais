@@ -103,7 +103,7 @@ Aiguilleur
 
 | Clé | Producteur | Consommateur | Description |
 |-----|------------|--------------|-------------|
-| `relais:whatsapp:pairing` (Redis String JSON, TTL 300s) | `scripts/pair_whatsapp.py` | Adaptateur WhatsApp / opérateur | Contexte de pairing QR actif (`KEY_WHATSAPP_PAIRING`) |
+| `relais:whatsapp:pairing` (Redis String JSON, TTL 300s) | `whatsapp_configure` tool / `python -m channels.whatsapp configure --action pair` | Adaptateur WhatsApp / opérateur | Contexte de pairing QR actif (`KEY_WHATSAPP_PAIRING`) |
 
 ---
 
@@ -134,7 +134,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Démarre un adaptateur par canal activé.
 - Adaptateurs natifs Python complets présents dans le dépôt :
   - **Discord** (`aiguilleur/channels/discord/adapter.py`) — entrée `relais:messages:incoming`, sortie `relais:messages:outgoing:discord`.
-  - **WhatsApp** (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp écoutant la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, lancée par `scripts/run_baileys.py` sous supervisord, programme `baileys-api` dans le groupe `optional`). L'adaptateur transcrit les events WhatsApp entrants en Envelope → `relais:messages:incoming`, et envoie les réponses sortantes via l'API REST de la passerelle après conversion Markdown→WhatsApp (`common/markdown_converter.convert_md_to_whatsapp()` pour `*bold*`, `_italic_`, `~strike~` natifs).
+  - **WhatsApp** (`channels/whatsapp/adapter.py`) — serveur webhook aiohttp écoutant la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, lancée par `scripts/run_baileys.py` sous supervisord, programme `baileys-api` dans le groupe `optional`). L'adaptateur transcrit les events WhatsApp entrants en Envelope → `relais:messages:incoming`, et envoie les réponses sortantes via l'API REST de la passerelle après conversion Markdown→WhatsApp (`common/markdown_converter.convert_md_to_whatsapp()` pour `*bold*`, `_italic_`, `~strike~` natifs). Installation, configuration et pairing via `python -m channels.whatsapp` CLI ou via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall`.
 - Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (aiguilleur.yaml).
 - Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 - Chaque adaptateur estampille `context.aiguilleur["streaming"]` (`bool`) depuis `ChannelConfig.streaming` (lu par Atelier par message, pas au démarrage).
