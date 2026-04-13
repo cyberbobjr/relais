@@ -69,7 +69,7 @@ fields to pass.
 | discord | *(future)* | — | OAuth invite URL (manual) | Disable + revoke via Developer Portal |
 | telegram | *(future)* | — | BotFather (manual) | Disable + revoke via BotFather |
 | slack | *(future)* | — | OAuth (manual) | Disable + uninstall from workspace |
-| rest | *(future)* | — | API key generation | Remove key from `portail.yaml` |
+| rest | `rest` | — (built-in adapter) | API key generation + portail.yaml entry | Remove key from `portail.yaml` |
 
 When the user asks about a channel, consult the matching skill. If the
 skill does not yet exist, fall back to the generic procedure in the

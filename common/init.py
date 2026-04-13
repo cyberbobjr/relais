@@ -13,6 +13,13 @@ DEFAULT_FILES = [
     ("config/atelier/mcp_servers.yaml",       "config/atelier/mcp_servers.yaml.default"),
     ("config/atelier.yaml",                   "config/atelier.yaml.default"),
     ("config/atelier/subagents/relais-config/subagent.yaml", "config/atelier/subagents/relais-config/subagent.yaml.default"),
+    # Subagent skills — copied so the pack is self-contained in relais_home
+    ("config/atelier/subagents/relais-config/skills/channel-setup/SKILL.md",
+     "config/atelier/subagents/relais-config/skills/channel-setup/SKILL.md"),
+    ("config/atelier/subagents/relais-config/skills/whatsapp/SKILL.md",
+     "config/atelier/subagents/relais-config/skills/whatsapp/SKILL.md"),
+    ("config/atelier/subagents/relais-config/skills/rest/SKILL.md",
+     "config/atelier/subagents/relais-config/skills/rest/SKILL.md"),
     ("config/aiguilleur.yaml",                 "config/aiguilleur.yaml.default"),
     ("config/HEARTBEAT.md",                   "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it

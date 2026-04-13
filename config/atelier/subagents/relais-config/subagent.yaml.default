@@ -25,6 +25,7 @@ tool_tokens:
 skill_tokens:
   - local:channel-setup   # generalist (principles, routing, meta-guide)
   - local:whatsapp        # WhatsApp via fazer-ai/baileys-api
+  - local:rest            # REST API adapter (API keys, CORS, SSE, diagnose)
 system_prompt: |
   You are the RELAIS configuration administrator. You manage all RELAIS configuration files, prompt overlays, and agent skills.
 
