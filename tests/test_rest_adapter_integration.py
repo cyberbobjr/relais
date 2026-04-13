@@ -131,6 +131,62 @@ async def test_client(adapter_mock, fake_redis, correlator, registry):
 
 
 # ---------------------------------------------------------------------------
+# /openapi.json and /docs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestOpenApi:
+    @pytest.mark.asyncio
+    async def test_openapi_json_returns_200(self, test_client):
+        """GET /openapi.json → 200 without auth."""
+        resp = await test_client.get("/openapi.json")
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_openapi_json_content_type(self, test_client):
+        """GET /openapi.json → Content-Type: application/json."""
+        resp = await test_client.get("/openapi.json")
+        assert "application/json" in resp.headers.get("Content-Type", "")
+
+    @pytest.mark.asyncio
+    async def test_openapi_json_structure(self, test_client):
+        """GET /openapi.json → valid OpenAPI 3.0 envelope."""
+        resp = await test_client.get("/openapi.json")
+        data = await resp.json()
+        assert data["openapi"].startswith("3.")
+        assert "info" in data
+        assert "paths" in data
+        assert "/messages" in data["paths"]
+
+    @pytest.mark.asyncio
+    async def test_openapi_no_auth_required(self, test_client):
+        """GET /openapi.json must not require Authorization header."""
+        resp = await test_client.get("/openapi.json")
+        assert resp.status != 401
+
+    @pytest.mark.asyncio
+    async def test_docs_returns_200(self, test_client):
+        """GET /docs → 200 without auth."""
+        resp = await test_client.get("/docs")
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_docs_content_type_html(self, test_client):
+        """GET /docs → Content-Type: text/html."""
+        resp = await test_client.get("/docs")
+        assert "text/html" in resp.headers.get("Content-Type", "")
+
+    @pytest.mark.asyncio
+    async def test_docs_contains_swagger_ui(self, test_client):
+        """GET /docs → HTML page references swagger-ui."""
+        resp = await test_client.get("/docs")
+        text = await resp.text()
+        assert "swagger-ui" in text.lower()
+        assert "/openapi.json" in text
+
+
+# ---------------------------------------------------------------------------
 # /healthz
 # ---------------------------------------------------------------------------
 

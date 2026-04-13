@@ -4,6 +4,8 @@ Creates and configures the aiohttp Application for the REST channel adapter.
 
 Endpoints:
     GET  /healthz            — liveness probe (no auth)
+    GET  /openapi.json       — OpenAPI 3.0 spec (no auth)
+    GET  /docs               — Swagger UI (no auth)
     POST /v1/messages        — send a message and receive the LLM reply
 
 Request flow (classic JSON mode):
@@ -60,6 +62,181 @@ _STREAM_IN = f"{STREAM_INCOMING}:{_CHANNEL}"
 
 
 # ---------------------------------------------------------------------------
+# OpenAPI 3.0 spec
+# ---------------------------------------------------------------------------
+
+_OPENAPI_SPEC: dict = {
+    "openapi": "3.0.3",
+    "info": {
+        "title": "RELAIS REST Channel",
+        "version": "1.0.0",
+        "description": (
+            "HTTP/JSON gateway to the RELAIS AI assistant pipeline. "
+            "Supports classic JSON responses and Server-Sent Events (SSE) streaming."
+        ),
+    },
+    "servers": [{"url": "/v1", "description": "RELAIS REST API v1"}],
+    "components": {
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "API key issued in portail.yaml (api_keys section).",
+            }
+        },
+        "schemas": {
+            "MessageRequest": {
+                "type": "object",
+                "required": ["content"],
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Text of the message to send to the AI assistant.",
+                        "example": "What is the weather today?",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Conversation session identifier. If omitted a new UUID4 is "
+                            "generated automatically."
+                        ),
+                        "example": "550e8400-e29b-41d4-a716-446655440000",
+                    },
+                    "media_refs": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Optional list of media references attached to the message.",
+                        "default": [],
+                    },
+                },
+            },
+            "MessageResponse": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Full text reply from the AI assistant.",
+                    },
+                    "correlation_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Unique identifier for this request/response pair.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session identifier (echoed from request or newly generated).",
+                    },
+                    "traces": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Pipeline step traces (only present when include_traces=true in config).",
+                    },
+                },
+            },
+            "ErrorResponse": {
+                "type": "object",
+                "properties": {
+                    "error": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+            },
+        },
+    },
+    "security": [{"bearerAuth": []}],
+    "paths": {
+        "/messages": {
+            "post": {
+                "summary": "Send a message and receive the AI reply",
+                "description": (
+                    "Publishes the message to the RELAIS pipeline and waits for the LLM reply.\n\n"
+                    "**Classic JSON mode** (default): waits for the full reply and returns it as JSON.\n\n"
+                    "**SSE streaming mode**: set `Accept: text/event-stream` to receive token-by-token "
+                    "chunks as Server-Sent Events. Events emitted:\n"
+                    "- `token` — `{\"t\": \"<chunk>\"}`\n"
+                    "- `done` — `{\"content\": \"<full_reply>\", \"correlation_id\": \"...\", \"session_id\": \"...\"}`\n"
+                    "- `: keepalive` (comment line) — heartbeat to keep the connection alive"
+                ),
+                "operationId": "postMessage",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/MessageRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "AI reply (JSON mode)",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/MessageResponse"}
+                            },
+                            "text/event-stream": {
+                                "schema": {
+                                    "type": "string",
+                                    "description": "SSE stream of token and done events.",
+                                }
+                            },
+                        },
+                    },
+                    "400": {
+                        "description": "Bad request (missing or invalid body)",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                            }
+                        },
+                    },
+                    "401": {
+                        "description": "Unauthorized (missing, invalid, or blocked API key)",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                            }
+                        },
+                    },
+                    "504": {
+                        "description": "Gateway timeout (LLM did not reply in time)",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                            }
+                        },
+                    },
+                },
+            }
+        }
+    },
+}
+
+_SWAGGER_UI_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RELAIS REST API — Swagger UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: "/openapi.json",
+      dom_id: "#swagger-ui",
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "StandaloneLayout",
+      deepLinking: true,
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
 # Standalone handlers (importable for tests and sub-app mounting)
 # ---------------------------------------------------------------------------
 
@@ -74,6 +251,36 @@ async def healthz_handler(request: web.Request) -> web.Response:
         200 JSON ``{"status": "ok", "channel": "rest"}``.
     """
     return web.json_response({"status": "ok", "channel": _CHANNEL})
+
+
+async def openapi_handler(request: web.Request) -> web.Response:
+    """Serve the OpenAPI 3.0 specification as JSON.
+
+    No authentication required so that API clients and CI tools can
+    fetch the spec without a valid API key.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        200 JSON response containing the OpenAPI 3.0 spec dict.
+    """
+    return web.json_response(_OPENAPI_SPEC)
+
+
+async def docs_handler(request: web.Request) -> web.Response:
+    """Serve the Swagger UI HTML page.
+
+    Loads Swagger UI from unpkg CDN and points it at ``/openapi.json``.
+    No authentication required.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        200 HTML response with the Swagger UI page.
+    """
+    return web.Response(text=_SWAGGER_UI_HTML, content_type="text/html")
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +465,8 @@ def create_app(
     app["_config"] = config
 
     app.router.add_get("/healthz", healthz_handler)
+    app.router.add_get("/openapi.json", openapi_handler)
+    app.router.add_get("/docs", docs_handler)
 
     # Sub-app with new-style auth middleware for /v1
     api_app = web.Application(middlewares=[auth_middleware])
