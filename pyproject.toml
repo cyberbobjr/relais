@@ -29,10 +29,12 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "langsmith>=0.7.23",
     "watchfiles>=0.21",
+    "qrcode>=8.2",
+    "aiohttp>=3.9",
 ]
 
 [project.optional-dependencies]
-whatsapp = ["aiohttp>=3.9", "qrcode>=7.0"]
+whatsapp = ["qrcode>=7.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -2417,6 +2417,7 @@ name = "relais"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "aiosqlite" },
     { name = "alembic" },
     { name = "certifi" },
@@ -2433,6 +2434,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "qrcode" },
     { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlmodel" },
@@ -2442,7 +2444,6 @@ dependencies = [
 
 [package.optional-dependencies]
 whatsapp = [
-    { name = "aiohttp" },
     { name = "qrcode" },
 ]
 
@@ -2458,7 +2459,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", marker = "extra == 'whatsapp'", specifier = ">=3.9" },
+    { name = "aiohttp", specifier = ">=3.9" },
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "certifi", specifier = ">=2024.0" },
@@ -2475,6 +2476,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "qrcode", specifier = ">=8.2" },
     { name = "qrcode", marker = "extra == 'whatsapp'", specifier = ">=7.0" },
     { name = "redis", specifier = ">=5.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },

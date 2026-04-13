@@ -1,0 +1,1 @@
+# REST channel adapter package.

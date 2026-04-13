@@ -56,7 +56,14 @@ channels:
 
   rest:
     enabled: false
-    streaming: false
+    streaming: true
+    type: native
+    bind: "127.0.0.1"
+    port: 8080
+    request_timeout: 30
+    cors_origins:
+      - "*"
+    include_traces: false
 
   tui:
     enabled: false
