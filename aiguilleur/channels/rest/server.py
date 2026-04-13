@@ -34,8 +34,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from aiohttp import web
 
@@ -59,6 +60,12 @@ logger = logging.getLogger("aiguilleur.rest.server")
 
 _CHANNEL = "rest"
 _STREAM_IN = f"{STREAM_INCOMING}:{_CHANNEL}"
+
+# Maximum allowed size for the 'content' field (bytes, UTF-8 encoded)
+_MAX_CONTENT_BYTES = 32_768  # 32 KB
+
+# Allowed pattern for caller-supplied session_id values
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -319,14 +326,24 @@ def create_app(
 
     auth_middleware = make_bearer_auth_middleware(registry)
 
+    def _resolve_cors_origin(origin: str) -> str:
+        """Return the allowed origin header value for a given request origin."""
+        if "*" in cors_origins:
+            return "*"
+        if origin in cors_origins:
+            return origin
+        return ""
+
     @web.middleware
-    async def cors_middleware(request: web.Request, handler):
+    async def cors_middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.Response]],
+    ) -> web.Response:
         response = await handler(request)
         origin = request.headers.get("Origin", "")
-        if "*" in cors_origins or origin in cors_origins:
-            response.headers["Access-Control-Allow-Origin"] = (
-                "*" if "*" in cors_origins else origin
-            )
+        allow_origin = _resolve_cors_origin(origin)
+        if allow_origin:
+            response.headers["Access-Control-Allow-Origin"] = allow_origin
             response.headers["Access-Control-Allow-Headers"] = (
                 "Authorization, Content-Type, Accept"
             )
@@ -334,16 +351,22 @@ def create_app(
         return response
 
     @web.middleware
-    async def options_middleware(request: web.Request, handler):
+    async def options_middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.Response]],
+    ) -> web.Response:
+        # Handle OPTIONS preflight — apply the same origin policy as cors_middleware
+        # so that cors_origins whitelist is respected for preflight requests too.
         if request.method == "OPTIONS":
-            return web.Response(
-                status=204,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
-                    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-                },
-            )
+            origin = request.headers.get("Origin", "")
+            allow_origin = _resolve_cors_origin(origin)
+            headers = {
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+            }
+            if allow_origin:
+                headers["Access-Control-Allow-Origin"] = allow_origin
+            return web.Response(status=204, headers=headers)
         return await handler(request)
 
     async def post_message(request: web.Request) -> web.Response:
@@ -372,8 +395,24 @@ def create_app(
                 {"error": "Bad Request", "detail": "'content' field is required and must be non-empty"},
                 status=400,
             )
+        content_str = str(content)
+        if len(content_str.encode()) > _MAX_CONTENT_BYTES:
+            return web.json_response(
+                {"error": "Bad Request", "detail": f"'content' exceeds maximum size of {_MAX_CONTENT_BYTES} bytes"},
+                status=413,
+            )
 
-        session_id: str = str(body.get("session_id") or uuid.uuid4())
+        raw_session = body.get("session_id")
+        if raw_session is not None:
+            raw_session_str = str(raw_session)
+            if not _SESSION_ID_RE.match(raw_session_str):
+                return web.json_response(
+                    {"error": "Bad Request", "detail": "session_id must be 1-64 alphanumeric characters (a-z, A-Z, 0-9, _, -)"},
+                    status=400,
+                )
+            session_id: str = raw_session_str
+        else:
+            session_id = str(uuid.uuid4())
         media_refs_raw: list = body.get("media_refs") or []
 
         correlation_id = str(uuid.uuid4())
@@ -387,8 +426,10 @@ def create_app(
             cfg = adapter.config
             channel_profile = cfg.profile_ref.profile
             channel_prompt_path = cfg.prompt_path
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Failed to read channel profile from adapter config — using default: %s", exc
+            )
 
         # --- Determine accept type ---
         accept = request.headers.get("Accept", "")
@@ -396,7 +437,7 @@ def create_app(
 
         # --- Build Envelope ---
         envelope = Envelope(
-            content=str(content),
+            content=content_str,
             sender_id=sender_id,
             channel=_CHANNEL,
             session_id=session_id,
@@ -522,10 +563,10 @@ async def _handle_sse(
 
         # Stream tokens
         last_id = "0"
-        deadline = asyncio.get_event_loop().time() + request_timeout
+        deadline = asyncio.get_running_loop().time() + request_timeout
 
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 break
 
@@ -576,8 +617,8 @@ async def _handle_sse(
         # Best-effort cleanup of streaming stream
         try:
             await redis_conn.delete(streaming_stream)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to delete streaming stream %s: %s", streaming_stream, exc)
 
     await response.write_eof()
     return response

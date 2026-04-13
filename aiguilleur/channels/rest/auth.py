@@ -1,4 +1,4 @@
-"""BearerAuthMiddleware — aiohttp middleware for Bearer token authentication.
+"""Bearer token authentication middleware for the REST channel adapter.
 
 Validates the ``Authorization: Bearer <token>`` header against the
 ``UserRegistry``. Stores ``request["user_record"]`` and
@@ -6,9 +6,11 @@ Validates the ``Authorization: Bearer <token>`` header against the
 resolved user without re-querying the registry.
 
 Security rules enforced here:
-- The raw token is NEVER written to logs (only length or a truncated prefix).
+- The raw token is NEVER written to logs (only its length).
+- ``sender_id`` uses the stable ``user_id`` from portail.yaml — the raw
+  token is never propagated into the Redis pipeline or stored in memory.
 - Blocked users are rejected with 401 even if their token is valid.
-- Missing, malformed, or unrecognised tokens all return 401 (no information leak).
+- Missing, malformed, or unrecognised tokens all return 401 (no info leak).
 """
 
 from __future__ import annotations
@@ -22,44 +24,6 @@ if TYPE_CHECKING:
     from portail.user_registry import UserRegistry
 
 logger = logging.getLogger("aiguilleur.rest.auth")
-
-
-class BearerAuthMiddleware:
-    """aiohttp middleware that enforces Bearer token authentication.
-
-    Implements the new-style aiohttp middleware protocol via ``__call__``
-    returning a middleware coroutine function (see aiohttp #2252).
-
-    Args:
-        registry: A loaded ``UserRegistry`` instance. The middleware calls
-            ``registry.resolve_user(sender_id="rest:<token>", channel="rest")``
-            for each request.
-    """
-
-    def __init__(self, registry: "UserRegistry") -> None:
-        """Initialise the middleware with a user registry.
-
-        Args:
-            registry: User registry for API key resolution.
-        """
-        self._registry = registry
-
-    async def __call__(
-        self,
-        request: web.Request,
-        handler: Callable[[web.Request], Awaitable[web.Response]],
-    ) -> web.Response:
-        """Process a request: validate the Bearer token then delegate to handler.
-
-        Args:
-            request: The incoming aiohttp request.
-            handler: The next handler in the middleware chain.
-
-        Returns:
-            A ``401 Unauthorized`` JSON response on auth failure, or the
-            response from the downstream handler on success.
-        """
-        return await _check_bearer(self._registry, request, handler)
 
 
 def make_bearer_auth_middleware(registry: "UserRegistry"):
@@ -101,10 +65,9 @@ async def _check_bearer(
         A ``401 Unauthorized`` JSON response on auth failure, or the
         response from the downstream handler on success.
     """
-    # /healthz bypasses authentication
-    if request.path == "/healthz":
-        return await handler(request)
-
+    # Note: /healthz, /openapi.json and /docs are registered on the root app,
+    # not on the /v1 sub-app where this middleware lives, so they are never
+    # passed to this function. No path-based bypass needed here.
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         logger.debug("Auth failed: missing or malformed Authorization header")
@@ -146,8 +109,10 @@ async def _check_bearer(
             status=401,
         )
 
-    # Store resolved identity on the request for downstream handlers
+    # Store resolved identity on the request for downstream handlers.
+    # sender_id uses the stable portail user_id — the raw token is never
+    # propagated into the Redis pipeline, logs, or memory store.
     request["user_record"] = user_record
-    request["sender_id"] = f"rest:{raw_token}"
+    request["sender_id"] = f"rest:{user_record.user_id}"
 
     return await handler(request)

@@ -280,6 +280,99 @@ class TestPostMessageValidation:
         )
         assert resp.status == 400
 
+    @pytest.mark.asyncio
+    async def test_post_message_content_too_large(self, test_client, valid_token):
+        """Content exceeding 32 KB → 413."""
+        oversized = "x" * (32_768 + 1)
+        resp = await test_client.post(
+            "/v1/messages",
+            json={"content": oversized},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+        assert resp.status == 413
+
+    @pytest.mark.asyncio
+    async def test_post_message_content_exactly_32kb_accepted(self, test_client, valid_token, correlator, fake_redis):
+        """Content at exactly 32 KB boundary is accepted (boundary is inclusive at limit)."""
+        # 32768 ASCII bytes is exactly at the limit — must not 413
+        boundary_content = "x" * 32_768
+        original_xadd = fake_redis.xadd
+
+        async def capturing_xadd(stream, fields, *args, **kwargs):
+            result = await original_xadd(stream, fields, *args, **kwargs)
+            stream_str = stream if isinstance(stream, str) else stream.decode()
+            if "relais:messages:incoming" in stream_str:
+                payload = fields.get(b"payload") or fields.get("payload")
+                if payload:
+                    env = Envelope.from_json(
+                        payload if isinstance(payload, str) else payload.decode()
+                    )
+                    reply = Envelope.from_parent(env, "ok")
+                    reply.action = ACTION_MESSAGE_OUTGOING
+                    await correlator.resolve(env.correlation_id, reply)
+            return result
+
+        fake_redis.xadd = capturing_xadd
+
+        resp = await test_client.post(
+            "/v1/messages",
+            json={"content": boundary_content},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_post_message_invalid_session_id_rejected(self, test_client, valid_token):
+        """session_id with invalid characters → 400."""
+        resp = await test_client.post(
+            "/v1/messages",
+            json={"content": "hello", "session_id": "invalid session id!"},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_post_message_session_id_too_long_rejected(self, test_client, valid_token):
+        """session_id exceeding 64 characters → 400."""
+        long_session_id = "a" * 65
+        resp = await test_client.post(
+            "/v1/messages",
+            json={"content": "hello", "session_id": long_session_id},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_post_message_valid_session_id_with_dashes_and_underscores(
+        self, test_client, valid_token, correlator, fake_redis
+    ):
+        """session_id with dashes and underscores is valid."""
+        valid_session_id = "my_session-id_123"
+        original_xadd = fake_redis.xadd
+
+        async def capturing_xadd(stream, fields, *args, **kwargs):
+            result = await original_xadd(stream, fields, *args, **kwargs)
+            stream_str = stream if isinstance(stream, str) else stream.decode()
+            if "relais:messages:incoming" in stream_str:
+                payload = fields.get(b"payload") or fields.get("payload")
+                if payload:
+                    env = Envelope.from_json(
+                        payload if isinstance(payload, str) else payload.decode()
+                    )
+                    reply = Envelope.from_parent(env, "ok")
+                    reply.action = ACTION_MESSAGE_OUTGOING
+                    await correlator.resolve(env.correlation_id, reply)
+            return result
+
+        fake_redis.xadd = capturing_xadd
+
+        resp = await test_client.post(
+            "/v1/messages",
+            json={"content": "hello", "session_id": valid_session_id},
+            headers={"Authorization": f"Bearer {valid_token}"},
+        )
+        assert resp.status == 200
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/messages — session_id handling
@@ -652,6 +745,76 @@ class TestCorsOptions:
         assert resp.status == 204
         assert "Access-Control-Allow-Origin" in resp.headers
         assert "Access-Control-Allow-Methods" in resp.headers
+
+    @pytest.mark.asyncio
+    async def test_options_preflight_cors_whitelist_allowed_origin(
+        self, adapter_mock, fake_redis, correlator, registry
+    ):
+        """OPTIONS preflight with a whitelisted origin returns that origin, not '*'."""
+        from aiohttp.test_utils import TestClient, TestServer
+        from aiguilleur.channels.rest.server import create_app
+
+        config_whitelist = {
+            "bind": "127.0.0.1",
+            "port": 8080,
+            "request_timeout": 2,
+            "cors_origins": ["https://app.example.com", "https://other.example.com"],
+            "include_traces": False,
+        }
+        app = create_app(
+            adapter=adapter_mock,
+            redis_conn=fake_redis,
+            correlator=correlator,
+            registry=registry,
+            config=config_whitelist,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.options(
+                "/v1/messages",
+                headers={"Origin": "https://app.example.com"},
+            )
+            assert resp.status == 204
+            assert resp.headers.get("Access-Control-Allow-Origin") == "https://app.example.com"
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_options_preflight_cors_whitelist_rejected_origin(
+        self, adapter_mock, fake_redis, correlator, registry
+    ):
+        """OPTIONS preflight from an unlisted origin must NOT set Access-Control-Allow-Origin."""
+        from aiohttp.test_utils import TestClient, TestServer
+        from aiguilleur.channels.rest.server import create_app
+
+        config_whitelist = {
+            "bind": "127.0.0.1",
+            "port": 8080,
+            "request_timeout": 2,
+            "cors_origins": ["https://app.example.com"],
+            "include_traces": False,
+        }
+        app = create_app(
+            adapter=adapter_mock,
+            redis_conn=fake_redis,
+            correlator=correlator,
+            registry=registry,
+            config=config_whitelist,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.options(
+                "/v1/messages",
+                headers={"Origin": "https://evil.com"},
+            )
+            assert resp.status == 204
+            # The rejected origin must not appear in the header
+            assert resp.headers.get("Access-Control-Allow-Origin") != "https://evil.com"
+            assert resp.headers.get("Access-Control-Allow-Origin") is None
+        finally:
+            await client.close()
 
     @pytest.mark.asyncio
     async def test_cors_header_on_response(self, test_client, valid_token, correlator, fake_redis):

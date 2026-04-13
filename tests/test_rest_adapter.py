@@ -261,7 +261,7 @@ class TestBearerAuthMiddleware:
             )
             assert resp.status == 200
             assert captured["user_record"] is record
-            assert captured["sender_id"] == "rest:valid-token"
+            assert captured["sender_id"] == "rest:usr_test"  # stable user_id, never the raw token
 
     @pytest.mark.asyncio
     async def test_bearer_token_never_logged(self, caplog):
@@ -292,19 +292,28 @@ class TestBearerAuthMiddleware:
             assert secret not in record.getMessage()
 
     @pytest.mark.asyncio
-    async def test_healthz_bypasses_auth(self):
-        """GET /healthz must be accessible without an Authorization header."""
+    async def test_healthz_not_behind_auth_middleware(self):
+        """/healthz must be on the root app (no auth middleware), not on /v1 sub-app.
+
+        In create_app(), healthz_handler is registered directly on the root app.
+        The auth middleware is only applied to the /v1 sub-app. This test
+        verifies the correct architecture: healthz is accessible without a token.
+        """
         from aiguilleur.channels.rest.auth import make_bearer_auth_middleware
         from aiguilleur.channels.rest.server import healthz_handler
         from aiohttp import web
 
         registry, _ = _make_user_registry()
-        middleware = make_bearer_auth_middleware(registry)
+        auth_middleware = make_bearer_auth_middleware(registry)
 
-        app = web.Application(middlewares=[middleware])
-        app.router.add_get("/healthz", healthz_handler)
+        # Reflect real create_app() structure: root app has no auth,
+        # auth middleware only on the /v1 sub-app.
+        root = web.Application()
+        root.router.add_get("/healthz", healthz_handler)
+        api = web.Application(middlewares=[auth_middleware])
+        root.add_subapp("/v1", api)
 
-        async with _test_client(app) as client:
+        async with _test_client(root) as client:
             resp = await client.get("/healthz")
             assert resp.status == 200
             data = await resp.json()
