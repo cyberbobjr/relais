@@ -18,7 +18,7 @@ The main pipeline flows through these bricks in order:
    - `NativeAiguilleur` (thread + asyncio.run) for Python adapters (e.g., DiscordAiguilleur)
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
-   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter`, `channels.{name}.adapter`, or `class_path` override
+   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` (looks for a class ending in `*Aiguilleur`), or `class_path` override
    - **Profile stamping**: each adapter stamps `context["aiguilleur"]["channel_profile"]` from `ChannelConfig.profile` (aiguilleur.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
@@ -168,9 +168,10 @@ Environment variables override YAML configs (e.g., `REDIS_SOCKET_PATH`, `REDIS_P
 
 Priority-based startup (`supervisord.conf`):
 - **Priority 1**: `courier` (Redis server)
+- **Priority 5**: `baileys-api` (WhatsApp gateway, autostart=false)
 - **Priority 8**: `archiviste` (observer, non-blocking)
-- **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir) + **aiguilleur** (unified channel manager)
-- ~~Priority 20~~: Aiguilleur relays (DEPRECATED — single `aiguilleur/main.py` process now manages all channels via `aiguilleur.yaml`)
+- **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir, forgeron, commandant)
+- **Priority 20**: `aiguilleur` (unified channel manager)
 
 All processes log to `~/.relais/logs/` via supervisord stdout_logfile.
 

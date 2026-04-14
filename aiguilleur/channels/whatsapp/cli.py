@@ -2,10 +2,10 @@
 
 Usage::
 
-    python -m channels.whatsapp install --phone +33612345678
-    python -m channels.whatsapp configure --action health
-    python -m channels.whatsapp configure --action pair --sender-id discord:123 ...
-    python -m channels.whatsapp uninstall
+    python -m aiguilleur.channels.whatsapp install --phone +33612345678
+    python -m aiguilleur.channels.whatsapp configure --action health
+    python -m aiguilleur.channels.whatsapp configure --action pair --sender-id discord:123 ...
+    python -m aiguilleur.channels.whatsapp uninstall
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-from channels.whatsapp import core
+from aiguilleur.channels.whatsapp import core
 
 
 def _print_result(data: dict) -> None:
@@ -194,7 +194,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog="python -m channels.whatsapp",
+        prog="python -m aiguilleur.channels.whatsapp",
         description="WhatsApp channel management for RELAIS",
     )
     sub = parser.add_subparsers(dest="command", required=True)

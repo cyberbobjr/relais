@@ -65,7 +65,7 @@ fields to pass.
 
 | Channel | Dedicated skill | Install script | Pairing | Unpair |
 |---------|-----------------|----------------|---------|--------|
-| whatsapp | `whatsapp` | `whatsapp_install` tool / `python -m channels.whatsapp install` | `whatsapp_configure(action="pair")` (QR via webhook) | `whatsapp_configure(action="unpair")` (DELETE gateway) |
+| whatsapp | `whatsapp` | `whatsapp_install` tool / `python -m aiguilleur.channels.whatsapp install` | `whatsapp_configure(action="pair")` (QR via webhook) | `whatsapp_configure(action="unpair")` (DELETE gateway) |
 | discord | *(future)* | — | OAuth invite URL (manual) | Disable + revoke via Developer Portal |
 | telegram | *(future)* | — | BotFather (manual) | Disable + revoke via BotFather |
 | slack | *(future)* | — | OAuth (manual) | Disable + uninstall from workspace |
@@ -149,7 +149,7 @@ To add support for a new channel `X`:
 5. **If the channel needs deterministic HTTP / Redis operations**
    (pairing, logout, credential rotation), create LangChain `BaseTool`
    implementations in `channels/X/tools.py` following the WhatsApp
-   tools (`channels/whatsapp/tools.py`) as templates. Also provide a
+   tools (`aiguilleur/channels/whatsapp/tools.py`) as templates. Also provide a
    CLI entry point via `channels/X/__main__.py`. Keep them:
 
    - Idempotent.
@@ -183,10 +183,10 @@ To add support for a new channel `X`:
 - Channel-specific skills (siblings under
   `config/atelier/subagents/relais-config/skills/`):
   - `whatsapp` — WhatsApp via fazer-ai/baileys-api.
-- `channels/whatsapp/` — WhatsApp channel package (adapter, core logic,
+- `aiguilleur/channels/whatsapp/` — WhatsApp channel package (adapter, core logic,
   tools, CLI). The `relais-config` subagent uses `whatsapp_install`,
   `whatsapp_configure`, and `whatsapp_uninstall` LangChain tools loaded
-  via `tool_tokens: [module:channels.whatsapp.tools]`.
+  via `tool_tokens: [module:aiguilleur.channels.whatsapp.tools]`.
 - `common/streams.py` — canonical Redis key and stream names.
 - `config/aiguilleur.yaml.default` — channel enable/disable entries.
 - `plans/WHATSAPP_ADAPTER.md` — architectural context for WhatsApp.

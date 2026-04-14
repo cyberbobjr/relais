@@ -12,12 +12,12 @@ Channels shipped in the repository:
 
 * **Discord** — ``aiguilleur/channels/discord/adapter.py``; uses ``discord.py``
   for bot mentions/DMs and typing indicators.
-* **WhatsApp** — ``channels/whatsapp/adapter.py`` (channel pack); hosts an
+* **WhatsApp** — ``aiguilleur/channels/whatsapp/adapter.py`` (channel pack); hosts an
   aiohttp webhook server for the `fazer-ai/baileys-api` gateway.  Install,
-  config, pair and unpair are handled by ``channels/whatsapp/core.py`` and
+  config, pair and unpair are handled by ``aiguilleur/channels/whatsapp/core.py`` and
   exposed as 3 LangChain BaseTools (``whatsapp_install``,
   ``whatsapp_configure``, ``whatsapp_uninstall``) via the ``relais-config``
-  subagent.  CLI: ``python -m channels.whatsapp``.
+  subagent.  CLI: ``python -m aiguilleur.channels.whatsapp``.
 
 Technical overview
 ------------------

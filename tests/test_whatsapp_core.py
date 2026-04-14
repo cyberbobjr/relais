@@ -1,4 +1,4 @@
-"""Unit tests for channels.whatsapp.core — TDD RED phase.
+"""Unit tests for aiguilleur.channels.whatsapp.core — TDD RED phase.
 
 Tests cover:
 - ensure_bun / ensure_git
@@ -31,7 +31,7 @@ class TestResolveProjectRoot:
 
     def test_dev_mode(self, tmp_path: Path) -> None:
         """RELAIS_HOME=<repo>/.relais → project root = <repo>."""
-        from channels.whatsapp.core import resolve_project_root
+        from aiguilleur.channels.whatsapp.core import resolve_project_root
 
         relais_home = tmp_path / ".relais"
         relais_home.mkdir()
@@ -41,7 +41,7 @@ class TestResolveProjectRoot:
 
     def test_raises_if_no_supervisord_conf(self, tmp_path: Path) -> None:
         """Should raise RuntimeError if project root can't be found."""
-        from channels.whatsapp.core import resolve_project_root
+        from aiguilleur.channels.whatsapp.core import resolve_project_root
 
         relais_home = tmp_path / "deep" / "nested" / ".relais"
         relais_home.mkdir(parents=True)
@@ -58,14 +58,14 @@ class TestEnsureBun:
     """Verify bun presence check."""
 
     def test_bun_found(self) -> None:
-        from channels.whatsapp.core import ensure_bun
+        from aiguilleur.channels.whatsapp.core import ensure_bun
 
         with patch("shutil.which", return_value="/usr/local/bin/bun"):
             ok, detail = ensure_bun()
         assert ok is True
 
     def test_bun_missing(self) -> None:
-        from channels.whatsapp.core import ensure_bun
+        from aiguilleur.channels.whatsapp.core import ensure_bun
 
         with patch("shutil.which", return_value=None):
             ok, detail = ensure_bun()
@@ -77,14 +77,14 @@ class TestEnsureGit:
     """Verify git presence check."""
 
     def test_git_found(self) -> None:
-        from channels.whatsapp.core import ensure_git
+        from aiguilleur.channels.whatsapp.core import ensure_git
 
         with patch("shutil.which", return_value="/usr/bin/git"):
             ok, detail = ensure_git()
         assert ok is True
 
     def test_git_missing(self) -> None:
-        from channels.whatsapp.core import ensure_git
+        from aiguilleur.channels.whatsapp.core import ensure_git
 
         with patch("shutil.which", return_value=None):
             ok, detail = ensure_git()
@@ -100,7 +100,7 @@ class TestInstallBaileys:
 
     def test_already_installed(self, tmp_path: Path) -> None:
         """Skip clone if vendor dir + package.json exist."""
-        from channels.whatsapp.core import install_baileys
+        from aiguilleur.channels.whatsapp.core import install_baileys
 
         vendor = tmp_path / "vendor" / "baileys-api"
         vendor.mkdir(parents=True)
@@ -117,7 +117,7 @@ class TestInstallBaileys:
 
     def test_fresh_install(self, tmp_path: Path) -> None:
         """Clone + bun install on fresh system."""
-        from channels.whatsapp.core import install_baileys
+        from aiguilleur.channels.whatsapp.core import install_baileys
 
         def mock_subprocess_run(cmd, **kwargs):
             if "clone" in cmd:
@@ -134,7 +134,7 @@ class TestInstallBaileys:
 
     def test_clone_failure(self, tmp_path: Path) -> None:
         """Report error if git clone fails."""
-        from channels.whatsapp.core import install_baileys
+        from aiguilleur.channels.whatsapp.core import install_baileys
 
         with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "git")):
             result = install_baileys(relais_home=tmp_path)
@@ -156,7 +156,7 @@ class TestGenerateApiKey:
 
     def test_constructs_correct_redis_url(self, tmp_path: Path) -> None:
         """REDIS_URL must be redis://baileys:<pass>@localhost:6379."""
-        from channels.whatsapp.core import generate_api_key
+        from aiguilleur.channels.whatsapp.core import generate_api_key
 
         vendor = tmp_path / "vendor" / "baileys-api"
         vendor.mkdir(parents=True)
@@ -187,7 +187,7 @@ class TestGenerateApiKey:
 
     def test_missing_redis_pass(self, tmp_path: Path) -> None:
         """Must fail clearly if REDIS_PASS_BAILEYS is empty."""
-        from channels.whatsapp.core import generate_api_key
+        from aiguilleur.channels.whatsapp.core import generate_api_key
 
         vendor = tmp_path / "vendor" / "baileys-api"
         vendor.mkdir(parents=True)
@@ -198,7 +198,7 @@ class TestGenerateApiKey:
 
     def test_vendor_not_installed(self, tmp_path: Path) -> None:
         """Must fail if baileys-api vendor tree is missing."""
-        from channels.whatsapp.core import generate_api_key
+        from aiguilleur.channels.whatsapp.core import generate_api_key
 
         result = generate_api_key(relais_home=tmp_path, redis_pass_baileys="pass")
         assert result.ok is False
@@ -214,7 +214,7 @@ class TestPair:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_happy_path(self) -> None:
-        from channels.whatsapp.core import pair, PairParams
+        from aiguilleur.channels.whatsapp.core import pair, PairParams
         from unittest.mock import AsyncMock
 
         mock_redis = MagicMock()
@@ -228,9 +228,9 @@ class TestPair:
             reply_to="456",
         )
 
-        with patch("channels.whatsapp.core._http_post") as mock_post:
+        with patch("aiguilleur.channels.whatsapp.core._http_post") as mock_post:
             mock_post.return_value = (True, "accepted")
-            with patch("channels.whatsapp.core._http_get") as mock_get:
+            with patch("aiguilleur.channels.whatsapp.core._http_get") as mock_get:
                 mock_get.return_value = (True, "ok")
                 result = await pair(
                     params=params,
@@ -247,7 +247,7 @@ class TestPair:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_gateway_down(self) -> None:
-        from channels.whatsapp.core import pair, PairParams
+        from aiguilleur.channels.whatsapp.core import pair, PairParams
 
         params = PairParams(
             sender_id="discord:123",
@@ -257,9 +257,9 @@ class TestPair:
             reply_to="456",
         )
 
-        with patch("channels.whatsapp.core._http_get") as mock_get:
+        with patch("aiguilleur.channels.whatsapp.core._http_get") as mock_get:
             mock_get.return_value = (True, "ok")
-            with patch("channels.whatsapp.core._http_post") as mock_post:
+            with patch("aiguilleur.channels.whatsapp.core._http_post") as mock_post:
                 mock_post.return_value = (False, "connection refused")
                 result = await pair(
                     params=params,
@@ -281,13 +281,13 @@ class TestUnpair:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_happy_path(self) -> None:
-        from channels.whatsapp.core import unpair
+        from aiguilleur.channels.whatsapp.core import unpair
         from unittest.mock import AsyncMock
 
         mock_redis = MagicMock()
         mock_redis.delete = AsyncMock(return_value=1)
 
-        with patch("channels.whatsapp.core._http_delete") as mock_del:
+        with patch("aiguilleur.channels.whatsapp.core._http_delete") as mock_del:
             mock_del.return_value = (True, "logged out")
             result = await unpair(
                 phone_number="+33600000000",
@@ -300,13 +300,13 @@ class TestUnpair:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_already_disconnected(self) -> None:
-        from channels.whatsapp.core import unpair
+        from aiguilleur.channels.whatsapp.core import unpair
         from unittest.mock import AsyncMock
 
         mock_redis = MagicMock()
         mock_redis.delete = AsyncMock(return_value=0)
 
-        with patch("channels.whatsapp.core._http_delete") as mock_del:
+        with patch("aiguilleur.channels.whatsapp.core._http_delete") as mock_del:
             mock_del.return_value = (True, "already disconnected")
             result = await unpair(
                 phone_number="+33600000000",
@@ -328,9 +328,9 @@ class TestCheckHealth:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_both_healthy(self) -> None:
-        from channels.whatsapp.core import check_health
+        from aiguilleur.channels.whatsapp.core import check_health
 
-        with patch("channels.whatsapp.core._http_get") as mock_get:
+        with patch("aiguilleur.channels.whatsapp.core._http_get") as mock_get:
             mock_get.return_value = (True, "ok")
             result = await check_health(
                 gateway_url="http://localhost:3025",
@@ -342,7 +342,7 @@ class TestCheckHealth:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_webhook_down(self) -> None:
-        from channels.whatsapp.core import check_health
+        from aiguilleur.channels.whatsapp.core import check_health
 
         call_count = 0
 
@@ -353,7 +353,7 @@ class TestCheckHealth:
                 return (False, "connection refused")
             return (True, "ok")
 
-        with patch("channels.whatsapp.core._http_get", side_effect=mock_get):
+        with patch("aiguilleur.channels.whatsapp.core._http_get", side_effect=mock_get):
             result = await check_health(
                 gateway_url="http://localhost:3025",
                 webhook_host="127.0.0.1",
@@ -376,7 +376,7 @@ class TestSupervisorCtl:
 
     def test_uses_correct_cwd_and_config_flag(self, tmp_path: Path) -> None:
         """supervisorctl must run with cwd=project_root and -c supervisord.conf."""
-        from channels.whatsapp.core import supervisor_ctl
+        from aiguilleur.channels.whatsapp.core import supervisor_ctl
 
         (tmp_path / "supervisord.conf").write_text("[supervisord]")
 
@@ -396,7 +396,7 @@ class TestSupervisorCtl:
 
     def test_supervisord_not_running(self, tmp_path: Path) -> None:
         """Report clear error when supervisord is unreachable."""
-        from channels.whatsapp.core import supervisor_ctl
+        from aiguilleur.channels.whatsapp.core import supervisor_ctl
 
         (tmp_path / "supervisord.conf").write_text("[supervisord]")
 
@@ -416,7 +416,7 @@ class TestWriteEnvVars:
     """Verify .env file manipulation."""
 
     def test_set_new_var(self, tmp_path: Path) -> None:
-        from channels.whatsapp.core import write_env_var
+        from aiguilleur.channels.whatsapp.core import write_env_var
 
         env_file = tmp_path / ".env"
         env_file.write_text("EXISTING=value\n")
@@ -429,7 +429,7 @@ class TestWriteEnvVars:
         assert "EXISTING=value" in content
 
     def test_update_existing_var(self, tmp_path: Path) -> None:
-        from channels.whatsapp.core import write_env_var
+        from aiguilleur.channels.whatsapp.core import write_env_var
 
         env_file = tmp_path / ".env"
         env_file.write_text("WHATSAPP_PHONE_NUMBER=+33600000001\n")
@@ -450,7 +450,7 @@ class TestChannelToggle:
     """Verify aiguilleur.yaml enable/disable."""
 
     def test_enable(self, tmp_path: Path) -> None:
-        from channels.whatsapp.core import enable_channel
+        from aiguilleur.channels.whatsapp.core import enable_channel
 
         config = tmp_path / "config" / "aiguilleur.yaml"
         config.parent.mkdir(parents=True)
@@ -469,7 +469,7 @@ class TestChannelToggle:
         assert data["channels"]["whatsapp"]["enabled"] is True
 
     def test_disable(self, tmp_path: Path) -> None:
-        from channels.whatsapp.core import disable_channel
+        from aiguilleur.channels.whatsapp.core import disable_channel
 
         config = tmp_path / "config" / "aiguilleur.yaml"
         config.parent.mkdir(parents=True)

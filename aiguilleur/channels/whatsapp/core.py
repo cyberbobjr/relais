@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("relais.channels.whatsapp")
+logger = logging.getLogger("relais.aiguilleur.channels.whatsapp")
 
 
 # ---------------------------------------------------------------------------

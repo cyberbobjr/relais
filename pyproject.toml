@@ -49,7 +49,7 @@ packages = [
     "atelier",
     "souvenir",
     "archiviste",
-    "channels/whatsapp",
+    "aiguilleur/channels/whatsapp",
 ]
 
 [tool.pytest.ini_options]

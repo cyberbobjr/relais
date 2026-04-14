@@ -92,17 +92,17 @@ def _make_message(
 class TestJidNormalization:
     def test_normalize_standard_jid(self):
         """Test 1: Standard JID → E.164."""
-        from channels.whatsapp.adapter import normalize_whatsapp_id
+        from aiguilleur.channels.whatsapp.adapter import normalize_whatsapp_id
         assert normalize_whatsapp_id("33699999999@s.whatsapp.net") == "+33699999999"
 
     def test_normalize_jid_with_device_suffix(self):
         """Test 2: JID with device suffix stripped."""
-        from channels.whatsapp.adapter import normalize_whatsapp_id
+        from aiguilleur.channels.whatsapp.adapter import normalize_whatsapp_id
         assert normalize_whatsapp_id("33699999999:2@s.whatsapp.net") == "+33699999999"
 
     def test_e164_to_jid(self):
         """Test 3: E.164 → JID."""
-        from channels.whatsapp.adapter import e164_to_jid
+        from aiguilleur.channels.whatsapp.adapter import e164_to_jid
         assert e164_to_jid("+33699999999") == "33699999999@s.whatsapp.net"
 
 
@@ -160,31 +160,31 @@ class TestConvertMdToWhatsapp:
 class TestExtractTextContent:
     def test_conversation_field(self):
         """Plain text in conversation field."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
         msg = {"message": {"conversation": "hello"}}
         assert _RelaisWhatsAppClient._extract_text_content(msg) == "hello"
 
     def test_extended_text_message(self):
         """Extended text message with URL preview."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
         msg = {"message": {"extendedTextMessage": {"text": "check this"}}}
         assert _RelaisWhatsAppClient._extract_text_content(msg) == "check this"
 
     def test_image_caption(self):
         """Image with caption — extract caption text."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
         msg = {"message": {"imageMessage": {"caption": "look at this"}}}
         assert _RelaisWhatsAppClient._extract_text_content(msg) == "look at this"
 
     def test_none_for_non_text(self):
         """Non-text messages return None."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
         msg = {"message": {"audioMessage": {"seconds": 5}}}
         assert _RelaisWhatsAppClient._extract_text_content(msg) is None
 
     def test_none_for_missing_message(self):
         """Missing message field returns None."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
         msg = {"message": None}
         assert _RelaisWhatsAppClient._extract_text_content(msg) is None
 
@@ -200,7 +200,7 @@ class TestProcessSingleMessage:
     @pytest.fixture
     def client(self):
         """Build a minimal _RelaisWhatsAppClient with mocked dependencies."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
 
         adapter = MagicMock()
         adapter.stop_event = MagicMock()
@@ -318,7 +318,7 @@ class TestSelfChatIdentity:
     @pytest.mark.asyncio
     async def test_self_chat_produces_owner_sender_id(self):
         """Test 17: Self-chat → sender_id uses owner number."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
 
         adapter = MagicMock()
         adapter.stop_event = MagicMock()
@@ -359,7 +359,7 @@ class TestPairingHandlers:
     @pytest.fixture
     def client(self):
         """Build a client with mocked Redis for pairing tests."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
 
         adapter = MagicMock()
         adapter.stop_event = MagicMock()
@@ -500,7 +500,7 @@ class TestPairingHandlers:
 class TestSendMessage:
     def test_split_whatsapp_message_long(self):
         """Test 27: Long messages split at 4096 boundary."""
-        from channels.whatsapp.adapter import _split_whatsapp_message
+        from aiguilleur.channels.whatsapp.adapter import _split_whatsapp_message
         long_text = "a" * 8000
         parts = _split_whatsapp_message(long_text)
         assert all(len(p) <= 4096 for p in parts)
@@ -508,7 +508,7 @@ class TestSendMessage:
 
     def test_split_whatsapp_message_short(self):
         """Short messages not split."""
-        from channels.whatsapp.adapter import _split_whatsapp_message
+        from aiguilleur.channels.whatsapp.adapter import _split_whatsapp_message
         short = "hello world"
         parts = _split_whatsapp_message(short)
         assert parts == [short]
@@ -523,7 +523,7 @@ class TestAdapterLifecycle:
     @pytest.mark.asyncio
     async def test_missing_env_var_returns_cleanly(self):
         """Test 30: Missing env var → run() logs error, returns cleanly."""
-        from channels.whatsapp.adapter import WhatsAppAiguilleur
+        from aiguilleur.channels.whatsapp.adapter import WhatsAppAiguilleur
         from aiguilleur.channel_config import ChannelConfig
 
         config = ChannelConfig(name="whatsapp", enabled=True)
@@ -551,7 +551,7 @@ class TestLiveConfig:
     @pytest.mark.asyncio
     async def test_reads_config_live(self):
         """Test 31: Client reads adapter.config on each message."""
-        from channels.whatsapp.adapter import _RelaisWhatsAppClient
+        from aiguilleur.channels.whatsapp.adapter import _RelaisWhatsAppClient
 
         adapter = MagicMock()
         adapter.stop_event = MagicMock()

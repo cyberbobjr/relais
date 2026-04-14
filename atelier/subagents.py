@@ -283,7 +283,7 @@ def _load_tools_from_import(module_path: str, spec_name: str) -> dict[str, Any]:
     be on ``sys.path`` (e.g. via ``PYTHONPATH=.`` in supervisord).
 
     Args:
-        module_path: Dotted module path (e.g. ``channels.whatsapp.tools``).
+        module_path: Dotted module path (e.g. ``aiguilleur.channels.whatsapp.tools``).
         spec_name: Subagent name used in log messages.
 
     Returns:

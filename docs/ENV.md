@@ -29,9 +29,8 @@ Chaque `RedisClient("<brick>")` cherche d'abord `REDIS_PASS_<BRICK>`, puis retom
 | `REDIS_PASS_SOUVENIR` | `souvenir` |
 | `REDIS_PASS_COMMANDANT` | `commandant` |
 | `REDIS_PASS_ARCHIVISTE` | `archiviste` |
+| `REDIS_PASS_FORGERON` | `forgeron` (amélioration autonome des skills) |
 | `REDIS_PASS_BAILEYS` | passerelle externe `baileys-api` (WhatsApp) — utilisée par le programme supervisord `baileys-api`, pas par une brique Python |
-
-Les autres mots de passe présents dans `.env.example` correspondent à des briques futures ou absentes de ce dépôt.
 
 ---
 
@@ -57,7 +56,7 @@ Les autres mots de passe présents dans `.env.example` correspondent à des briq
 
 ### Canal WhatsApp (passerelle `baileys-api`)
 
-Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L'adaptateur Python (`channels/whatsapp/adapter.py`) parle à la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) lancée par supervisord (programme `baileys-api`, groupe `optional`, autostart désactivé). Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md) pour la procédure complète.
+Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L'adaptateur Python (`aiguilleur/channels/whatsapp/adapter.py`) parle à la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) lancée par supervisord (programme `baileys-api`, groupe `optional`, autostart désactivé). Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md) pour la procédure complète.
 
 | Variable | Requis | Utilisation réelle |
 |----------|--------|--------------------|

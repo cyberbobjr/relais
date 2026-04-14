@@ -73,6 +73,5 @@ channels:
     enabled: false          # disabled by default; enable in ~/.relais/config/aiguilleur.yaml
     streaming: false        # baileys-api does not support streaming in MVP
     profile: default
-    class_path: channels.whatsapp.adapter.WhatsAppAiguilleur
     prompt_path: "channels/whatsapp_default.md"
     max_restarts: 5

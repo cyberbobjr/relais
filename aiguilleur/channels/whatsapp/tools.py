@@ -16,7 +16,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 
-from channels.whatsapp import core
+from aiguilleur.channels.whatsapp import core
 
 
 # ---------------------------------------------------------------------------

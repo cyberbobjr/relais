@@ -12,10 +12,10 @@ This guide covers how to set up the WhatsApp channel adapter for RELAIS using th
 
 ### 1. Install baileys-api
 
-Run the install via the `channels.whatsapp` CLI:
+Run the install via the `aiguilleur.channels.whatsapp` CLI:
 
 ```bash
-python -m channels.whatsapp install
+python -m aiguilleur.channels.whatsapp install
 ```
 
 This clones [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) to `$RELAIS_HOME/vendor/baileys-api` and runs `bun install`. The relais-config subagent can also invoke this via the `whatsapp_install` tool.
