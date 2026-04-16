@@ -1,8 +1,9 @@
 > **NOTE (2026-04-10):** This plan has been fully implemented. The WhatsApp channel
 > code has been consolidated into the `aiguilleur/channels/whatsapp/` package (adapter, core
-> logic, tools, CLI). The old paths referenced below (`aiguilleur/aiguilleur/channels/whatsapp/`,
-> `scripts/install_whatsapp.sh`, `scripts/pair_whatsapp.py`, `scripts/unpair_whatsapp.py`)
-> no longer exist. The `relais-config` subagent now uses three LangChain `BaseTool`
+> logic, tools, CLI). Some old paths referenced below (`scripts/install_whatsapp.sh`,
+> `scripts/pair_whatsapp.py`, `scripts/unpair_whatsapp.py`) no longer exist. An earlier
+> intermediate location `channels/whatsapp/` (top-level) has also been superseded by
+> the current `aiguilleur/channels/whatsapp/` package. The `relais-config` subagent now uses three LangChain `BaseTool`
 > implementations (`whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall`)
 > loaded via `tool_tokens: [module:aiguilleur.channels.whatsapp.tools]`. The CLI entry point is
 > `python -m aiguilleur.channels.whatsapp`. This document is preserved as historical context.
@@ -134,7 +135,7 @@ Baileys uses JIDs (`33699999999@s.whatsapp.net`), portail.yaml stores E.164 (`+3
 - **Inbound**: `normalize_whatsapp_id("33699999999:2@s.whatsapp.net")` → strip `@` domain → strip `:` device suffix → prepend `+` → `"+33699999999"` → `sender_id = "whatsapp:+33699999999"`
 - **Outbound**: `e164_to_jid("+33699999999")` → `"33699999999@s.whatsapp.net"` → used in `reply_to` and send API
 
-Both functions live in `aiguilleur/aiguilleur/aiguilleur/channels/whatsapp/adapter.py`.
+Both functions live in `aiguilleur/channels/whatsapp/adapter.py`.
 
 ### Redis Architecture
 
@@ -559,8 +560,8 @@ All pseudocode in this step uses these exact attribute names, consistent with `_
 
 ### Task List
 
-- [ ] Create `aiguilleur/aiguilleur/channels/whatsapp/__init__.py` with module docstring `"""WhatsApp channel adapter (Baileys gateway)."""`
-- [ ] Create `aiguilleur/aiguilleur/aiguilleur/channels/whatsapp/adapter.py` implementing:
+- [ ] Create `aiguilleur/channels/whatsapp/__init__.py` with module docstring `"""WhatsApp channel adapter (Baileys gateway)."""`
+- [ ] Create `aiguilleur/channels/whatsapp/adapter.py` implementing:
   - **`WhatsAppAiguilleur(NativeAiguilleur)`** — adapter lifecycle wrapper
   - **`_RelaisWhatsAppClient`** — business logic class (instantiated inside `run()`)
 
@@ -568,7 +569,7 @@ All pseudocode in this step uses these exact attribute names, consistent with `_
 
 #### JID ↔ E.164 Normalization (module-level functions)
 
-- [ ] Implement in `aiguilleur/aiguilleur/aiguilleur/channels/whatsapp/adapter.py`:
+- [ ] Implement in `aiguilleur/channels/whatsapp/adapter.py`:
   ```python
   def normalize_whatsapp_id(jid: str) -> str:
       """'33699999999@s.whatsapp.net' → '+33699999999' (strips device suffix)."""
@@ -932,14 +933,14 @@ All pseudocode in this step uses these exact attribute names, consistent with `_
 
 ### Verification Commands
 ```bash
-python -m py_compile aiguilleur/aiguilleur/aiguilleur/channels/whatsapp/adapter.py
-PYTHONPATH=. python -c "from aiguilleur.aiguilleur.channels.whatsapp.adapter import WhatsAppAiguilleur; print('OK')"
-ruff check aiguilleur/aiguilleur/channels/whatsapp/
+python -m py_compile aiguilleur/channels/whatsapp/adapter.py
+PYTHONPATH=. python -c "from aiguilleur.channels.whatsapp.adapter import WhatsAppAiguilleur; print('OK')"
+ruff check aiguilleur/channels/whatsapp/
 python -m py_compile common/markdown_converter.py
 ```
 
 ### Exit Criteria
-- [ ] `aiguilleur/aiguilleur/aiguilleur/channels/whatsapp/adapter.py` exists and passes `py_compile`
+- [ ] `aiguilleur/channels/whatsapp/adapter.py` exists and passes `py_compile`
 - [ ] `WhatsAppAiguilleur` class exported from the module
 - [ ] `convert_md_to_whatsapp()` added to `common/markdown_converter.py`
 - [ ] Webhook handler routes all `connection.update` variants (QR, open, close, reconnecting, wrong_phone_number)
@@ -960,7 +961,7 @@ python -m py_compile common/markdown_converter.py
 
 ### Rollback
 ```bash
-git checkout main -- aiguilleur/aiguilleur/channels/whatsapp/ common/markdown_converter.py
+git checkout main -- aiguilleur/channels/whatsapp/ common/markdown_converter.py
 ```
 
 ---
@@ -1566,7 +1567,7 @@ All steps ship as a **single PR** (`feat/whatsapp-adapter` → `main`) since the
 ```markdown
 ## Summary
 - Integrates fazer-ai/baileys-api (Bun + Baileys) as an optional supervisord-managed WhatsApp gateway (`[group:optional]`)
-- Adds `WhatsAppAiguilleur` NativeAiguilleur adapter in `aiguilleur/aiguilleur/channels/whatsapp/`
+- Adds `WhatsAppAiguilleur` NativeAiguilleur adapter in `aiguilleur/channels/whatsapp/`
 - Adds `/settings whatsapp` command in Commandant with adapter health guard
 - Shared bot number model: admin's personal WhatsApp linked as RELAIS channel
 - Owner identity via `identifiers.whatsapp.self` in portail.yaml (distinct from contact `dm`)
@@ -1602,7 +1603,7 @@ External Node.js service: https://github.com/fazer-ai/baileys-api (pinned commit
 ## Test Plan
 - [ ] `pytest tests/test_whatsapp_adapter.py tests/test_commandant_settings.py -v -x --timeout=30` — 47 tests pass
 - [ ] `pytest tests/ -x --timeout=30 -m "not integration"` — no regressions
-- [ ] `ruff check aiguilleur/aiguilleur/channels/whatsapp/ commandant/ common/markdown_converter.py` — no lint errors
+- [ ] `ruff check aiguilleur/channels/whatsapp/ commandant/ common/markdown_converter.py` — no lint errors
 - [ ] Manual: start baileys-api, `/settings whatsapp` on Discord, scan QR, send test message E2E
 ```
 
@@ -1637,8 +1638,8 @@ External Node.js service: https://github.com/fazer-ai/baileys-api (pinned commit
 |---|---|---|
 | `scripts/install_whatsapp.sh` | NEW | Automated install with pinned SHA [AMENDED: review points 14, 15] |
 | `scripts/run_baileys.py` | NEW | Supervisord wrapper with prereq checks [AMENDED: review point 11] |
-| `aiguilleur/aiguilleur/channels/whatsapp/__init__.py` | NEW | |
-| `aiguilleur/aiguilleur/aiguilleur/channels/whatsapp/adapter.py` | NEW | Adapter + normalization + anti-loop + DLQ |
+| `aiguilleur/channels/whatsapp/__init__.py` | NEW | |
+| `aiguilleur/channels/whatsapp/adapter.py` | NEW | Adapter + normalization + anti-loop + DLQ |
 | `common/envelope.py` | MODIFIED | Add `action` validation in `to_json()` |
 | `common/streams.py` | MODIFIED | Add `KEY_WHATSAPP_PAIRING` |
 | `common/init.py` | MODIFIED | `initialize_user_dir()` copies `aiguilleur.yaml.default` [AMENDED: review point 3] |

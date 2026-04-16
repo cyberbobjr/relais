@@ -24,6 +24,10 @@ Adaptateurs de canaux réellement livrés :
 
 La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
 
+Outils livrés dans le dépôt :
+
+- `tools/tui/` : client terminal autonome (Textual) pour RELAIS, installable indépendamment (`uv pip install -e tools/tui`). Se connecte exclusivement via l'API REST SSE — aucune dépendance sur les internes RELAIS. Voir [plans/TUI.md](/Users/benjaminmarchand/IdeaProjects/relais/plans/TUI.md).
+
 ---
 
 ## Architecture

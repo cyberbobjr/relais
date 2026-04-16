@@ -25,6 +25,7 @@ from aiguilleur.core.native import NativeAiguilleur
 from aiguilleur.channels.rest.correlator import ResponseCorrelator
 from aiguilleur.channels.rest.server import create_app
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_PROGRESS
 from common.redis_client import RedisClient
 from common.streams import stream_outgoing
 
@@ -210,6 +211,8 @@ class RestAiguilleur(NativeAiguilleur):
                 return
 
             envelope = Envelope.from_json(payload)
+            if envelope.action == ACTION_MESSAGE_PROGRESS:
+                return  # Skip progress events — only resolve on final reply
             await correlator.resolve(envelope.correlation_id, envelope)
         except Exception as exc:
             logger.error("Failed to process outgoing REST message %s: %s", message_id, exc)

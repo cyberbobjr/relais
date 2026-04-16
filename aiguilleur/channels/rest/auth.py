@@ -84,13 +84,10 @@ async def _check_bearer(
             status=401,
         )
 
-    # Resolve using REST channel — UserRegistry hashes the token internally
-    # so we pass the raw key as the "raw_id" part of the sender_id.
-    sender_id = f"rest:{raw_token}"
-    user_record = registry.resolve_user(
-        sender_id=sender_id,
-        channel="rest",
-    )
+    # Resolve using the dedicated API key method — hashes the raw token
+    # and looks it up in the sender_index.  resolve_user() does NOT hash;
+    # it is used downstream by Portail with the pre-resolved user_id.
+    user_record = registry.resolve_rest_api_key(raw_token)
 
     if user_record is None:
         # Log only token length to avoid leaking sensitive data

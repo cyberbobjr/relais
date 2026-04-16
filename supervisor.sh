@@ -13,7 +13,9 @@ usage() {
 Usage:
   ./supervisor.sh [--verbose] start all
   ./supervisor.sh [--verbose] restart all
+  ./supervisor.sh [--verbose] restart <service>
   ./supervisor.sh stop all
+  ./supervisor.sh stop <service>
   ./supervisor.sh reload all
   ./supervisor.sh status
   ./supervisor.sh clear
@@ -25,6 +27,8 @@ Options:
 
 Notes:
   - start all starts supervisord if needed then launches all programs.
+  - restart <service> restarts a single service (e.g. aiguilleur, atelier).
+  - stop <service> stops a single service without shutting down supervisord.
   - reload all corresponds to supervisorctl reload.
   - stop all stops supervised programs and shuts down the supervisord daemon.
   - clear removes all files in .relais/logs.
@@ -401,41 +405,50 @@ case "$ACTION" in
         if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
         ;;
     stop)
-        if [[ "$TARGET" != "all" ]]; then
-            usage
-            exit 1
-        fi
-        cleanup_stale_artifacts
-        if ! is_supervisord_running; then
-            if ! stop_orphaned_supervisords; then
-                exit 1
-            fi
+        if [[ "$TARGET" == "all" ]]; then
             cleanup_stale_artifacts
-            echo "supervisord is not running. Nothing to stop."
-            exit 0
-        fi
-        if ! stop_supervisord; then
-            exit 1
-        fi
-        echo "supervisord stopped."
-        ;;
-    restart)
-        if [[ "$TARGET" != "all" ]]; then
-            usage
-            exit 1
-        fi
-        cleanup_stale_artifacts
-        if is_supervisord_running; then
+            if ! is_supervisord_running; then
+                if ! stop_orphaned_supervisords; then
+                    exit 1
+                fi
+                cleanup_stale_artifacts
+                echo "supervisord is not running. Nothing to stop."
+                exit 0
+            fi
             if ! stop_supervisord; then
                 exit 1
             fi
+            echo "supervisord stopped."
+        elif [[ -n "$TARGET" ]]; then
+            ensure_supervisord_running
+            run_supervisorctl stop "$TARGET"
+        else
+            usage
+            exit 1
         fi
-        load_dotenv
-        echo "Starting supervisord..."
-        supervisord -c "$CONFIG_PATH"
-        wait_for_supervisord
-        run_supervisorctl start infra:* core:* relays:*
-        if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
+        ;;
+    restart)
+        if [[ "$TARGET" == "all" ]]; then
+            cleanup_stale_artifacts
+            if is_supervisord_running; then
+                if ! stop_supervisord; then
+                    exit 1
+                fi
+            fi
+            load_dotenv
+            echo "Starting supervisord..."
+            supervisord -c "$CONFIG_PATH"
+            wait_for_supervisord
+            run_supervisorctl start infra:* core:* relays:*
+            if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
+        elif [[ -n "$TARGET" ]]; then
+            ensure_supervisord_running
+            run_supervisorctl restart "$TARGET"
+            if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
+        else
+            usage
+            exit 1
+        fi
         ;;
     reload)
         if [[ "$TARGET" != "all" ]]; then
