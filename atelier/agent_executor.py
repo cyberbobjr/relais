@@ -407,7 +407,7 @@ class AgentExecutor:
         )
         portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
         user_id = portail_ctx.get("user_id", envelope.sender_id)
-        config = RunnableConfig(configurable={"thread_id": user_id})
+        config = RunnableConfig(configurable={"thread_id": f"{user_id}:{envelope.session_id}"})
         try:
             reply, tool_call_count, tool_error_count = await self._stream(
                 {"messages": messages}, stream_callback, progress_callback, config=config

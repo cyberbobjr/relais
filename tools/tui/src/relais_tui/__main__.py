@@ -21,9 +21,9 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import Worker
-from textual.widgets import Footer, Header, Input, LoadingIndicator, RichLog, Static
+from textual.widgets import Footer, Header, Input, LoadingIndicator, Log, Static
 
-from relais_tui.config import Config, load_config
+from relais_tui.config import Config, load_config, save_config
 from relais_tui.client import RelaisClient
 from relais_tui.sse_parser import DoneEvent, ErrorEvent, ProgressEvent, TokenEvent
 
@@ -193,7 +193,8 @@ class RelaisApp(App[None]):
         self._config_path = config_path
         self._log_path = log_path
         self._client = RelaisClient(config)
-        self._session_id: str | None = None
+        # Restore last session from config; may be overwritten by DoneEvent
+        self._session_id: str | None = config.last_session_id or None
         self._busy = False
         self._stream_worker: Worker | None = None
 
@@ -229,7 +230,7 @@ class RelaisApp(App[None]):
     def compose(self) -> ComposeResult:
         """Build the widget tree."""
         yield Header(show_clock=True)
-        yield RichLog(id="chat-log", wrap=True, markup=True, highlight=False)
+        yield Log(id="chat-log", highlight=True)
         yield Static("", id="streaming", markup=True)
         yield LoadingIndicator(id="spinner")
         yield Input(
@@ -245,9 +246,11 @@ class RelaisApp(App[None]):
 
     async def on_mount(self) -> None:
         """Run after the DOM is ready: show splash, health-check, focus input."""
-        log = self.query_one("#chat-log", RichLog)
-        log.write(_build_splash(self._config_path, self._log_path))
+        log = self.query_one("#chat-log", Log)
+        log.write_line(self._render_markup(_build_splash(self._config_path, self._log_path)))
         self._healthcheck()
+        if self._session_id:
+            self.run_worker(self._load_history(), exclusive=False)
         self.query_one("#msg-input", Input).focus()
 
     async def on_unmount(self) -> None:
@@ -288,8 +291,11 @@ class RelaisApp(App[None]):
     # ------------------------------------------------------------------
 
     def action_clear_chat(self) -> None:
-        """Clear the chat log."""
-        self.query_one("#chat-log", RichLog).clear()
+        """Clear the chat log and generate a new session_id."""
+        from uuid import uuid4
+        self._session_id = str(uuid4())
+        self._save_session_id()
+        self.query_one("#chat-log", Log).clear()
 
     def action_stop_stream(self) -> None:
         """Cancel the in-progress stream (ESC key).
@@ -303,6 +309,83 @@ class RelaisApp(App[None]):
         """
         if self._busy and self._stream_worker is not None:
             self._stream_worker.cancel()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _render_markup(self, text: str) -> str:
+        """Convert Rich markup string to an ANSI-escaped plain string.
+
+        The ``Log`` widget does not understand Rich markup natively, so we
+        pre-render it through a Rich ``Console`` that writes ANSI escape
+        codes to a ``StringIO`` buffer.
+
+        Args:
+            text: A string that may contain Rich markup tags such as
+                ``[bold]``, ``[green]``, ``[dim]``, etc.
+
+        Returns:
+            The rendered string with ANSI escape codes (no raw markup tags).
+        """
+        from io import StringIO
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(force_terminal=True, file=buf, width=120)
+        console.print(text, end="")
+        return buf.getvalue()
+
+    def _save_session_id(self) -> None:
+        """Persist the current session ID back to the config file on disk.
+
+        Updates ``self._config`` (via ``dataclasses.replace``) and then
+        writes the full config to ``self._config_path`` using
+        ``save_config``.
+
+        Returns:
+            None. Side effect: config file is updated on disk.
+        """
+        from dataclasses import replace as _replace
+        session_str = self._session_id or ""
+        self._config = _replace(self._config, last_session_id=session_str)
+        save_config(self._config, self._config_path)
+
+    async def _load_history(self) -> None:
+        """Load conversation history for the current session and display it.
+
+        Calls ``RelaisClient.fetch_history()`` and renders up to 20 turns
+        in the chat log.  Silently exits if no turns are returned or if the
+        session ID is not set.
+
+        Returns:
+            None. Side effect: turns are written to the ``#chat-log`` widget.
+        """
+        if not self._session_id:
+            return
+        turns = await self._client.fetch_history(self._session_id, limit=20)
+        if not turns:
+            return
+        log = self.query_one("#chat-log", Log)
+        total = len(turns)
+        displayed = min(total, 20)
+        if total > displayed:
+            log.write_line(
+                self._render_markup(f"[dim]... {total - displayed} turns précédents[/dim]")
+            )
+        log.write_line(self._render_markup("[dim]--- Historique ---[/dim]"))
+        for turn in turns[-displayed:]:
+            if turn.get("user_content"):
+                log.write_line(
+                    self._render_markup(f"[bold]Vous :[/bold] {turn['user_content']}")
+                )
+            if turn.get("assistant_content"):
+                log.write_line(
+                    self._render_markup(
+                        f"[green]Assistant :[/green] {turn['assistant_content']}"
+                    )
+                )
+        log.write_line(self._render_markup("[dim]--- Fin historique ---[/dim]"))
 
     # ------------------------------------------------------------------
     # Workers
@@ -334,12 +417,12 @@ class RelaisApp(App[None]):
         Args:
             content: The user message text.
         """
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", Log)
         status = self.query_one("#status", Static)
 
         _log.debug("_send: entered, content_len=%d, session_id=%s", len(content), self._session_id)
         user_color = self._config.theme.user_text
-        log.write(f"[bold {user_color}]You:[/bold {user_color}] {content}")
+        log.write_line(self._render_markup(f"[bold {user_color}]You:[/bold {user_color}] {content}"))
 
         buf = ""
         self._buf = ""
@@ -366,12 +449,27 @@ class RelaisApp(App[None]):
                 elif isinstance(ev, DoneEvent):
                     spinner.remove_class("active")
                     self._session_id = ev.session_id or self._session_id
+                    # Detect /resume context: if session changed, switch silently
+                    # (session_id already updated above from ev.session_id)
+                    self._save_session_id()
                     # Non-streaming fallback: server returned full content at once
                     if not buf and ev.content:
                         buf = ev.content
+                    # Detect /clear confirmation — generate a new session
+                    _clear_phrases = (
+                        "✓ Conversation history cleared.",
+                        "Conversation history cleared.",
+                    )
+                    if buf.strip() in _clear_phrases:
+                        from uuid import uuid4
+                        self._session_id = str(uuid4())
+                        self._save_session_id()
+                        log.clear()
+                        buf = ""
                     self._buf = ""
-                    accent = self._config.theme.accent
-                    log.write(f"[bold {accent}]RELAIS:[/bold {accent}] {buf}")
+                    if buf:
+                        accent = self._config.theme.accent
+                        log.write_line(self._render_markup(f"[bold {accent}]RELAIS:[/bold {accent}] {buf}"))
                     session_short = (
                         (self._session_id[:8] + "…") if self._session_id else "–"
                     )
@@ -385,25 +483,25 @@ class RelaisApp(App[None]):
                 elif isinstance(ev, ErrorEvent):
                     spinner.remove_class("active")
                     self._buf = ""
-                    log.write(f"[bold red]Error:[/bold red] {ev.error}")
+                    log.write_line(self._render_markup(f"[bold red]Error:[/bold red] {ev.error}"))
                     status.update(f"[red]Error[/red] · {ev.error[:80]}")
 
         except asyncio.CancelledError:
             self._buf = ""
-            log.write("[dim]⏹ Stream interrompu.[/dim]")
+            log.write_line(self._render_markup("[dim]⏹ Stream interrompu.[/dim]"))
             raise  # must re-raise so Textual marks the worker as cancelled
 
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError, OSError) as exc:
             self._buf = ""
             _log.exception("Stream request failed: %s", exc)
             error_label = type(exc).__name__
-            log.write(f"[bold red]Connection error:[/bold red] {error_label}")
+            log.write_line(self._render_markup(f"[bold red]Connection error:[/bold red] {error_label}"))
             status.update(f"[red]Connection error[/red] · {error_label}")
 
         except Exception as exc:  # noqa: BLE001
             self._buf = ""
             _log.exception("Unexpected error in _send: %s", exc)
-            log.write(f"[bold red]Error:[/bold red] {exc}")
+            log.write_line(self._render_markup(f"[bold red]Error:[/bold red] {exc}"))
             status.update(f"[red]Error[/red] · {type(exc).__name__}")
 
         finally:

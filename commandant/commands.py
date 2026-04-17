@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
-from common.envelope_actions import ACTION_MEMORY_CLEAR, ACTION_MESSAGE_OUTGOING
+from common.envelope_actions import ACTION_MEMORY_CLEAR, ACTION_MEMORY_SESSIONS, ACTION_MEMORY_RESUME, ACTION_MESSAGE_OUTGOING
 from common.streams import STREAM_MEMORY_REQUEST, stream_outgoing
 from common.text_utils import strip_outer_quotes
 
@@ -86,6 +86,76 @@ async def handle_clear(envelope: Envelope, redis_conn: Any) -> None:
     logger.info("Clear request sent for session=%s", envelope.session_id)
 
 
+async def handle_sessions(envelope: Envelope, redis_conn: Any) -> None:
+    """List recent sessions for the requesting user.
+
+    Sends action="memory.sessions" on relais:memory:request so that Souvenir
+    retrieves the session list and publishes it back to the channel.
+
+    Args:
+        envelope: The envelope of the received /sessions message.
+        redis_conn: Active async Redis connection.
+    """
+    portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
+    user_id = portail_ctx.get("user_id", envelope.sender_id)
+    sessions_env = Envelope(
+        content="",
+        sender_id=envelope.sender_id,
+        channel=envelope.channel,
+        session_id=envelope.session_id,
+        correlation_id=envelope.correlation_id,
+        action=ACTION_MEMORY_SESSIONS,
+        context={CTX_SOUVENIR_REQUEST: {"user_id": user_id, "envelope_json": envelope.to_json()}},
+    )
+
+    await redis_conn.xadd(
+        STREAM_MEMORY_REQUEST,
+        {"payload": sessions_env.to_json()},
+    )
+    logger.info("Sessions request sent for user=%s", user_id)
+
+
+async def handle_resume(envelope: Envelope, redis_conn: Any) -> None:
+    """Resume a previous session by session_id.
+
+    Parses the session_id from envelope.content (after "/resume").
+    If no session_id is provided, sends a usage error reply to the channel.
+    Otherwise sends action="memory.resume" on relais:memory:request.
+
+    Args:
+        envelope: The envelope of the received /resume message.
+        redis_conn: Active async Redis connection.
+    """
+    parts = envelope.content.strip().split()
+    if len(parts) < 2:
+        response = Envelope.from_parent(envelope, "Usage: /resume <session_id>")
+        response.action = ACTION_MESSAGE_OUTGOING
+        await redis_conn.xadd(
+            stream_outgoing(envelope.channel),
+            {"payload": response.to_json()},
+        )
+        return
+
+    session_id = parts[1]
+    portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
+    user_id = portail_ctx.get("user_id", envelope.sender_id)
+    resume_env = Envelope(
+        content="",
+        sender_id=envelope.sender_id,
+        channel=envelope.channel,
+        session_id=envelope.session_id,
+        correlation_id=envelope.correlation_id,
+        action=ACTION_MEMORY_RESUME,
+        context={CTX_SOUVENIR_REQUEST: {"target_session_id": session_id, "user_id": user_id, "envelope_json": envelope.to_json()}},
+    )
+
+    await redis_conn.xadd(
+        STREAM_MEMORY_REQUEST,
+        {"payload": resume_env.to_json()},
+    )
+    logger.info("Resume request sent for session=%s user=%s", session_id, user_id)
+
+
 async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
     """Return the list of all available commands with their descriptions.
 
@@ -131,6 +201,16 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         name="help",
         description="Displays the list of available commands.",
         handler=handle_help,
+    ),
+    "sessions": CommandSpec(
+        name="sessions",
+        description="Liste vos sessions récentes.",
+        handler=handle_sessions,
+    ),
+    "resume": CommandSpec(
+        name="resume",
+        description="Reprend une session précédente (/resume <id>).",
+        handler=handle_resume,
     ),
 }
 

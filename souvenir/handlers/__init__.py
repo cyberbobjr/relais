@@ -16,6 +16,8 @@ from common.envelope_actions import (
     ACTION_MEMORY_FILE_LIST,
     ACTION_MEMORY_FILE_READ,
     ACTION_MEMORY_FILE_WRITE,
+    ACTION_MEMORY_RESUME,
+    ACTION_MEMORY_SESSIONS,
 )
 from souvenir.handlers.archive_handler import ArchiveHandler
 from souvenir.handlers.base import BaseActionHandler, HandlerContext
@@ -23,6 +25,8 @@ from souvenir.handlers.clear_handler import ClearHandler
 from souvenir.handlers.file_list_handler import FileListHandler
 from souvenir.handlers.file_read_handler import FileReadHandler
 from souvenir.handlers.file_write_handler import FileWriteHandler
+from souvenir.handlers.resume_handler import ResumeHandler
+from souvenir.handlers.sessions_handler import SessionsHandler
 
 
 def build_registry() -> dict[str, BaseActionHandler]:
@@ -37,6 +41,8 @@ def build_registry() -> dict[str, BaseActionHandler]:
         ACTION_MEMORY_FILE_WRITE: FileWriteHandler(),
         ACTION_MEMORY_FILE_READ: FileReadHandler(),
         ACTION_MEMORY_FILE_LIST: FileListHandler(),
+        ACTION_MEMORY_SESSIONS: SessionsHandler(),
+        ACTION_MEMORY_RESUME: ResumeHandler(),
     }
 
 

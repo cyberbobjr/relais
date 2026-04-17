@@ -114,14 +114,18 @@ async def test_clear_handler_handles_missing_envelope_json() -> None:
 
 
 def test_build_registry_contains_all_actions() -> None:
-    """build_registry() must return the 5 expected actions."""
+    """build_registry() must return the 7 expected actions."""
     from common.envelope_actions import (
         ACTION_MEMORY_ARCHIVE,
         ACTION_MEMORY_CLEAR,
         ACTION_MEMORY_FILE_LIST,
         ACTION_MEMORY_FILE_READ,
         ACTION_MEMORY_FILE_WRITE,
+        ACTION_MEMORY_RESUME,
+        ACTION_MEMORY_SESSIONS,
     )
+    from souvenir.handlers.resume_handler import ResumeHandler
+    from souvenir.handlers.sessions_handler import SessionsHandler
 
     registry = build_registry()
     assert set(registry.keys()) == {
@@ -130,8 +134,12 @@ def test_build_registry_contains_all_actions() -> None:
         ACTION_MEMORY_FILE_WRITE,
         ACTION_MEMORY_FILE_READ,
         ACTION_MEMORY_FILE_LIST,
+        ACTION_MEMORY_SESSIONS,
+        ACTION_MEMORY_RESUME,
     }
     assert isinstance(registry[ACTION_MEMORY_CLEAR], ClearHandler)
     assert isinstance(registry[ACTION_MEMORY_FILE_WRITE], FileWriteHandler)
     assert isinstance(registry[ACTION_MEMORY_FILE_READ], FileReadHandler)
     assert isinstance(registry[ACTION_MEMORY_FILE_LIST], FileListHandler)
+    assert isinstance(registry[ACTION_MEMORY_SESSIONS], SessionsHandler)
+    assert isinstance(registry[ACTION_MEMORY_RESUME], ResumeHandler)

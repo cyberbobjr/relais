@@ -165,6 +165,109 @@ class LongTermStore:
             await checkpointer.adelete_thread(user_id)
         logger.info("Cleared LangGraph checkpointer thread for user_id=%s", user_id)
 
+    async def list_sessions(self, user_id: str, limit: int = 20) -> list[dict]:
+        """Return a summary of archived sessions for a user.
+
+        Queries ``archived_messages`` grouped by ``session_id`` where
+        ``sender_id`` contains ``user_id`` as a substring.  Results are ordered
+        by the most-recent activity first.
+
+        Args:
+            user_id: Stable user identifier (e.g. ``"usr_admin"``).  Matched
+                with a SQL ``LIKE '%{user_id}%'`` against ``sender_id``.
+            limit: Maximum number of sessions to return.  Defaults to 20.
+
+        Returns:
+            A list of dicts, each with keys:
+            - ``session_id`` (str)
+            - ``last_active`` (float) — MAX(created_at) for the session
+            - ``turn_count`` (int) — number of turns in the session
+            - ``preview`` (str) — first 80 chars of the latest assistant reply
+        """
+        from sqlalchemy import func, text
+        from sqlalchemy import select, String
+        from souvenir.models import ArchivedMessage
+
+        # Build a subquery to find the correlation_id of the latest turn per session.
+        # We use a raw SQL expression for the SUBSTR() preview to stay compatible
+        # with SQLite without pulling full rows into Python.
+        query = (
+            select(
+                ArchivedMessage.session_id,
+                func.max(ArchivedMessage.created_at).label("last_active"),
+                func.count().label("turn_count"),
+                func.substr(
+                    func.max(ArchivedMessage.assistant_content),  # deterministic with MAX(created_at) group
+                    1,
+                    80,
+                ).label("preview"),
+            )
+            .where(ArchivedMessage.sender_id.like(f"%{user_id}%"))
+            .group_by(ArchivedMessage.session_id)
+            .order_by(func.max(ArchivedMessage.created_at).desc())
+            .limit(limit)
+        )
+
+        async with self._session_factory() as session:
+            result = await session.execute(query)
+            rows = result.fetchall()
+
+        return [
+            {
+                "session_id": row.session_id,
+                "last_active": row.last_active,
+                "turn_count": row.turn_count,
+                "preview": row.preview or "",
+            }
+            for row in rows
+        ]
+
+    async def get_session_history(self, session_id: str, limit: int = 50) -> list[dict]:
+        """Return the archived turns for a specific session, oldest-first.
+
+        Queries ``archived_messages`` WHERE ``session_id = :session_id``,
+        ordered by ``created_at ASC``, limited to ``limit`` rows.
+
+        Args:
+            session_id: Session identifier to fetch history for.
+            limit: Maximum number of turns to return.  Defaults to 50.
+
+        Returns:
+            A list of dicts (possibly empty) with keys:
+            - ``user_content`` (str)
+            - ``assistant_content`` (str)
+            - ``created_at`` (float)
+            - ``correlation_id`` (str)
+        """
+        from sqlalchemy import select
+        from souvenir.models import ArchivedMessage
+
+        query = (
+            select(
+                ArchivedMessage.user_content,
+                ArchivedMessage.assistant_content,
+                ArchivedMessage.created_at,
+                ArchivedMessage.correlation_id,
+            )
+            .where(ArchivedMessage.session_id == session_id)
+            .order_by(ArchivedMessage.created_at.asc())
+            .limit(limit)
+        )
+
+        async with self._session_factory() as session:
+            result = await session.execute(query)
+            rows = result.fetchall()
+
+        return [
+            {
+                "user_content": row.user_content,
+                "assistant_content": row.assistant_content,
+                "created_at": row.created_at,
+                "correlation_id": row.correlation_id,
+            }
+            for row in rows
+        ]
+
     async def close(self) -> None:
         """Release async engine resources (aiosqlite connections).
 

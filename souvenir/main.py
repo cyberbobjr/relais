@@ -81,6 +81,8 @@ from common.envelope_actions import (
     ACTION_MEMORY_FILE_LIST,
     ACTION_MEMORY_FILE_READ,
     ACTION_MEMORY_FILE_WRITE,
+    ACTION_MEMORY_RESUME,
+    ACTION_MEMORY_SESSIONS,
 )
 from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from souvenir.file_store import FileStore
@@ -93,6 +95,8 @@ _ALLOWED_ACTIONS: frozenset[str] = frozenset({
     ACTION_MEMORY_FILE_WRITE,
     ACTION_MEMORY_FILE_READ,
     ACTION_MEMORY_FILE_LIST,
+    ACTION_MEMORY_SESSIONS,
+    ACTION_MEMORY_RESUME,
 })
 
 
