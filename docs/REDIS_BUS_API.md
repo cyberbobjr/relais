@@ -372,7 +372,7 @@ The payload is a serialized `Envelope` (`Envelope.to_json()`). The `action` fiel
 | `envelope_json` | `string` | Serialized outgoing response `Envelope` |
 | `messages_raw` | `array` | Full serialized LangChain message list for the completed turn |
 
-**`clear` action** (published by Commandant) / **`file_*` actions** (published by SouvenirBackend):
+**`clear`, `sessions`, `resume`, and `file_*` actions** (published by Commandant / SouvenirBackend):
 
 ```json
 {
@@ -386,11 +386,22 @@ The payload is a serialized `Envelope` (`Envelope.to_json()`). The `action` fiel
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `action` | `string` | One of `"clear"`, `"file_write"`, `"file_read"`, `"file_list"` |
-| `session_id` | `string` | Session identifier (used by `clear`) |
-| `user_id` | `string` | Stable user identifier — used by `clear` to erase the LangGraph checkpointer thread |
+| `action` | `string` | One of `"clear"`, `"file_write"`, `"file_read"`, `"file_list"`, `"sessions"`, `"resume"` |
+| `session_id` | `string` | Session identifier (used by `clear` and `resume`); omitted for `sessions` |
+| `user_id` | `string` | Stable user identifier — used by all actions for ownership enforcement |
+| `target_session_id` | `string` (resume only) | The session_id to resume (parsed from `/resume <id>` command) |
 | `correlation_id` | `string` | UUID for tracing |
-| `envelope_json` | `string` (optional) | Serialized original envelope; used by `clear` to send a confirmation reply |
+| `envelope_json` | `string` (optional) | Serialized original envelope; used to send confirmation/response replies |
+
+**`sessions` action** (published by Commandant):
+- Lists recent sessions for the requesting user
+- User ownership enforced via `user_id` in `LongTermStore.list_sessions(user_id)`
+- Response published back to `relais:messages:outgoing:{channel}` via SessionsHandler
+
+**`resume` action** (published by Commandant):
+- Resumes a previous session by retrieving its full message history
+- User ownership enforced: resume only allowed if `target_session_id` belongs to `user_id`
+- Response published back to `relais:messages:outgoing:{channel}` via ResumeHandler
 
 ---
 
