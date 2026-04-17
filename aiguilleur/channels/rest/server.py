@@ -337,6 +337,9 @@ async def get_history(request: web.Request) -> web.Response:
 
     Returns the archived conversation turns for the requested session,
     oldest-first, up to ``limit`` entries (default 50, max 200).
+    Only returns turns that belong to the authenticated caller — if the
+    session exists but belongs to a different user a 404 is returned
+    (avoiding information leakage about which session IDs exist).
 
     Args:
         request: Authenticated incoming request with optional query params
@@ -345,6 +348,9 @@ async def get_history(request: web.Request) -> web.Response:
     Returns:
         200 JSON ``{"session_id": str, "turns": list[dict]}``.
         400 JSON ``{"error": "session_id required"}`` when session_id is absent.
+        404 JSON ``{"error": "session not found"}`` when the session does not
+            exist or belongs to a different user.
+        500 JSON ``{"error": "internal error"}`` on unexpected storage failure.
     """
     session_id = request.rel_url.query.get("session_id")
     if not session_id:
@@ -355,8 +361,21 @@ async def get_history(request: web.Request) -> web.Response:
     except ValueError:
         limit = 50
 
+    user_record = request.get("user_record")
+    owner_user_id: str | None = user_record.user_id if user_record else None
+
     store: LongTermStore = request.app["_long_term_store"]
-    turns = await store.get_session_history(session_id, limit)
+    try:
+        turns = await store.get_session_history(session_id, limit, user_id=owner_user_id)
+    except Exception as exc:
+        logger.error("get_history storage error session=%s: %s", session_id, exc)
+        return web.json_response({"error": "internal error"}, status=500)
+
+    if owner_user_id and not turns:
+        # Session not found OR owned by a different user — return 404 to avoid
+        # leaking which session IDs exist for other users.
+        return web.json_response({"error": "session not found"}, status=404)
+
     return web.json_response({"session_id": session_id, "turns": turns})
 
 

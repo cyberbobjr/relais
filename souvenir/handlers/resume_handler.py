@@ -31,6 +31,7 @@ class ResumeHandler(BaseActionHandler):
                 and ``envelope_json`` from ``ctx.req``.
         """
         target_session_id: str = ctx.req.get("target_session_id", "")
+        user_id: str | None = ctx.req.get("user_id") or None
         envelope_json: str | None = ctx.req.get("envelope_json")
 
         if not envelope_json:
@@ -43,9 +44,12 @@ class ResumeHandler(BaseActionHandler):
             logger.warning("ResumeHandler: failed to parse envelope_json: %s", exc)
             return
 
-        # Check session existence (limit=1 for minimal I/O)
+        # Check session existence and ownership (limit=1 for minimal I/O).
+        # Passing user_id ensures a different user cannot resume another user's session.
         try:
-            turns = await ctx.long_term_store.get_session_history(target_session_id, limit=1)
+            turns = await ctx.long_term_store.get_session_history(
+                target_session_id, limit=1, user_id=user_id
+            )
         except Exception as exc:
             logger.error("ResumeHandler: get_session_history failed: %s", exc)
             turns = []

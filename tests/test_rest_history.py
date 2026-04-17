@@ -176,17 +176,26 @@ class TestGetHistory:
 
     @pytest.mark.asyncio
     async def test_get_history_empty_session(self, history_client):
-        """GET /v1/history?session_id=empty → 200 with turns: []."""
+        """GET /v1/history?session_id=empty with auth → 404 (session not found for owner).
+
+        When an authenticated user requests a session with no matching turns,
+        the endpoint returns 404 to avoid leaking the existence of session IDs
+        belonging to other users.
+        """
         # history_client default fixture param returns []
         resp = await history_client.get(
             "/v1/history?session_id=empty-session", headers=_AUTH
         )
-        assert resp.status == 200
+        assert resp.status == 404
         data = await resp.json()
-        assert data["session_id"] == "empty-session"
-        assert data["turns"] == []
+        assert "error" in data
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "history_client",
+        [[{"user_content": "q", "assistant_content": "a", "created_at": 1.0, "correlation_id": "c"}]],
+        indirect=True,
+    )
     async def test_get_history_limit_capped_at_200(self, history_client):
         """limit=500 in query → store is called with limit=200 (capped)."""
         resp = await history_client.get(
@@ -194,9 +203,14 @@ class TestGetHistory:
         )
         assert resp.status == 200
         store: AsyncMock = history_client._mock_store  # type: ignore[attr-defined]
-        store.get_session_history.assert_called_once_with("s1", 200)
+        store.get_session_history.assert_called_once_with("s1", 200, user_id="usr_test")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "history_client",
+        [[{"user_content": "q", "assistant_content": "a", "created_at": 1.0, "correlation_id": "c"}]],
+        indirect=True,
+    )
     async def test_get_history_invalid_limit_defaults_to_50(self, history_client):
         """limit=abc in query → ValueError caught, store called with limit=50."""
         resp = await history_client.get(
@@ -204,7 +218,7 @@ class TestGetHistory:
         )
         assert resp.status == 200
         store: AsyncMock = history_client._mock_store  # type: ignore[attr-defined]
-        store.get_session_history.assert_called_once_with("s1", 50)
+        store.get_session_history.assert_called_once_with("s1", 50, user_id="usr_test")
 
     @pytest.mark.asyncio
     async def test_get_history_requires_auth(self, history_client):
@@ -213,6 +227,11 @@ class TestGetHistory:
         assert resp.status == 401
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "history_client",
+        [[{"user_content": "q", "assistant_content": "a", "created_at": 1.0, "correlation_id": "c"}]],
+        indirect=True,
+    )
     async def test_get_history_default_limit_is_50(self, history_client):
         """GET /v1/history without limit param → store called with limit=50."""
         resp = await history_client.get(
@@ -220,4 +239,4 @@ class TestGetHistory:
         )
         assert resp.status == 200
         store: AsyncMock = history_client._mock_store  # type: ignore[attr-defined]
-        store.get_session_history.assert_called_once_with("s1", 50)
+        store.get_session_history.assert_called_once_with("s1", 50, user_id="usr_test")

@@ -13,9 +13,13 @@ import asyncio
 import importlib.metadata
 import logging
 import tomllib
+from dataclasses import replace as _dataclass_replace
+from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
+from rich.console import Console
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -28,6 +32,13 @@ from relais_tui.client import RelaisClient
 from relais_tui.sse_parser import DoneEvent, ErrorEvent, ProgressEvent, TokenEvent
 
 _log = logging.getLogger(__name__)
+
+# Phrases emitted by Souvenir's ClearHandler that indicate a successful /clear.
+# Kept at module level to avoid recreating the tuple on every DoneEvent.
+_CLEAR_PHRASES = frozenset([
+    "✓ Conversation history cleared.",
+    "Conversation history cleared.",
+])
 
 def _get_versions() -> tuple[str, str]:
     """Return (relais_core_version, tui_version).
@@ -292,7 +303,6 @@ class RelaisApp(App[None]):
 
     def action_clear_chat(self) -> None:
         """Clear the chat log and generate a new session_id."""
-        from uuid import uuid4
         self._session_id = str(uuid4())
         self._save_session_id()
         self.query_one("#chat-log", Log).clear()
@@ -328,9 +338,6 @@ class RelaisApp(App[None]):
         Returns:
             The rendered string with ANSI escape codes (no raw markup tags).
         """
-        from io import StringIO
-        from rich.console import Console
-
         buf = StringIO()
         console = Console(force_terminal=True, file=buf, width=120)
         console.print(text, end="")
@@ -346,9 +353,8 @@ class RelaisApp(App[None]):
         Returns:
             None. Side effect: config file is updated on disk.
         """
-        from dataclasses import replace as _replace
         session_str = self._session_id or ""
-        self._config = _replace(self._config, last_session_id=session_str)
+        self._config = _dataclass_replace(self._config, last_session_id=session_str)
         save_config(self._config, self._config_path)
 
     async def _load_history(self) -> None:
@@ -448,20 +454,20 @@ class RelaisApp(App[None]):
 
                 elif isinstance(ev, DoneEvent):
                     spinner.remove_class("active")
-                    self._session_id = ev.session_id or self._session_id
-                    # Detect /resume context: if session changed, switch silently
-                    # (session_id already updated above from ev.session_id)
-                    self._save_session_id()
+                    # Update session_id only when the server returns a new one
+                    # and it actually differs from the current value — avoids
+                    # redundant disk writes on every reply.
+                    new_id = ev.session_id or self._session_id
+                    if new_id and new_id != self._session_id:
+                        self._session_id = new_id
+                        self._save_session_id()
+                    else:
+                        self._session_id = new_id
                     # Non-streaming fallback: server returned full content at once
                     if not buf and ev.content:
                         buf = ev.content
                     # Detect /clear confirmation — generate a new session
-                    _clear_phrases = (
-                        "✓ Conversation history cleared.",
-                        "Conversation history cleared.",
-                    )
-                    if buf.strip() in _clear_phrases:
-                        from uuid import uuid4
+                    if buf.strip() in _CLEAR_PHRASES:
                         self._session_id = str(uuid4())
                         self._save_session_id()
                         log.clear()
