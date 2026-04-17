@@ -750,6 +750,7 @@ class Forgeron(BrickBase):
         ctx = ensure_ctx(history_req, "souvenir_request")
         ctx["action"] = "history_read"
         ctx["session_id"] = session_id
+        ctx["correlation_id"] = corr
         ctx["response_key"] = response_key
         await redis_conn.xadd(STREAM_MEMORY_REQUEST, {"payload": history_req.to_json()})
         logger.info(

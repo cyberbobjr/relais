@@ -73,8 +73,9 @@ Aiguilleur
 
 | Stream / clé | Producteur | Consommateur |
 |--------------|------------|--------------|
-| `relais:memory:request` | Atelier, Commandant | Souvenir (`souvenir_group`), Forgeron (`forgeron_archive_group`) |
+| `relais:memory:request` | Atelier, Commandant, Forgeron | Souvenir (`souvenir_group`), Forgeron (`forgeron_archive_group`) |
 | `relais:memory:response` | Souvenir | agents (via SouvenirBackend) |
+| `relais:memory:response:{correlation_id}` (Redis List) | Souvenir (HistoryReadHandler) | Forgeron (BRPOP synchrone) |
 
 ### Amélioration autonome (Forgeron)
 
@@ -199,7 +200,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 
 ### Souvenir
 
-- Consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`).
+- Consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`, `history_read`).
 - Action `archive` : publiée par Atelier après chaque tour LLM complété, contient l'enveloppe de réponse + `messages_raw` (historique LangChain sérialisé pour ce tour).
 - Archive chaque tour dans `storage/memory.db` via `LongTermStore`.
 - `LongTermStore` : une ligne par tour dans `archived_messages` (upsert sur `correlation_id`) avec
@@ -207,7 +208,9 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - L'action `clear` efface les lignes SQLite pour la session et supprime le thread du checkpointer LangGraph (thread_id `user_id:session_id`).
 - Action `sessions` : retourne une liste formatée des sessions récentes de l'utilisateur (avec ownership enforcement via `user_id`), publie la réponse sur `relais:messages:outgoing:{channel}` via `SessionsHandler`.
 - Action `resume` : récupère l'historique complet d'une session précédente (ownership enforcement via `user_id`), publie la réponse sur `relais:messages:outgoing:{channel}` via `ResumeHandler`.
+- Action `history_read` : publiée par Forgeron pour lire l'historique complet des messages bruts d'une session ; le handler lit de SQLite, tronque selon un budget de tokens (~4 chars/token), et publie le résultat JSON sur `relais:memory:response:{correlation_id}` (Redis List avec TTL 60s) pour que Forgeron le récupère via `BRPOP` (handshake synchrone).
 - Les actions de fichiers (`file_*`) servent les requêtes d'agents via `SouvenirBackend`, répondent sur `relais:memory:response`.
+- Handlers: `ArchiveHandler`, `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`, `SessionsHandler`, `ResumeHandler`, `HistoryReadHandler` — pas d'appels LLM dans Souvenir.
 
 ### Archiviste
 
@@ -254,6 +257,16 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 - La création est idempotente : si le fichier existe déjà, `SkillCreator` retourne `None` sans écraser.
 - L'événement `skill.created` (`ACTION_SKILL_CREATED`) est publié sur `relais:events:system` avec `context["forgeron"]` contenant `skill_created`, `skill_path`, `intent_label`, `contributing_sessions`.
 - Si `notify_user_on_creation` est activé, une notification est publiée sur `relais:messages:outgoing_pending` pour informer l'utilisateur de la création du skill.
+
+#### Pipeline correction — Redesign de skills via analyse des traces
+
+- Déclenché par `IntentLabeler` qui détecte une correction dans un pattern de session (champ `is_correction` de `IntentLabelResult`).
+- `_trigger_skill_design()` orchestre un handshake synchrone :
+  1. Publie une requête `history_read` sur `relais:memory:request` pour que Souvenir serve l'historique complet.
+  2. Envoie une notification utilisateur sur `relais:messages:outgoing_pending` (avant le BRPOP pour éviter tout blocage).
+  3. Attend la réponse via `BRPOP` sur `relais:memory:response:{correlation_id}` (timeout configurable, défaut quelques secondes).
+  4. Si l'historique arrive, publie un `ACTION_MESSAGE_TASK` sur `relais:tasks` avec `force_subagent="skill-designer"` et les données de correction dans `context["forgeron"]` (`corrected_behavior`, `history_turns`, `skill_name_hint` optionnel).
+- Le sous-agent `skill-designer` (natif Atelier) reçoit ces données et génère un SKILL.md révisé via l'outil `WriteSkillTool`.
 
 **Fichiers SQLite** (dans `~/.relais/storage/forgeron.db`) :
 
