@@ -20,6 +20,24 @@ from aiguilleur.channels.whatsapp import core
 
 
 # ---------------------------------------------------------------------------
+# Security — allowlist for set_env key names
+# ---------------------------------------------------------------------------
+
+# Only these environment variable names may be written by the set_env action.
+# This prevents an LLM-controlled caller from overwriting arbitrary env vars
+# (e.g. REDIS_PASSWORD, ANTHROPIC_API_KEY, PATH, etc.).
+_ALLOWED_ENV_KEYS: frozenset[str] = frozenset({
+    "WHATSAPP_PHONE_NUMBER",
+    "WHATSAPP_API_KEY",
+    "WHATSAPP_WEBHOOK_SECRET",
+    "WHATSAPP_GATEWAY_URL",
+    "WHATSAPP_WEBHOOK_HOST",
+    "WHATSAPP_WEBHOOK_PORT",
+    "REDIS_PASS_BAILEYS",
+})
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -238,6 +256,12 @@ class WhatsAppConfigureTool(BaseTool):
             value = params.get("value", "")
             if not key:
                 return _json({"ok": False, "action": "set_env", "detail": "missing 'key' in params"})
+            if key not in _ALLOWED_ENV_KEYS:
+                return _json({
+                    "ok": False,
+                    "action": "set_env",
+                    "detail": f"key '{key}' is not allowed; permitted keys: {sorted(_ALLOWED_ENV_KEYS)}",
+                })
             r = core.write_env_var(key, value, env_file)
             return _json({"ok": r.ok, "action": "set_env", "detail": r.detail})
 

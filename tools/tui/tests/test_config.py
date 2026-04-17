@@ -64,9 +64,8 @@ class TestConfig:
         cfg = Config()
         assert cfg.api_url == "http://localhost:8080"
         assert cfg.api_key == ""
-        assert cfg.history_path == "~/.relais/tui/history"
+        assert cfg.history_path == "~/.relais/storage/tui/history"
         assert cfg.request_timeout == 120
-        assert cfg.session_behavior == "new"
         assert isinstance(cfg.theme, ThemeConfig)
 
     def test_frozen(self) -> None:
@@ -91,17 +90,17 @@ class TestDefaultConfigPath:
     def test_uses_relais_home_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("RELAIS_HOME", "/opt/relais")
         path = _default_config_path()
-        assert path == Path("/opt/relais/tui/config.yaml")
+        assert path == Path("/opt/relais/config/tui/config.yaml")
 
     def test_falls_back_to_home_relais(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("RELAIS_HOME", raising=False)
         path = _default_config_path()
-        assert path == Path("~/.relais/tui/config.yaml")
+        assert path == Path("~/.relais/config/tui/config.yaml")
 
     def test_relais_home_empty_uses_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("RELAIS_HOME", "")
         path = _default_config_path()
-        assert path == Path("~/.relais/tui/config.yaml")
+        assert path == Path("~/.relais/config/tui/config.yaml")
 
     def test_load_config_respects_relais_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -109,7 +108,7 @@ class TestDefaultConfigPath:
         relais_home = tmp_path / "custom_relais"
         monkeypatch.setenv("RELAIS_HOME", str(relais_home))
         cfg = load_config()  # no explicit path — should use RELAIS_HOME
-        expected = relais_home / "tui" / "config.yaml"
+        expected = relais_home / "config" / "tui" / "config.yaml"
         assert expected.exists()
         assert cfg.api_url == "http://localhost:8080"
 
@@ -168,7 +167,6 @@ class TestLoadConfig:
         assert cfg.api_url == "http://custom"
         assert cfg.api_key == ""  # default
         assert cfg.request_timeout == 120  # default
-        assert cfg.session_behavior == "new"  # default
 
     def test_partial_theme_gets_defaults(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.yaml"

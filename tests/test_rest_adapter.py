@@ -47,8 +47,8 @@ def _make_user_registry(valid_key: str = "valid-token"):
         role_prompt_path=None,
     )
     registry = MagicMock()
-    registry.resolve_user.side_effect = lambda sender_id, channel: (
-        record if sender_id == f"rest:{valid_key}" and channel == "rest" else None
+    registry.resolve_rest_api_key.side_effect = lambda raw_key: (
+        record if raw_key == valid_key else None
     )
     return registry, record
 

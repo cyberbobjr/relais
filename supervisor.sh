@@ -274,6 +274,14 @@ run_supervisorctl() {
     supervisorctl -c "$CONFIG_PATH" "$@"
 }
 
+validate_service_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_:.-]+$ ]]; then
+        echo "Invalid service name: '$name'. Only alphanumeric characters, '_', ':', '.', and '-' are allowed." >&2
+        exit 1
+    fi
+}
+
 clear_logs() {
     local logs_dir="$REPO_ROOT/.relais/logs"
 
@@ -420,6 +428,7 @@ case "$ACTION" in
             fi
             echo "supervisord stopped."
         elif [[ -n "$TARGET" ]]; then
+            validate_service_name "$TARGET"
             ensure_supervisord_running
             run_supervisorctl stop "$TARGET"
         else
@@ -442,6 +451,7 @@ case "$ACTION" in
             run_supervisorctl start infra:* core:* relays:*
             if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
         elif [[ -n "$TARGET" ]]; then
+            validate_service_name "$TARGET"
             ensure_supervisord_running
             run_supervisorctl restart "$TARGET"
             if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi

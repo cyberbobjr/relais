@@ -21,8 +21,9 @@ Adaptateurs de canaux réellement livrés :
 
 - **Discord** : adaptateur natif Python complet (`aiguilleur/channels/discord/adapter.py`)
 - **WhatsApp** : adaptateur natif Python complet via la passerelle [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client HTTP vers la passerelle. Installation, configuration et pairing via CLI (`python -m aiguilleur.channels.whatsapp install|configure|uninstall`) ou via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall` du sous-agent `relais-config`. Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md).
+- **REST** : adaptateur HTTP/JSON + SSE (`aiguilleur/channels/rest/adapter.py`) — expose `POST /v1/messages` (Bearer API key) et un stream SSE pour les clients programmatiques (CLI, CI, TUI). Playground SSE interactif sur `GET /docs/sse`. Authentification via clés API HMAC-SHA256 déclarées dans `portail.yaml`.
 
-La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
+La configuration de canaux prévoit aussi `telegram` et `slack`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
 
 Outils livrés dans le dépôt :
 
@@ -118,7 +119,7 @@ flowchart TD
 - `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`), puis publie sur `relais:security`.
 - `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
 - `Commandant` consomme `relais:commands`. `/help` répond directement sur `relais:messages:outgoing:{channel}`. `/clear` publie une requête `clear` sur `relais:memory:request`.
-- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents déclarés dans `config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels et `skills/` optionnels) ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
+- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte une architecture 2-tier de sous-agents : sous-agents utilisateur dans `$RELAIS_HOME/config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels), et sous-agents natifs dans `atelier/subagents/<nom>/` (livrés avec le code source). L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns). Hot-reload supporté pour les modifications en temps réel.
 - `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
 - `Forgeron` dispose de deux pipelines autonomes :
@@ -183,8 +184,8 @@ alembic upgrade head
 - `config/config.yaml`
 - `config/portail.yaml`, `config/sentinelle.yaml`
 - `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
-- `config/atelier/subagents/relais-config/subagent.yaml`
 - `config/aiguilleur.yaml`
+- `config/tui/config.yaml`
 - `config/HEARTBEAT.md`
 - les prompts livrés (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
@@ -194,13 +195,7 @@ Si `config/aiguilleur.yaml` est supprimé après coup, `load_channels_config()` 
 
 Par défaut, `RELAIS_HOME` vaut `./.relais` à la racine du dépôt. Vous pouvez le surcharger avec la variable d'environnement `RELAIS_HOME`.
 
-La cascade de résolution est :
-
-1. `RELAIS_HOME`
-2. `/opt/relais`
-3. `./`
-
-Cette cascade est utilisée pour la configuration et les prompts. Les répertoires `skills`, `logs`, `media` et `storage` restent centrés sur `RELAIS_HOME`.
+La configuration et les prompts sont lus depuis `RELAIS_HOME`. Les répertoires `skills`, `logs`, `media` et `storage` restent centrés sur `RELAIS_HOME`.
 
 ---
 
@@ -217,12 +212,12 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 │   ├── atelier.yaml
 │   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
+│   ├── tui/
+│   │   └── config.yaml
 │   └── atelier/
 │       ├── profiles.yaml
 │       ├── mcp_servers.yaml
-│       └── subagents/
-│           └── relais-config/
-│               └── subagent.yaml
+│       └── subagents/          ← sous-agents custom (vide par défaut)
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -344,17 +339,18 @@ groups: []
 
 ### `config/atelier.yaml`
 
-Le fichier pilote la publication des événements de progression.
+Le fichier pilote la publication des événements vers le channel.
 
 ```yaml
-progress:
+display:
   enabled: true
+  final_only: true
+  detail_max_length: 100
   events:
     tool_call: true
     tool_result: true
     subagent_start: true
-  publish_to_outgoing: true
-  detail_max_length: 100
+    thinking: false
 ```
 
 ### `config/atelier/profiles.yaml`

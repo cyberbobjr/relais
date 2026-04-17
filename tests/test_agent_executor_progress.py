@@ -599,3 +599,63 @@ async def test_tool_result_list_with_str_items_not_dropped() -> None:
     # Both the str element and the dict text block must appear in the fallback
     assert result.reply_text == "Result: 42"
     assert result.reply_text != PLACEHOLDER
+
+
+# ---------------------------------------------------------------------------
+# Tests — tool_use content fallback detection (extended-thinking mode)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tool_use_content_fallback_emits_exactly_one_progress_event() -> None:
+    """When tool_call_chunks is empty but content has a tool_use block, exactly one
+    progress event is emitted for that tool, regardless of how many tool_use blocks
+    the content list contains.
+
+    This guards against the synthetic fallback path in _stream() iterating past
+    the first named entry and emitting duplicate events.  The break after the
+    'if tc.get("name")' branch ensures the single synthetic chunk is processed
+    exactly once.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    # Token with NO tool_call_chunks but with a structured tool_use block in content.
+    # The _has_tool_use_block() function should detect this and create a synthetic
+    # one-item list [{"name": "my_tool", "args": ""}].
+    token = MagicMock()
+    token.type = "AIMessageChunk"
+    token.content = [
+        {"type": "tool_use", "name": "my_tool", "id": "toolu_abc"},
+        {"type": "tool_use", "name": "other_tool", "id": "toolu_xyz"},  # second block
+    ]
+    token.tool_call_chunks = []  # explicitly empty — triggers content fallback
+
+    chunk = _v2_chunk("messages", (), (token, {}))
+
+    async def fake_astream(input_data, **kwargs) -> AsyncIterator:
+        yield chunk
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    progress_calls: list[tuple[str, str]] = []
+
+    async def progress_callback(event: str, detail: str) -> None:
+        progress_calls.append((event, detail))
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        await executor.execute(
+            _make_envelope("Hi"),
+            progress_callback=progress_callback,
+        )
+
+    tool_call_events = [(e, d) for e, d in progress_calls if e == "tool_call"]
+    # The content fallback returns only the FIRST tool_use block name,
+    # so exactly one progress event must be emitted.
+    assert len(tool_call_events) == 1, (
+        f"Expected exactly 1 tool_call event, got {len(tool_call_events)}: {tool_call_events}"
+    )
+    assert tool_call_events[0] == ("tool_call", "my_tool")

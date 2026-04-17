@@ -54,6 +54,16 @@ Chaque `RedisClient("<brick>")` cherche d'abord `REDIS_PASS_<BRICK>`, puis retom
 | `SLACK_BOT_TOKEN` | Optionnel | Présente dans le template d'env, mais pas utilisée par un adaptateur complet dans ce dépôt. |
 | `SLACK_SIGNING_SECRET` | Optionnel | Même remarque que ci-dessus. |
 
+### Canal REST
+
+Nécessaire uniquement quand `rest.enabled: true` dans `aiguilleur.yaml`. L'adaptateur expose `POST /v1/messages` avec authentification Bearer. Les clés API sont résolues via `UserRegistry.resolve_rest_api_key()` (HMAC-SHA256, jamais stockées en clair).
+
+| Variable | Requis | Utilisation réelle |
+|----------|--------|--------------------|
+| `RELAIS_API_KEY_SALT` | Recommandé | Sel utilisé par `portail/user_registry.py` pour hacher les clés API REST en HMAC-SHA256. Si absent, un sel vide est utilisé avec un WARNING au démarrage de Portail. Valeur libre, garder secrète. |
+
+---
+
 ### Canal WhatsApp (passerelle `baileys-api`)
 
 Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L'adaptateur Python (`aiguilleur/channels/whatsapp/adapter.py`) parle à la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) lancée par supervisord (programme `baileys-api`, groupe `optional`, autostart désactivé). Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md) pour la procédure complète.

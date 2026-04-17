@@ -7,10 +7,12 @@ dependencies = [
     "textual>=3.0,<4.0",
     "httpx>=0.28,<1.0",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]
 relais-tui = "relais_tui.__main__:main"
+relais = "relais_tui.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

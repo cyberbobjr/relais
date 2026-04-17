@@ -7,6 +7,7 @@ Wraps ``httpx.AsyncClient`` to provide typed methods for sending messages
 from __future__ import annotations
 
 import json
+import logging
 from typing import AsyncGenerator
 
 import httpx
@@ -20,6 +21,8 @@ from relais_tui.sse_parser import (
     ProgressEvent,
     ErrorEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 _MESSAGES_PATH = "/v1/messages"
 _HEALTHZ_PATH = "/healthz"
@@ -67,9 +70,12 @@ class RelaisClient:
             ``True`` if the server responds with 2xx, ``False`` otherwise.
         """
         try:
+            logger.debug("healthz → GET %s%s", self.base_url, _HEALTHZ_PATH)
             resp = await self._http.get(_HEALTHZ_PATH)
+            logger.debug("healthz ← %d", resp.status_code)
             return resp.is_success
-        except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
+            logger.warning("healthz failed: %s", exc)
             return False
 
     # ------------------------------------------------------------------
@@ -95,11 +101,18 @@ class RelaisClient:
         if session_id is not None:
             body["session_id"] = session_id
 
+        logger.debug(
+            "send_message → POST %s%s session=%s api_key_set=%s",
+            self.base_url, _MESSAGES_PATH, session_id, bool(self.api_key),
+        )
         resp = await self._http.post(
             _MESSAGES_PATH,
             json=body,
             headers=self._auth_headers(),
         )
+        logger.debug("send_message ← %d", resp.status_code)
+        if not resp.is_success:
+            logger.error("send_message error %d: %s", resp.status_code, resp.text)
         resp.raise_for_status()
 
         data = resp.json()
@@ -137,9 +150,18 @@ class RelaisClient:
         headers = self._auth_headers()
         headers["Accept"] = "text/event-stream"
 
+        logger.debug(
+            "stream_message → POST %s%s session=%s api_key_set=%s",
+            self.base_url, _MESSAGES_PATH, session_id, bool(self.api_key),
+        )
         async with self._http.stream(
             "POST", _MESSAGES_PATH, json=body, headers=headers
         ) as resp:
+            logger.debug("stream_message ← %d content-type=%s", resp.status_code, resp.headers.get("content-type", ""))
+            if not resp.is_success:
+                body_bytes = await resp.aread()
+                logger.error("stream_message error %d: %s", resp.status_code, body_bytes.decode(errors="replace"))
+            resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
 
             # JSON fallback — server did not stream

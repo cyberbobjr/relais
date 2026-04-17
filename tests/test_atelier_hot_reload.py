@@ -2,7 +2,7 @@
 and the Redis Pub/Sub listener _config_reload_listener().
 
 TDD — tests are written before the implementation.  All tests mock heavy
-dependencies (profile_loader, mcp_loader, progress_config, channel_config).
+dependencies (profile_loader, mcp_loader, display_config, channel_config).
 """
 
 from __future__ import annotations
@@ -31,13 +31,13 @@ def _make_atelier_minimal():
     # Fake profile objects
     fake_profiles = {"default": MagicMock(name="default_profile")}
     fake_mcp_servers = {}
-    fake_progress = MagicMock(name="progress_config")
+    fake_display = MagicMock(name="display_config")
     fake_streaming_channels = frozenset(["telegram"])
 
     with (
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
-        patch("atelier.main.load_progress_config", return_value=fake_progress),
+        patch("atelier.main.load_display_config", return_value=fake_display),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
@@ -92,15 +92,15 @@ def test_atelier_load_reloads_mcp_servers() -> None:
 
 
 @pytest.mark.unit
-def test_atelier_load_reloads_progress_config() -> None:
-    """_load() replaces _progress_config with freshly loaded data."""
+def test_atelier_load_reloads_display_config() -> None:
+    """_load() replaces _display_config with freshly loaded data."""
     atelier = _make_atelier_minimal()
 
     new_progress = MagicMock(name="new_progress")
-    with patch("atelier.main.load_progress_config", return_value=new_progress):
+    with patch("atelier.main.load_display_config", return_value=new_progress):
         atelier._load()
 
-    assert atelier._progress_config is new_progress
+    assert atelier._display_config is new_progress
 
 
 @pytest.mark.unit
@@ -148,7 +148,7 @@ async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> 
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
@@ -240,7 +240,7 @@ async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false()
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
@@ -335,7 +335,7 @@ async def test_atelier_reload_config_returns_true_on_success() -> None:
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
     ):
         result = await atelier.reload_config()
 
@@ -352,7 +352,7 @@ async def test_atelier_reload_config_applies_new_profiles() -> None:
     with (
         patch("atelier.main.load_profiles", return_value=fresh_profiles),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
     ):
         await atelier.reload_config()
 

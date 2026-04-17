@@ -161,7 +161,7 @@ channels each text chunk is also published via StreamPublisher for real-time
 rendering before the full reply is ready.  Discord receives a final reply only,
 with live progress events (tool_call, tool_result, subagent_start) sent to
 ``relais:messages:outgoing:{channel}`` as ``message_type=progress`` envelopes.
-Publishing is governed by ``ProgressConfig`` (atelier.yaml ``progress:`` section).
+Publishing is governed by ``DisplayConfig`` (atelier.yaml ``display:`` section).
 """
 
 import asyncio
@@ -204,7 +204,7 @@ from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
-from atelier.progress_config import load_progress_config, ProgressConfig
+from atelier.display_config import load_display_config, DisplayConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from atelier.tool_policy import ToolPolicy
@@ -217,14 +217,6 @@ logger = logging.getLogger("atelier")
 # even if configure_logging_once() was skipped or root-level handlers were
 # removed.  This guarantees that logger.info() calls always appear in the
 # supervisord stdout log file.
-import sys as _sys
-if not logger.handlers:
-    _handler = logging.StreamHandler(_sys.stdout)
-    _handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s"
-    ))
-    logger.addHandler(_handler)
-    logger.setLevel(logging.DEBUG)
 
 # Directory containing soul/channels/roles/policies prompts.
 # Resolved via the config cascade so users can override in ~/.relais/prompts/.
@@ -258,7 +250,7 @@ class Atelier(BrickBase):
         # subsequent safe_reload() checkpoints share the same code path.
         self._profiles: dict = {}
         self._mcp_servers_default: dict = {}
-        self._progress_config: ProgressConfig | None = None
+        self._display_config: DisplayConfig | None = None
         self._load()
 
         # Base directory for role-based skill resolution — resolved once at
@@ -266,7 +258,6 @@ class Atelier(BrickBase):
         # Tests may override this attribute after construction; _tool_policy is
         # a property that always derives from _skills_base_dir so the override
         # is automatically picked up.
-        # TODO : set the skills_dir as an array of Path (user skill & default skill)
         self._skills_base_dir: Path = resolve_skills_dir()
 
         # Static tool registry — discovers @tool-decorated functions in atelier/tools/.
@@ -300,7 +291,7 @@ class Atelier(BrickBase):
         """Load Atelier's runtime configuration from disk.
 
         Refreshes ``_profiles``, ``_mcp_servers_default``, and
-        ``_progress_config``.  Called once by ``__init__`` for the initial
+        ``_display_config``.  Called once by ``__init__`` for the initial
         load.  Hot-reload goes through ``_build_config_candidate`` →
         ``_apply_config`` (which holds ``_config_lock``) instead.
 
@@ -313,7 +304,7 @@ class Atelier(BrickBase):
         """
         self._profiles = load_profiles()
         self._mcp_servers_default = load_for_sdk()
-        self._progress_config = load_progress_config()
+        self._display_config = load_display_config()
         logger.info("Atelier: configuration loaded from disk")
 
     def stream_specs(self) -> list[StreamSpec]:
@@ -398,14 +389,14 @@ class Atelier(BrickBase):
     def _build_config_candidate(self) -> dict:
         """Build a new configuration snapshot from disk without mutating self.
 
-        NOTE: each loader (load_profiles, load_for_sdk, load_progress_config,
+        NOTE: each loader (load_profiles, load_for_sdk, load_display_config,
         SubagentRegistry.load) re-reads its file from disk independently.  On
         a hot-reload triggered by a single file change this means up to four
         separate disk reads.  Acceptable for the current reload frequency;
         revisit if reload latency becomes a concern.
 
         Returns:
-            A dict with keys ``profiles``, ``mcp_servers``, ``progress``,
+            A dict with keys ``profiles``, ``mcp_servers``, ``display``,
             ``subagent_registry``.
 
         Raises:
@@ -415,7 +406,7 @@ class Atelier(BrickBase):
         return {
             "profiles": load_profiles(),
             "mcp_servers": load_for_sdk(),
-            "progress": load_progress_config(),
+            "display": load_display_config(),
             "subagent_registry": new_subagent_registry,
         }
 
@@ -434,7 +425,7 @@ class Atelier(BrickBase):
         old_mcp = self._mcp_servers_default
         self._profiles = cfg["profiles"]
         self._mcp_servers_default = cfg["mcp_servers"]
-        self._progress_config = cfg["progress"]
+        self._display_config = cfg["display"]
         if "subagent_registry" in cfg:
             self._subagent_registry = cfg["subagent_registry"]
         logger.info("Atelier: configuration applied")
@@ -465,6 +456,7 @@ class Atelier(BrickBase):
             A list of resolved Path instances.
         """
         from common.config_loader import CONFIG_SEARCH_PATH
+        from atelier.subagents import NATIVE_SUBAGENTS_PATH
 
         paths = [
             resolve_config_path("atelier/profiles.yaml"),
@@ -476,6 +468,9 @@ class Atelier(BrickBase):
             subagents_dir = base / "config" / "atelier" / "subagents"
             if subagents_dir.is_dir():
                 paths.append(subagents_dir)
+        # Also watch native subagents bundled in the source tree
+        if NATIVE_SUBAGENTS_PATH.is_dir():
+            paths.append(NATIVE_SUBAGENTS_PATH)
         return paths
 
     def _start_file_watcher(self, shutdown_event: asyncio.Event | None = None) -> "asyncio.Task | None":
@@ -703,6 +698,7 @@ class Atelier(BrickBase):
                 checkpointer=self._checkpointer,
                 subagents=subagents,
                 delegation_prompt=delegation_prompt,
+                display_config=self._display_config,
             )
 
             # 6. Execute
@@ -713,7 +709,7 @@ class Atelier(BrickBase):
                 channel=envelope.channel,
                 correlation_id=corr,
                 source_envelope=envelope,
-                progress_config=self._progress_config,
+                display_config=self._display_config,
             )
             if streaming:
                 await redis_conn.publish(

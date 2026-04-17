@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# RELAIS TUI — lance le client terminal depuis la racine du projet
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source .env pour récupérer RELAIS_HOME (et d'autres vars éventuelles)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/.env"
+    set +a
+fi
+
+# Résoudre RELAIS_HOME en chemin absolu (gère les chemins relatifs du .env)
+if [ -z "$RELAIS_HOME" ]; then
+    RELAIS_HOME="$SCRIPT_DIR/.relais"
+else
+    RELAIS_HOME="$(cd "$SCRIPT_DIR" && cd "$RELAIS_HOME" 2>/dev/null && pwd)"
+    RELAIS_HOME="${RELAIS_HOME:-$SCRIPT_DIR/.relais}"
+fi
+export RELAIS_HOME
+
+exec "$SCRIPT_DIR/tools/tui/.venv/bin/relais" "$@"

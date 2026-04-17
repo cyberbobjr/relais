@@ -77,12 +77,13 @@ def _make_atelier_with_tmp_subagents(tmp_path: Path):
     with (
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
-        patch("atelier.main.load_progress_config", return_value=fake_progress),
+        patch("atelier.main.load_display_config", return_value=fake_progress),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
         patch("atelier.main.resolve_storage_dir", return_value=tmp_path),
         patch("atelier.main.RedisClient"),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         patch("atelier.main.resolve_config_path",
               return_value=tmp_path / "config" / "atelier" / "profiles.yaml"),
     ):
@@ -147,7 +148,7 @@ def test_apply_config_swaps_subagent_registry(tmp_path: Path) -> None:
     cfg = {
         "profiles": {},
         "mcp_servers": {},
-        "progress": MagicMock(),
+        "display": MagicMock(),
         "streaming_channels": frozenset(),
         "subagent_registry": new_registry,
     }
@@ -165,7 +166,7 @@ def test_apply_config_preserves_subagent_registry_when_key_absent(tmp_path: Path
     cfg = {
         "profiles": {},
         "mcp_servers": {},
-        "progress": MagicMock(),
+        "display": MagicMock(),
         "streaming_channels": frozenset(),
         # no subagent_registry key
     }
@@ -195,7 +196,7 @@ async def test_reload_config_picks_up_new_subagent_yaml(tmp_path: Path) -> None:
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         result = await atelier.reload_config()
@@ -215,7 +216,7 @@ async def test_reload_config_preserves_registry_when_profiles_fail(tmp_path: Pat
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         await atelier.reload_config()
@@ -244,7 +245,7 @@ def test_build_config_candidate_includes_subagent_registry(tmp_path: Path) -> No
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         candidate = atelier._build_config_candidate()
@@ -262,7 +263,7 @@ def test_build_config_candidate_subagent_registry_is_subagent_registry_instance(
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_progress_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
     ):
         candidate = atelier._build_config_candidate()

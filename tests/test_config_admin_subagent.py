@@ -27,9 +27,9 @@ from atelier.agent_executor import AgentResult
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Path to the shipped default YAML for relais-config
+# Path to the shipped native YAML for relais-config (lives in the source tree, not copied to user dir)
 _CONFIG_ADMIN_YAML = (
-    Path(__file__).parent.parent / "config" / "atelier" / "subagents" / "relais-config" / "subagent.yaml.default"
+    Path(__file__).parent.parent / "atelier" / "subagents" / "relais-config" / "subagent.yaml"
 )
 
 
@@ -339,8 +339,8 @@ def test_config_admin_prompt_contains_skills_dirs_reference() -> None:
 def _make_registry_with_config_admin(tmp_path: Path) -> "SubagentRegistry":
     """Build a SubagentRegistry with relais-config loaded from a tmp dir.
 
-    Copies subagent.yaml.default → tmp/config/atelier/subagents/relais-config/subagent.yaml
-    so that SubagentRegistry.load() can find it via CONFIG_SEARCH_PATH=[tmp].
+    Copies the native subagent.yaml (from atelier/subagents/relais-config/) into a
+    tmp user-tier directory so that SubagentRegistry.load() can find it via CONFIG_SEARCH_PATH=[tmp].
 
     Args:
         tmp_path: pytest tmp_path fixture value.
@@ -358,7 +358,10 @@ def _make_registry_with_config_admin(tmp_path: Path) -> "SubagentRegistry":
     mock_tool_registry = MagicMock()
     mock_tool_registry.get = lambda name: None
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         return SubagentRegistry.load(mock_tool_registry)
 
 
@@ -538,6 +541,7 @@ def _make_atelier_for_gating():
         patch("atelier.main.resolve_profile", return_value=profile_mock),
         patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmpdir]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmpdir / "_nonexistent_native_"),
     ]
     for p in patchers:
         p.start()

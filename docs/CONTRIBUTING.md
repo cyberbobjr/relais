@@ -1,6 +1,6 @@
 # RELAIS — Guide de contribution
 
-**Dernière mise à jour :** 2026-04-03
+**Dernière mise à jour :** 2026-04-17
 
 Ce guide décrit le workflow de contribution réellement adapté au dépôt actuel.
 

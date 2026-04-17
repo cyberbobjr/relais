@@ -262,30 +262,74 @@ XADD relais:messages:outgoing:discord * payload <Envelope JSON>
 **TTL**: 300 seconds after `finalize()` call
 **Max entries**: ~500 (APPROX trimming)
 
-Carries incremental LLM text chunks for real-time progressive rendering.
-Only produced for channels in `STREAMING_CAPABLE_CHANNELS`: `telegram`, `tui`.
+Carries incremental LLM text chunks and pipeline progress events for real-time progressive rendering.
+Produced for channels in `STREAMING_CAPABLE_CHANNELS`: `telegram`, `tui`, `rest`.
 
+Each entry carries a `type` field that distinguishes two kinds of entries:
+
+**Token entry** (text fragment):
 ```
-XADD relais:messages:streaming:telegram:550e8400-... * chunk "Hello, "
-                                                        seq   "0"
-                                                        is_final "0"
+XADD relais:messages:streaming:rest:550e8400-... * type     "token"
+                                                    chunk    "Hello, "
+                                                    seq      "0"
+                                                    is_final "0"
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `chunk` | `string` | Text fragment (empty string `""` for the final sentinel) |
-| `seq` | `string` | Monotonically increasing integer (as string) |
-| `is_final` | `string` | `"1"` for the terminal sentinel entry, `"0"` otherwise |
+**Progress entry** (tool call, subagent start, …):
+```
+XADD relais:messages:streaming:rest:550e8400-... * type     "progress"
+                                                    chunk    ""
+                                                    seq      "1"
+                                                    is_final "0"
+                                                    event    "tool_call"
+                                                    detail   "Calling web_search…"
+```
 
-**Reading pattern** (Aiguilleur):
+**Final sentinel** (signals end of stream):
+```
+XADD relais:messages:streaming:rest:550e8400-... * type     "token"
+                                                    chunk    ""
+                                                    seq      "42"
+                                                    is_final "1"
+```
+
+| Field | Type | Present on | Description |
+|-------|------|------------|-------------|
+| `type` | `string` | all | `"token"` for text fragments, `"progress"` for pipeline events |
+| `chunk` | `string` | all | Text fragment; empty string `""` on progress entries and the final sentinel |
+| `seq` | `string` | all | Monotonically increasing integer (as string) |
+| `is_final` | `string` | all | `"1"` for the terminal sentinel entry, `"0"` otherwise |
+| `event` | `string` | progress only | Event name: `"tool_call"`, `"tool_result"`, `"subagent_start"`, … |
+| `detail` | `string` | progress only | Human-readable context string |
+
+**Reading pattern** (consumer):
 ```python
 while True:
     results = await redis.xread({stream_key: last_id}, count=10, block=5000)
     for entry_id, fields in results[0][1]:
         last_id = entry_id
-        if fields["is_final"] == "1":
+        entry_type = fields.get("type", b"token")
+        if isinstance(entry_type, bytes):
+            entry_type = entry_type.decode()
+        if fields.get("is_final") == b"1" or fields.get("is_final") == "1":
             break
+        if entry_type == "token":
+            chunk = fields.get("chunk", b"")
+            # render text fragment
+        elif entry_type == "progress":
+            event = fields.get("event", b"")
+            detail = fields.get("detail", b"")
+            # display progress indicator
 ```
+
+**SSE mapping** (REST adapter `GET /docs/sse`):
+
+| Stream entry type | SSE event name | SSE data |
+|-------------------|---------------|----------|
+| `token` | `token` | `{"t": "<chunk>"}` |
+| `progress` | `progress` | `{"event": "<event>", "detail": "<detail>"}` |
+| is_final = 1 | `done` | `{"correlation_id": "…"}` |
+| timeout / error | `error` | `{"error": "<reason>", "correlation_id": "…"}` |
 
 ---
 

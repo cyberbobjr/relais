@@ -21,6 +21,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from tests.conftest import isolated_search_path as _isolated_search_path
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -368,7 +370,7 @@ def test_specs_for_user_resolves_mcp_tokens(tmp_path: Path) -> None:
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     user_record = {"allowed_subagents": ["*"]}
@@ -394,7 +396,7 @@ def test_specs_for_user_resolves_inherit_tokens(tmp_path: Path) -> None:
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     specs = subagent_reg.specs_for_user(
@@ -418,7 +420,7 @@ def test_specs_for_user_resolves_static_name_tokens(tmp_path: Path) -> None:
     static_tool = _make_mock_tool("read_config")
     tool_reg = _make_fake_tool_registry({"read_config": static_tool})
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(tool_reg)
 
     specs = subagent_reg.specs_for_user(
@@ -439,7 +441,7 @@ def test_specs_for_user_returns_empty_when_no_allowed(tmp_path: Path) -> None:
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     specs = subagent_reg.specs_for_user({"allowed_subagents": []}, request_tools=[])
@@ -456,7 +458,7 @@ def test_specs_for_user_default_request_tools_is_empty_list(tmp_path: Path) -> N
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     # Call without request_tools — should not raise
@@ -477,7 +479,7 @@ def test_specs_for_user_result_dict_has_required_keys(tmp_path: Path) -> None:
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     specs = subagent_reg.specs_for_user({"allowed_subagents": ["*"]})
@@ -499,7 +501,7 @@ def test_specs_for_user_omits_tools_key_when_empty(tmp_path: Path) -> None:
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     specs = subagent_reg.specs_for_user({"allowed_subagents": ["*"]})
@@ -518,7 +520,7 @@ def test_specs_for_user_omits_skills_key_when_empty(tmp_path: Path) -> None:
 
     registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with _isolated_search_path(tmp_path):
         subagent_reg = SubagentRegistry.load(registry)
 
     specs = subagent_reg.specs_for_user({"allowed_subagents": ["*"]})

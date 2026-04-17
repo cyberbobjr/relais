@@ -10,8 +10,6 @@ import json
 from dataclasses import dataclass
 from typing import Generator
 
-SSEEvent = "TokenEvent | DoneEvent | ProgressEvent | ErrorEvent | Keepalive"
-
 
 @dataclass(frozen=True)
 class TokenEvent:
@@ -68,6 +66,9 @@ class ErrorEvent:
 @dataclass(frozen=True)
 class Keepalive:
     """SSE comment used as heartbeat."""
+
+
+SSEEvent = TokenEvent | DoneEvent | ProgressEvent | ErrorEvent | Keepalive
 
 
 class SSEParser:

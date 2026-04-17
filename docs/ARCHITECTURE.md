@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-10
+**Dernière mise à jour :** 2026-04-17
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -135,6 +135,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Adaptateurs natifs Python complets présents dans le dépôt :
   - **Discord** (`aiguilleur/channels/discord/adapter.py`) — entrée `relais:messages:incoming`, sortie `relais:messages:outgoing:discord`.
   - **WhatsApp** (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp écoutant la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, lancée par `scripts/run_baileys.py` sous supervisord, programme `baileys-api` dans le groupe `optional`). L'adaptateur transcrit les events WhatsApp entrants en Envelope → `relais:messages:incoming`, et envoie les réponses sortantes via l'API REST de la passerelle après conversion Markdown→WhatsApp (`common/markdown_converter.convert_md_to_whatsapp()` pour `*bold*`, `_italic_`, `~strike~` natifs). Installation, configuration et pairing via `python -m aiguilleur.channels.whatsapp` CLI ou via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall`.
+  - **REST** (`aiguilleur/channels/rest/adapter.py`) — adaptateur HTTP/JSON et SSE pour les clients programmatiques (CLI, CI, TUI). Expose `POST /v1/messages` (authentification Bearer via clés API dans `portail.yaml`), réponse JSON synchrone ou stream SSE. Les clés API sont résolues via `UserRegistry.resolve_rest_api_key()` (hachage HMAC-SHA256, jamais stockées en clair). L'adaptateur filtre les `ACTION_MESSAGE_PROGRESS` entrants pour ne résoudre que la réponse finale. La route `GET /docs/sse` expose un playground SSE interactif.
 - Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (aiguilleur.yaml).
 - Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 - Chaque adaptateur estampille `context.aiguilleur["streaming"]` (`bool`) depuis `ChannelConfig.streaming` (lu par Atelier par message, pas au démarrage).
@@ -177,6 +178,10 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
   - en cas d'échec agent (`AgentExecutionError`) : une réponse d'erreur synthétisée par `ErrorSynthesizer` (appel LLM léger) publiée sur `relais:messages:outgoing_pending` pour que l'utilisateur reçoive un message empathique au lieu d'un silence
   - les erreurs finales sur `relais:tasks:failed`
+- **Modules extraits** :
+  - `atelier/streaming.py` — `StreamBuffer`, `_extract_thinking`, `_has_tool_use_block` ; helpers de buffering de tokens extraits de `agent_executor.py` pour maintenir chaque module sous 800 lignes.
+  - `atelier/subagents_resolver.py` — fonctions pures de résolution des tokens `tools:` et `skills:` (`_load_tools_from_import`, `_resolve_skill_token`, …) ; extraites de `atelier/subagents.py`.
+  - `atelier/display_config.py` — `DisplayConfig` (dataclass frozen) chargée depuis `atelier.yaml` (section `display:`), remplace l'ancien `progress_config.py`.
 - **Note** : l'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
 
 ### Commandant
@@ -257,9 +262,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 
 La résolution suit :
 
-1. `RELAIS_HOME`
-2. `/opt/relais`
-3. `./`
+1. `RELAIS_HOME` (par défaut `~/.relais`)
 
 ### Fichiers principaux
 
@@ -268,13 +271,39 @@ La résolution suit :
 | `config/config.yaml` | lit surtout `llm.default_profile` |
 | `config/portail.yaml` | utilisateurs, rôles, `unknown_user_policy`, `guest_role` |
 | `config/sentinelle.yaml` | ACL et groupes |
-| `config/atelier.yaml` | configuration des progress events |
+| `config/atelier.yaml` | configuration des display events (section `display:`) |
 | `config/atelier/profiles.yaml` | profils LLM |
 | `config/atelier/mcp_servers.yaml` | serveurs MCP |
 | `config/aiguilleur.yaml` | canaux Aiguilleur ; copié par `initialize_user_dir()` ; fallback Discord-only si supprimé manuellement |
 | `config/forgeron.yaml` | profils LLM (`annotation_profile`, `consolidation_profile`), seuils (`consolidation_line_threshold`, `annotation_call_threshold`), cooldowns, `skills_dir`, `creation_mode` |
 
-`initialize_user_dir()` copie désormais l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, y compris `config/aiguilleur.yaml` et `config/atelier/subagents/relais-config/subagent.yaml`.
+`initialize_user_dir()` copie l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, y compris `config/aiguilleur.yaml` et `config/tui/config.yaml` (configuration du client TUI). Les sous-agents natifs (`relais-config`, …) sont **exclus** de cette copie : ils sont livrés directement dans `atelier/subagents/` (arbre source) et chargés en 2e tier par `SubagentRegistry`. Seul le répertoire `config/atelier/subagents/` est créé vide dans `RELAIS_HOME` pour accueillir les sous-agents custom de l'opérateur.
+
+### Architecture 2-tier des sous-agents (Subagents)
+
+L'Atelier dispose d'une architecture 2-tier pour les sous-agents :
+
+| Tier | Localisation | Priorité | Initialisation | Modification |
+|------|-------------|----------|---|---|
+| **User** | `$RELAIS_HOME/config/atelier/subagents/{name}/` | 1ère (prioritaire) | Créés manuellement par l'opérateur | Modifiables sans redémarrage (hot-reload) |
+| **Native** | `atelier/subagents/{name}/` (source) | 2e (fallback) | Livrés avec le dépôt | Modifiables via le code source ; hot-reload supporté |
+
+**Chargement** (`SubagentRegistry.load()`):
+1. Scanne d'abord `$RELAIS_HOME/config/atelier/subagents/`
+2. Puis scanne `atelier/subagents/` (native)
+3. Premier match par nom gagne (user overrides native)
+4. Chaque répertoire doit contenir `subagent.yaml`
+
+**Subagent natif livré** : `relais-config` (sous `atelier/subagents/relais-config/`) — configuration CRUD, outils WhatsApp, etc.
+
+**Utilisation** :
+- L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns, e.g. `["relais-config"]`, `["my-*"]`)
+- Aucun changement de code requis pour ajouter/modifier des subagents — Atelier les découvre automatiquement
+
+**Hot-reload** :
+- Atelier surveille `$RELAIS_HOME/config/atelier/subagents/` et `atelier/subagents/` via `watchfiles`
+- Un changement dans l'un ou l'autre déclenche un rechargement atomique du registre
+- Les subagents en cours d'exécution ne sont pas interrompus
 
 ### Rechargement à chaud de la configuration
 
@@ -289,7 +318,7 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 **Fichiers surveillés par brique** :
 - **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
-- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
+- **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/atelier/subagents/` (user), `atelier/subagents/` (native)
 - **Souvenir**: aucun fichier surveillé — pas de config rechargeable (Souvenir ne fait pas d'appels LLM)
 - **Forgeron**: `config/forgeron.yaml` (seuils, profils LLM, `skills_dir`, `annotation_call_threshold`, `consolidation_line_threshold`)
 - **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
@@ -382,6 +411,8 @@ Le chemin recommandé est :
 
 Cela démarre Redis local puis les briques Python via `launcher.py`. Le flag `--verbose` affiche les logs de toutes les briques après le démarrage (Ctrl+C pour détacher sans arrêter supervisord).
 
+> **Sécurité** : `supervisor.sh stop <name>` et `restart <name>` valident le nom de service via `validate_service_name()` (caractères autorisés : alphanumérique, `_`, `:`, `.`, `-`). Un nom invalide cause une sortie immédiate avec code d'erreur.
+
 Groupes supervisord :
 
 | Groupe | Contenu | Auto-start `supervisor.sh start all` |
@@ -404,6 +435,20 @@ uv run python commandant/main.py
 uv run python archiviste/main.py
 uv run python aiguilleur/main.py
 ```
+
+---
+
+## Outils clients (`tools/`)
+
+### TUI (`tools/tui/`)
+
+Client terminal interactif pour le canal REST. Paquet Python indépendant (`relais-tui`), point d'entrée `relais` (script console défini dans `pyproject.toml`).
+
+- **`relais_tui/config.py`** — chargement de la configuration depuis `<relais_home>/config/tui/config.yaml` (cascade RELAIS_HOME / `~/.relais`). Historique TUI par défaut dans `~/.relais/storage/tui/history`.
+- **`relais_tui/client.py`** — client REST/SSE asynchrone : `POST /v1/messages` puis lecture du stream SSE.
+- **`relais_tui/sse_parser.py`** — parseur SSE stateful ; `SSEEvent = TokenEvent | DoneEvent | ProgressEvent | ErrorEvent | Keepalive`.
+
+La configuration TUI est initialisée par `initialize_user_dir()` depuis `config/tui/config.yaml.default`.
 
 ---
 

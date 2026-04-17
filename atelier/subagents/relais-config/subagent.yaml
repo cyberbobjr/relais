@@ -1,31 +1,38 @@
 name: relais-config
 description: >
-  Reads and modifies RELAIS YAML configuration files
-  (portail.yaml, aiguilleur.yaml, profiles.yaml, sentinelle.yaml,
-  mcp_servers.yaml), prompt overlays (soul, roles, users, channels,
-  policies), and agent skills (create, modify, delete SKILL.md).
-  Also installs, configures and pairs communication channels
+  Reads, inspects, and modifies all RELAIS configuration:
+  users and roles (portail.yaml), ACL rules (sentinelle.yaml),
+  channel adapters (aiguilleur.yaml), LLM profiles (profiles.yaml),
+  MCP servers (mcp_servers.yaml), system settings (config.yaml),
+  prompt overlays (soul, roles, users, channels, policies),
+  agent skills (create, modify, delete SKILL.md files),
+  subagents (subagent.yaml packs), and client tools
+  (TUI settings in config/tui/config.yaml).
+  Also installs, configures, and pairs communication channels
   (WhatsApp, Discord, Telegram, REST, …) via the channel-setup skill.
-  Use when the user asks to add/remove/edit a user, role, channel,
-  LLM profile, ACL rule, MCP server, prompt, or skill. Also use
-  when the user asks to display, inspect, install, or pair any
-  channel or configuration.
+  Use when the user asks to add, remove, edit, inspect, install,
+  pair, or troubleshoot any channel, user, role, profile, ACL rule,
+  MCP server, prompt, skill, subagent, or client configuration.
 delegation_snippet: |
-  - **relais-config**: Reads and modifies RELAIS configuration files
-    (portail.yaml, aiguilleur.yaml, profiles.yaml, sentinelle.yaml,
-    mcp_servers.yaml), prompt overlays, agent skills, and guides the
-    full install/configure/pair flow for communication channels
-    (WhatsApp, Discord, Telegram, …). Delegate via task() when the
-    user asks to add, remove, edit, inspect, install, or pair any
-    channel or configuration. When delegating for channel setup,
-    forward the entire user message so the subagent can read the
-    <relais_execution_context> block for routing metadata.
+  - **relais-config**: Reads and modifies all RELAIS configuration —
+    users/roles (portail.yaml), ACL (sentinelle.yaml), channels
+    (aiguilleur.yaml), LLM profiles (profiles.yaml), MCP servers
+    (mcp_servers.yaml), system settings (config.yaml), prompt overlays
+    (soul/roles/users/channels/policies), agent skills (SKILL.md),
+    subagent packs (subagent.yaml), and client tools (TUI config.yaml).
+    Also guides the full install/configure/pair flow for communication
+    channels (WhatsApp, Discord, Telegram, REST, …).
+    Delegate via task() when the user asks to add, remove, edit,
+    inspect, install, pair, or troubleshoot any channel or configuration.
+    When delegating for channel setup, forward the entire user message
+    so the subagent can read the <relais_execution_context> block.
 tool_tokens:
   - module:aiguilleur.channels.whatsapp.tools
 skill_tokens:
   - local:channel-setup   # generalist (principles, routing, meta-guide)
   - local:whatsapp        # WhatsApp via fazer-ai/baileys-api
   - local:rest            # REST API adapter (API keys, CORS, SSE, diagnose)
+  - local:tui             # TUI client settings (api_url, api_key, theme, timeout)
 system_prompt: |
   You are the RELAIS configuration administrator. You manage all RELAIS configuration files, prompt overlays, and agent skills.
 
@@ -331,3 +338,64 @@ system_prompt: |
   3. Strict scope: write only to config/*.yaml, config/atelier/subagents/*/subagent.yaml, config/atelier/subagents/*/tools/*.py, config/atelier/subagents/*/skills/**/*, prompts/**/*.md, and skills/**.
   4. Never store plaintext secrets: use api_key_env with a variable name.
   5. Always present the diff before writing — never modify without confirmation.
+
+# ---------------------------------------------------------------------------
+# response_format — deepagents >= 0.5.3 static structured output
+# ---------------------------------------------------------------------------
+#
+# When present, the subagent's final answer is serialised as a JSON object
+# matching this JSON schema, and returned to the parent agent as a ToolMessage
+# containing the JSON string (instead of free-form text).
+#
+# The parent agent can parse this JSON reliably to:
+#   - display `summary` directly to the user
+#   - know which files were modified and which bricks were restarted
+#   - distinguish a security refusal (success=false) from a technical error
+#
+# This field is optional. Omit it to fall back to free-form text output.
+#
+response_format:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        Action performed, e.g. user_created, channel_enabled, skill_modified,
+        user_delete_refused, config_read.
+    target:
+      type: string
+      description: >
+        Identifier of the object modified, e.g. usr_benjamin, whatsapp, my-skill.
+    files_modified:
+      type: array
+      items:
+        type: string
+      description: >
+        Relative paths of files written during this operation.
+        Empty list when action was read-only or was refused.
+    bricks_restarted:
+      type: array
+      items:
+        type: string
+      description: >
+        Names of bricks restarted after the modification (supervisorctl).
+        Empty list when no restart was needed.
+    success:
+      type: boolean
+      description: >
+        true when the requested operation completed successfully;
+        false when refused (security rule) or failed (I/O error, etc.).
+    error:
+      type: string
+      description: >
+        Human-readable reason for failure when success=false.
+        Null (omit) when success=true.
+    summary:
+      type: string
+      description: >
+        One-sentence summary to display verbatim to the user.
+        Written in the user's language.
+  required:
+    - action
+    - success
+    - summary

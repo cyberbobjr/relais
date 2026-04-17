@@ -757,9 +757,10 @@ def test_user_registry_not_permissive_when_loaded(tmp_path: Path) -> None:
 def test_rest_api_key_resolves_after_sha256_hashing(tmp_path: Path) -> None:
     """REST API keys stored as SHA-256 hashes must resolve to the correct user.
 
-    The registry stores ``rest:<sha256(key)>`` in the sender index.  The
-    ``resolve_user`` method must hash the raw key before the lookup so that
-    a call with the plaintext key succeeds.
+    The registry stores ``rest:<sha256(key)>`` in the sender index.
+    ``resolve_rest_api_key`` hashes the raw key before the lookup so that
+    a call with the plaintext key succeeds.  ``resolve_user`` expects a
+    pre-resolved sender_id (e.g. ``rest:usr_xxx``) and does NOT hash.
     """
     from textwrap import dedent
 
@@ -791,8 +792,8 @@ def test_rest_api_key_resolves_after_sha256_hashing(tmp_path: Path) -> None:
     path.write_text(yaml_content, encoding="utf-8")
 
     registry = UserRegistry(config_path=path)
-    result = registry.resolve_user("rest:my-secret-key-abc", "rest", "dm")
+    result = registry.resolve_rest_api_key("my-secret-key-abc")
 
-    assert result is not None, "resolve_user must find the user by raw REST API key"
+    assert result is not None, "resolve_rest_api_key must find the user by raw REST API key"
     assert result.user_id == "usr_api"
 

@@ -5,7 +5,7 @@ with RELAIS. Useful for CLI tools, CI pipelines, and other REST clients.
 
 Bridges HTTP requests and the RELAIS Redis bus:
 - Receives: POST /v1/messages (Bearer-authenticated)
-- Publishes: relais:messages:incoming:rest
+- Publishes: relais:messages:incoming
 - Consumes:  relais:messages:outgoing:rest  (via consumer group)
 - Returns:   JSON response or SSE stream to the HTTP caller
 

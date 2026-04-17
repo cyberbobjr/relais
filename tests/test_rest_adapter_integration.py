@@ -44,7 +44,7 @@ def _make_registry(user_record: UserRecord | None = None) -> MagicMock:
     registry = MagicMock()
     if user_record is None:
         user_record = _make_user_record()
-    registry.resolve_user.return_value = user_record
+    registry.resolve_rest_api_key.return_value = user_record
     return registry
 
 
@@ -229,7 +229,7 @@ class TestPostMessageAuth:
     @pytest.mark.asyncio
     async def test_post_message_auth_fail_bad_token(self, test_client, registry):
         """Unknown token → 401."""
-        registry.resolve_user.return_value = None
+        registry.resolve_rest_api_key.return_value = None
         resp = await test_client.post(
             "/v1/messages",
             json={"content": "hello"},

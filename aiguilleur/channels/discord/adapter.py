@@ -15,7 +15,7 @@ Two envelope types are consumed from relais:messages:outgoing:discord:
 Progressive streaming (token-by-token) is disabled on this channel.  Atelier
 publishes the full response to relais:messages:outgoing:discord after the
 agentic execution completes.  Progress event publishing is controlled by
-``ProgressConfig`` (config/atelier.yaml, section ``progress:``).
+``DisplayConfig`` (config/atelier.yaml, section ``display:``).
 """
 
 from __future__ import annotations

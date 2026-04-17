@@ -138,7 +138,6 @@ XACK contract
 import asyncio
 import json
 import logging
-import sys
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
@@ -164,18 +163,6 @@ from forgeron.session_store import SessionStore
 from forgeron.trace_store import SkillTraceStore
 
 logger = logging.getLogger("forgeron")
-
-# Ensure the forgeron logger has at least one handler writing to stdout,
-# even if configure_logging_once() was skipped or root-level handlers were
-# removed.  This guarantees that logger.info() calls always appear in the
-# supervisord stdout log file.
-if not logger.handlers:
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s"
-    ))
-    logger.addHandler(_handler)
-    logger.setLevel(logging.DEBUG)
 
 
 class Forgeron(BrickBase):

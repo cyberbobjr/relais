@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import stat
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -21,17 +21,17 @@ _FALLBACK_HOME = Path("~/.relais")
 def _default_config_path() -> Path:
     """Resolve the default config file path.
 
-    Uses ``RELAIS_HOME`` env var if set, otherwise falls back to
-    ``~/.relais``. The returned path is NOT yet expanded (``expanduser``
-    is deferred to the caller).
+    Follows the RELAIS config cascade convention: config files live under
+    ``<relais_home>/config/``.  Uses ``RELAIS_HOME`` env var if set,
+    otherwise falls back to ``~/.relais``.
 
     Returns:
-        Path to ``<relais_home>/tui/config.yaml``.
+        Path to ``<relais_home>/config/tui/config.yaml``.
     """
     home = os.environ.get(_ENV_RELAIS_HOME)
     if home:
-        return Path(home) / "tui" / "config.yaml"
-    return _FALLBACK_HOME / "tui" / "config.yaml"
+        return Path(home) / "config" / "tui" / "config.yaml"
+    return _FALLBACK_HOME / "config" / "tui" / "config.yaml"
 
 
 @dataclass(frozen=True)
@@ -63,9 +63,8 @@ class Config:
 
     api_url: str = "http://localhost:8080"
     api_key: str = ""
-    history_path: str = "~/.relais/tui/history"
+    history_path: str = "~/.relais/storage/tui/history"
     request_timeout: int = 120
-    session_behavior: str = "new"
     theme: ThemeConfig = field(default_factory=ThemeConfig)
 
 
@@ -128,8 +127,9 @@ def _build_config(raw: dict) -> Config:
         A fully populated Config instance.
     """
     theme_raw = raw.get("theme") or {}
+    theme_defaults = ThemeConfig()
     theme = ThemeConfig(**{
-        k: theme_raw.get(k, getattr(ThemeConfig(), k))
+        k: theme_raw.get(k, getattr(theme_defaults, k))
         for k in ThemeConfig.__dataclass_fields__
     })
 
@@ -158,12 +158,5 @@ def _apply_env(cfg: Config) -> Config:
     """
     env_key = os.environ.get(_ENV_API_KEY, "")
     if env_key:
-        return Config(
-            api_url=cfg.api_url,
-            api_key=env_key,
-            history_path=cfg.history_path,
-            request_timeout=cfg.request_timeout,
-            session_behavior=cfg.session_behavior,
-            theme=cfg.theme,
-        )
+        return replace(cfg, api_key=env_key)
     return cfg
