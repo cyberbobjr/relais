@@ -34,6 +34,58 @@ class IntentLabelLLMResponse(BaseModel):
             "Use 'none' if the conversation has no clear reusable task."
         )
     )
+    is_correction: bool = Field(
+        default=False,
+        description=(
+            "True if the user is correcting or criticizing a previous AI response "
+            "(e.g. 'that was wrong', 'do it differently', 'stop doing X'). "
+            "False for normal task requests."
+        ),
+    )
+    corrected_behavior: str | None = Field(
+        default=None,
+        description=(
+            "When is_correction=True: concise description of what the AI should do "
+            "differently (e.g. 'Use plain text instead of HTML'). "
+            "Null when is_correction=False."
+        ),
+    )
+    skill_name_hint: str | None = Field(
+        default=None,
+        description=(
+            "Optional snake_case skill name hint derived from the correction context "
+            "(e.g. 'send_plain_email'). Used by Forgeron to name the corrected skill. "
+            "Null when no specific skill is implied."
+        ),
+    )
+
+
+class IntentLabelResult:
+    """Result of an IntentLabeler.label() call.
+
+    Carries both the intent label (for skill auto-creation) and correction
+    metadata (for skill-designer dispatch via the correction pipeline).
+
+    Attributes:
+        label: Normalized snake_case intent label, or None if excluded/unknown.
+        is_correction: True if the session is a user correction of prior AI behavior.
+        corrected_behavior: Human-readable description of the correction (non-null iff is_correction).
+        skill_name_hint: Optional snake_case skill name suggested by the LLM.
+    """
+
+    __slots__ = ("label", "is_correction", "corrected_behavior", "skill_name_hint")
+
+    def __init__(
+        self,
+        label: str | None,
+        is_correction: bool,
+        corrected_behavior: str | None,
+        skill_name_hint: str | None,
+    ) -> None:
+        self.label = label
+        self.is_correction = is_correction
+        self.corrected_behavior = corrected_behavior
+        self.skill_name_hint = skill_name_hint
 
 
 class IntentLabeler:
@@ -83,19 +135,23 @@ class IntentLabeler:
                     user_msgs.append(content.strip()[:300])
         return user_msgs
 
-    async def label(self, messages_raw: list[dict]) -> str | None:
-        """Extract an intent label from a session's messages.
+    async def label(self, messages_raw: list[dict]) -> IntentLabelResult:
+        """Extract an intent label and correction metadata from a session's messages.
 
         Args:
             messages_raw: Full serialized LangChain message list for the turn.
 
         Returns:
-            Normalized snake_case intent label, or None if no clear intent.
+            IntentLabelResult with label (or None if excluded/unknown) and
+            correction metadata (is_correction, corrected_behavior, skill_name_hint).
         """
         user_messages = self._extract_user_messages(messages_raw)
         if not user_messages:
             logger.debug("IntentLabeler: no user messages found in session")
-            return None
+            return IntentLabelResult(
+                label=None, is_correction=False,
+                corrected_behavior=None, skill_name_hint=None,
+            )
 
         conversation_text = "\n".join(f"- {m}" for m in user_messages[:5])
 
@@ -109,14 +165,27 @@ class IntentLabeler:
             raw_label = result.label.strip().lower()
         except Exception as exc:  # noqa: BLE001
             logger.warning("IntentLabeler LLM call failed: %s", exc)
-            return None
+            return IntentLabelResult(
+                label=None, is_correction=False,
+                corrected_behavior=None, skill_name_hint=None,
+            )
 
-        if not _LABEL_RE.match(raw_label):
-            logger.debug("IntentLabeler: invalid label format '%s'", raw_label)
-            return None
-        if raw_label in _EXCLUDED_LABELS:
-            logger.debug("IntentLabeler: excluded label '%s'", raw_label)
-            return None
+        # Validate label format — excluded/invalid labels become None, but
+        # correction metadata is always forwarded regardless.
+        normalized_label: str | None
+        if not _LABEL_RE.match(raw_label) or raw_label in _EXCLUDED_LABELS:
+            if not _LABEL_RE.match(raw_label):
+                logger.debug("IntentLabeler: invalid label format '%s'", raw_label)
+            else:
+                logger.debug("IntentLabeler: excluded label '%s'", raw_label)
+            normalized_label = None
+        else:
+            logger.info("IntentLabeler: session → label='%s'", raw_label)
+            normalized_label = raw_label
 
-        logger.info("IntentLabeler: session → label='%s'", raw_label)
-        return raw_label
+        return IntentLabelResult(
+            label=normalized_label,
+            is_correction=result.is_correction,
+            corrected_behavior=result.corrected_behavior,
+            skill_name_hint=result.skill_name_hint,
+        )

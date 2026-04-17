@@ -313,6 +313,43 @@ class LongTermStore:
             for row in rows
         ]
 
+    async def get_full_session_messages_raw(self, session_id: str) -> list[list[dict]]:
+        """Return all ``messages_raw`` blobs for a session, oldest-first.
+
+        Each element is a deserialized LangChain message list for one turn.
+        Used by ``HistoryReadHandler`` to build the history payload for Forgeron.
+
+        Args:
+            session_id: Session identifier to fetch.
+
+        Returns:
+            List of turns (oldest-first), each being a list of message dicts.
+            Returns an empty list if the session is unknown.
+        """
+        from sqlalchemy import select
+
+        query = (
+            select(ArchivedMessage.messages_raw, ArchivedMessage.created_at)
+            .where(ArchivedMessage.session_id == session_id)
+            .order_by(ArchivedMessage.created_at.asc())
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(query)
+            rows = result.fetchall()
+
+        turns: list[list[dict]] = []
+        for row in rows:
+            try:
+                parsed = json.loads(row.messages_raw or "[]")
+                if isinstance(parsed, list):
+                    turns.append(parsed)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "LongTermStore: invalid messages_raw JSON for session=%s",
+                    session_id,
+                )
+        return turns
+
     async def close(self) -> None:
         """Release async engine resources (aiosqlite connections).
 

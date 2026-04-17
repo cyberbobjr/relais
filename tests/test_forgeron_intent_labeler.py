@@ -56,7 +56,7 @@ async def test_label_returns_valid_snake_case_label():
     with patch("forgeron.intent_labeler.build_chat_model", return_value=mock_llm):
         result = await labeler.label(_make_messages(["please send an email to alice"]))
 
-    assert result == "send_email"
+    assert result.label == "send_email"
 
 
 @pytest.mark.asyncio
@@ -82,7 +82,7 @@ async def test_label_returns_none_for_excluded_labels():
         mock_llm = _mock_structured_llm(IntentLabelLLMResponse(label=excluded))
         with patch("forgeron.intent_labeler.build_chat_model", return_value=mock_llm):
             result = await labeler.label(_make_messages(["hi there"]))
-        assert result is None, f"Expected None for excluded label '{excluded}'"
+        assert result.label is None, f"Expected None for excluded label '{excluded}'"
 
 
 @pytest.mark.asyncio
@@ -95,7 +95,7 @@ async def test_label_returns_none_for_invalid_format():
         mock_llm = _mock_structured_llm(IntentLabelLLMResponse(label=bad_label))
         with patch("forgeron.intent_labeler.build_chat_model", return_value=mock_llm):
             result = await labeler.label(_make_messages(["some user message"]))
-        assert result is None, f"Expected None for invalid label '{bad_label}'"
+        assert result.label is None, f"Expected None for invalid label '{bad_label}'"
 
 
 @pytest.mark.asyncio
@@ -109,7 +109,7 @@ async def test_label_returns_none_when_no_user_messages():
     with patch("forgeron.intent_labeler.build_chat_model") as mock_build:
         result = await labeler.label(messages)
 
-    assert result is None
+    assert result.label is None
     mock_build.assert_not_called()  # LLM should not be called at all
 
 
@@ -126,7 +126,7 @@ async def test_label_returns_none_on_llm_failure():
     with patch("forgeron.intent_labeler.build_chat_model", return_value=mock_llm):
         result = await labeler.label(_make_messages(["do something"]))
 
-    assert result is None
+    assert result.label is None
 
 
 # ---------------------------------------------------------------------------

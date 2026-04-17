@@ -48,6 +48,11 @@ class ForgeonConfig:
     """LLM profile to use for consolidation (heavier model than annotation)."""
     notify_user_on_consolidation: bool = True
     """Publish a notification to relais:messages:outgoing_pending when a skill is consolidated."""
+    # --- Correction pipeline (user feedback → skill fix via skill-designer) ---
+    correction_mode: bool = True
+    """Enable the correction pipeline: user feedback triggers skill-designer via force_subagent."""
+    history_read_timeout_seconds: int = 30
+    """Seconds to wait for Souvenir BRPOP response when fetching session history."""
 
     def __post_init__(self) -> None:
         if self.skills_dir is None:
@@ -99,4 +104,6 @@ def load_forgeron_config() -> ForgeonConfig:
         ),
         consolidation_profile=str(section.get("consolidation_profile", "precise")),
         notify_user_on_consolidation=bool(section.get("notify_user_on_consolidation", True)),
+        correction_mode=bool(section.get("correction_mode", True)),
+        history_read_timeout_seconds=int(section.get("history_read_timeout_seconds", 30)),
     )

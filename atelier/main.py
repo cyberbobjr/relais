@@ -184,6 +184,7 @@ from common.streams import (
 from common.contexts import (
     CTX_AIGUILLEUR,
     CTX_ATELIER,
+    CTX_FORGERON,
     CTX_PORTAIL,
     CTX_SKILL_TRACE,
     CTX_SOUVENIR_REQUEST,
@@ -688,6 +689,32 @@ class Atelier(BrickBase):
                 "[TASK] subagents resolved — corr=%s count=%d delegation_len=%d",
                 corr, len(subagents), len(delegation_prompt),
             )
+
+            # 5b. Override: force_subagent from Forgeron correction pipeline
+            forgeron_ctx: dict = envelope.context.get(CTX_FORGERON, {})
+            force_subagent_name: str | None = forgeron_ctx.get("force_subagent")
+            if force_subagent_name:
+                forced = next(
+                    (s for s in subagents if s["name"] == force_subagent_name), None
+                )
+                if forced is not None:
+                    subagents = [forced]
+                    corrected_behavior = forgeron_ctx.get("corrected_behavior", "")
+                    delegation_prompt = (
+                        f"You MUST delegate immediately to the subagent '{force_subagent_name}'. "
+                        f"Do not use any other subagent. "
+                        f"Context: {corrected_behavior}"
+                    )
+                    logger.info(
+                        "[TASK] force_subagent override — corr=%s subagent=%s",
+                        corr, force_subagent_name,
+                    )
+                else:
+                    logger.warning(
+                        "[TASK] force_subagent '%s' not found in role-filtered list — "
+                        "falling back to normal agent — corr=%s",
+                        force_subagent_name, corr,
+                    )
 
             agent_executor = AgentExecutor(
                 profile=profile,
