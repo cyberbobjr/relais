@@ -57,23 +57,31 @@ def test_manager_skips_disabled_channels():
 @pytest.mark.unit
 def test_manager_loads_adapter_by_convention(tmp_path):
     """_load_adapter discovers the class via aiguilleur.channels.{name}.adapter convention."""
+    import types
     from aiguilleur.core.native import NativeAiguilleur
+
+    _MODULE_NAME = "aiguilleur.channels.discord.adapter"
 
     class FakeDiscordAiguilleur(NativeAiguilleur):
         async def run(self) -> None:
             pass
 
+    # __module__ must match the fake module's __name__ for the discovery filter to pass.
+    FakeDiscordAiguilleur.__module__ = _MODULE_NAME
+
     cfg = ChannelConfig(name="discord", enabled=True)
 
-    with patch("importlib.import_module") as mock_import:
-        mock_module = MagicMock()
-        mock_module.DiscordAiguilleur = FakeDiscordAiguilleur
-        mock_import.return_value = mock_module
+    # Use a real ModuleType so __name__ is a plain string (MagicMock raises AttributeError
+    # on dunder attribute access, breaking the getattr(attr, "__module__") == module.__name__
+    # check in _load_adapter).
+    fake_module = types.ModuleType(_MODULE_NAME)
+    fake_module.FakeDiscordAiguilleur = FakeDiscordAiguilleur  # type: ignore[attr-defined]
 
+    with patch("importlib.import_module", return_value=fake_module) as mock_import:
         manager = AiguilleurManager()
         adapter = manager._load_adapter("discord", cfg)
 
-    mock_import.assert_called_with("aiguilleur.channels.discord.adapter")
+    mock_import.assert_called_with(_MODULE_NAME)
     assert isinstance(adapter, FakeDiscordAiguilleur)
 
 
