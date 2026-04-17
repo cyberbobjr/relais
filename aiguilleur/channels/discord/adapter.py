@@ -451,8 +451,8 @@ class _RelaisDiscordClient(discord.Client):
         if not channel:
             return
 
-        preview = envelope.content[:80] + "…" if len(envelope.content) > 80 else envelope.content
-        logger.info(
+        preview = envelope.content[:100] + "…" if len(envelope.content) > 100 else envelope.content
+        logger.debug(
             "SEND discord | corr=%s | channel=%s | content=%r",
             envelope.correlation_id[:8],
             channel,

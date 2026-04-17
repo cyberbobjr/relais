@@ -7,7 +7,6 @@ from a YAML file with environment variable overrides.
 from __future__ import annotations
 
 import os
-import stat
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -78,7 +77,7 @@ def load_config(path: Path | None = None) -> Config:
 
     Args:
         path: Path to the YAML config file. Defaults to
-            ``~/.relais/tui/config.yaml``.
+            ``~/.relais/config/tui/config.yaml``.
 
     Returns:
         A frozen Config instance.
@@ -102,7 +101,7 @@ def save_config(config: Config, path: Path | None = None) -> None:
 
     Args:
         config: The Config instance to persist.
-        path: Destination path. Defaults to ``~/.relais/tui/config.yaml``.
+        path: Destination path. Defaults to ``~/.relais/config/tui/config.yaml``.
     """
     resolved = (path or _default_config_path()).expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)

@@ -66,7 +66,7 @@ Nécessaire uniquement quand `rest.enabled: true` dans `aiguilleur.yaml`. L'adap
 
 ### Canal WhatsApp (passerelle `baileys-api`)
 
-Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L'adaptateur Python (`aiguilleur/channels/whatsapp/adapter.py`) parle à la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) lancée par supervisord (programme `baileys-api`, groupe `optional`, autostart désactivé). Voir [docs/WHATSAPP_SETUP.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/WHATSAPP_SETUP.md) pour la procédure complète.
+Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L'adaptateur Python (`aiguilleur/channels/whatsapp/adapter.py`) parle à la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) lancée par supervisord (programme `baileys-api`, groupe `optional`, autostart désactivé). Voir [docs/WHATSAPP_SETUP.md](WHATSAPP_SETUP.md) pour la procédure complète.
 
 | Variable | Requis | Utilisation réelle |
 |----------|--------|--------------------|
@@ -78,13 +78,13 @@ Nécessaires uniquement quand `whatsapp.enabled: true` dans `aiguilleur.yaml`. L
 | `WHATSAPP_WEBHOOK_HOST` | Non | Hôte d'écoute ET URL de callback passée à la passerelle. Défaut : `127.0.0.1` (colocation obligatoire). |
 | `REDIS_PASS_BAILEYS` | Oui | Mot de passe Redis de l'utilisateur ACL `baileys` (voir `config/redis.conf`). Consommé par supervisord pour construire `REDIS_URL` du programme `baileys-api`. |
 
-Dépendances optionnelles Python à installer en plus : `uv sync --extra whatsapp` (ajoute `aiohttp>=3.9` et `qrcode>=7.0`).
+Dépendances optionnelles Python à installer en plus : `uv sync --extra whatsapp` (ajoute `qrcode>=8.2`).
 
 ---
 
 ## Debug
 
-Ces variables sont lues par [launcher.py](/Users/benjaminmarchand/IdeaProjects/relais/launcher.py) :
+Ces variables sont lues par [launcher.py](../launcher.py) :
 
 | Variable | Requis | Utilisation réelle |
 |----------|--------|--------------------|
@@ -96,7 +96,7 @@ Ces variables sont lues par [launcher.py](/Users/benjaminmarchand/IdeaProjects/r
 
 ## Variables utiles aux exemples MCP
 
-Certaines valeurs ne sont pas nécessaires au cœur du runtime, mais deviennent utiles si vous activez les serveurs MCP d'exemple du template [config/atelier/mcp_servers.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/atelier/mcp_servers.yaml.default).
+Certaines valeurs ne sont pas nécessaires au cœur du runtime, mais deviennent utiles si vous activez les serveurs MCP d'exemple du template [config/atelier/mcp_servers.yaml.default](../config/atelier/mcp_servers.yaml.default).
 
 | Variable | Utilisation |
 |----------|-------------|

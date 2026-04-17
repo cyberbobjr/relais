@@ -37,7 +37,7 @@ Add to `.env`:
 WHATSAPP_GATEWAY_URL=http://localhost:3025
 WHATSAPP_PHONE_NUMBER=+33612345678        # your phone number in E.164 format
 WHATSAPP_API_KEY=<key from step 2>
-WHATSAPP_WEBHOOK_SECRET=<random string, min 6 chars>
+WHATSAPP_WEBHOOK_SECRET=<random string, min 16 chars>
 WHATSAPP_WEBHOOK_PORT=8765
 WHATSAPP_WEBHOOK_HOST=127.0.0.1
 REDIS_PASS_BAILEYS=pass_baileys

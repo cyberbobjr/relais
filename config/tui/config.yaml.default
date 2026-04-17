@@ -2,7 +2,6 @@ api_url: http://localhost:8080
 api_key: ""
 history_path: ~/.relais/storage/tui/history
 request_timeout: 120
-session_behavior: new
 theme:
   background: "#1a1a2e"
   user_text: "#8be9fd"

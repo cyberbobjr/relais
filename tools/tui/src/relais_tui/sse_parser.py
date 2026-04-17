@@ -129,10 +129,14 @@ class SSEParser:
             if line.startswith(":"):
                 # SSE comment (keepalive)
                 self._has_comment = True
-            elif line.startswith("event: "):
-                self._event_type = line[7:]
-            elif line.startswith("data: "):
-                self._data = line[6:]
+            elif ":" in line:
+                field, _, value = line.partition(":")
+                # Spec: strip a single leading space from the value if present
+                value = value[1:] if value.startswith(" ") else value
+                if field == "event":
+                    self._event_type = value
+                elif field == "data":
+                    self._data = self._data + "\n" + value if self._data else value
 
     def reset(self) -> None:
         """Reset all parser state.

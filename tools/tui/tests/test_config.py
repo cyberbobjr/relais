@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import stat
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -11,23 +9,6 @@ import pytest
 import yaml
 
 from relais_tui.config import Config, ThemeConfig, _default_config_path, load_config, save_config
-
-# ---------------------------------------------------------------------------
-# Default values
-# ---------------------------------------------------------------------------
-
-DEFAULT_THEME = {
-    "background": "#1a1a2e",
-    "user_text": "#8be9fd",
-    "assistant_text": "#f8f8f2",
-    "code_block": "#282a36",
-    "progress": "#6272a4",
-    "error": "#ff5555",
-    "metadata": "#6272a4",
-    "status_bar": "#16213e",
-    "accent": "#50fa7b",
-}
-
 
 class TestThemeConfig:
     """ThemeConfig frozen dataclass tests."""
