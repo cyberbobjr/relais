@@ -52,20 +52,31 @@ Validation rules (fail-closed per directory — ERROR log + skip on violation):
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
-import importlib.util
 import logging
 import re
-import types
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
 from common.config_loader import CONFIG_SEARCH_PATH
+from atelier.subagents_resolver import (  # noqa: F401 — re-exported for test imports
+    _ALLOWED_MODULE_PREFIXES,
+    _load_tools_from_import,
+    _load_tools_from_module,
+    _resolve_tool_tokens,
+    _resolve_skill_tokens,
+    validate_module_token,
+)
 
 logger = logging.getLogger(__name__)
+
+# Path to the native subagents bundled with the source tree (second tier).
+# Patched in tests via conftest.isolated_search_path to prevent real packs loading.
+NATIVE_SUBAGENTS_PATH: Path = Path(__file__).parent / "subagents"
 
 # Regex for valid subagent names
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -74,6 +85,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _KNOWN_FIELDS = frozenset({
     "name", "description", "system_prompt",
     "tool_tokens", "skill_tokens", "delegation_snippet",
+    "response_format",
 })
 
 _DELEGATION_PREAMBLE = """
@@ -102,6 +114,8 @@ class SubagentSpec:
         delegation_snippet: Optional custom snippet; auto-generated if None.
         source_path: Filesystem path to ``subagent.yaml`` (for diagnostics).
         pack_dir: Filesystem path to the containing directory (for tool/skill loading).
+        response_format: Optional dict with a ``type`` key forwarded to deepagents;
+            must include a ``"type"`` key or it is ignored at resolution time.
     """
 
     name: str
@@ -112,6 +126,8 @@ class SubagentSpec:
     delegation_snippet: str | None
     source_path: Path
     pack_dir: Path
+    response_format: dict | None = field(default=None)
+    degraded_tokens: tuple[str, ...] = field(default=())
 
 
 def _parse_subagent_patterns(raw: object) -> tuple[str, ...]:
@@ -264,6 +280,18 @@ def _validate_and_build_spec(data: dict, yaml_path: Path, pack_dir: Path) -> Sub
     if delegation_snippet and isinstance(delegation_snippet, str):
         delegation_snippet = delegation_snippet.strip() or None
 
+    # Optional: response_format (dict or None)
+    response_format_raw = data.get("response_format")
+    response_format: dict | None = None
+    if response_format_raw is not None:
+        if isinstance(response_format_raw, dict):
+            response_format = response_format_raw
+        else:
+            logger.warning(
+                "SubagentRegistry: %s 'response_format' is not a dict — ignoring",
+                yaml_path,
+            )
+
     return SubagentSpec(
         name=name,
         description=description.strip(),
@@ -273,55 +301,10 @@ def _validate_and_build_spec(data: dict, yaml_path: Path, pack_dir: Path) -> Sub
         delegation_snippet=delegation_snippet,
         source_path=yaml_path,
         pack_dir=pack_dir,
+        response_format=response_format,
     )
 
 
-def _load_tools_from_module(py_path: Path, spec_name: str) -> dict[str, Any]:
-    """Load all BaseTool instances from a Python module file.
-
-    Uses ``importlib.util.spec_from_file_location`` with a synthetic module
-    name to avoid ``sys.modules`` collisions across subagents.  Each file is
-    isolated: module objects are not inserted into ``sys.modules``.
-
-    All module-level attributes that are ``BaseTool`` instances (duck-typed:
-    have ``name`` and ``run`` attributes) are collected.
-
-    Args:
-        py_path: Absolute path to the ``.py`` file.
-        spec_name: Subagent name used to build a unique synthetic module name.
-
-    Returns:
-        A dict mapping tool names to their callable/tool instances.
-        Empty dict on any import error (fail-closed; ERROR logged).
-    """
-    synthetic_name = f"relais_subagent_{spec_name}_{py_path.stem}"
-    try:
-        mod_spec = importlib.util.spec_from_file_location(synthetic_name, py_path)
-        if mod_spec is None or mod_spec.loader is None:
-            logger.error(
-                "SubagentRegistry: could not create module spec for %s — skipping", py_path
-            )
-            return {}
-        module = types.ModuleType(synthetic_name)
-        mod_spec.loader.exec_module(module)  # type: ignore[union-attr]
-    except Exception as exc:
-        logger.error(
-            "SubagentRegistry: failed to import tools from %s — %s — skipping", py_path, exc
-        )
-        return {}
-
-    tools: dict[str, Any] = {}
-    for attr_name in dir(module):
-        if attr_name.startswith("_"):
-            continue
-        obj = getattr(module, attr_name, None)
-        if obj is None:
-            continue
-        # Duck-type: BaseTool has .name and .run
-        tool_name = getattr(obj, "name", None)
-        if tool_name and hasattr(obj, "run") and callable(getattr(obj, "run", None)):
-            tools[str(tool_name)] = obj
-    return tools
 
 
 def _load_local_tools(pack_dir: Path, spec_name: str) -> dict[str, Any]:
@@ -379,15 +362,23 @@ class SubagentRegistry:
 
     Attributes:
         _specs: Tuple of all loaded SubagentSpec instances (unique by name).
+            Immutable after construction — rebuilt atomically by
+            ``_validate_tool_tokens()`` (called once inside ``load()`` before
+            the registry is shared with any caller).
         _tool_registry: The static ToolRegistry used for bare-name token resolution.
         _local_tools_by_subagent: Dict mapping subagent name → {tool_name → callable}.
         _local_skills_by_subagent: Dict mapping subagent name → {skill_name → abs_path}.
+        _runtime_degraded: Dict mapping subagent name → frozenset of token strings
+            that failed during ``specs_for_user()`` resolution.  Accumulated
+            across requests; never reset except by a new ``load()`` call that
+            replaces the registry reference entirely.
     """
 
     _specs: tuple[SubagentSpec, ...]
     _tool_registry: Any  # ToolRegistry — avoid circular import at type-check time
     _local_tools_by_subagent: dict[str, dict[str, Any]] = field(default_factory=dict)
     _local_skills_by_subagent: dict[str, dict[str, str]] = field(default_factory=dict)
+    _runtime_degraded: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, tool_registry: Any) -> SubagentRegistry:
@@ -475,13 +466,63 @@ class SubagentRegistry:
                     spec.name, pack_dir, len(tools), len(skills),
                 )
 
+        # Scan native subagents (second tier — user packs already take priority)
+        if NATIVE_SUBAGENTS_PATH.is_dir():
+            for pack_dir in sorted(p for p in NATIVE_SUBAGENTS_PATH.iterdir() if p.is_dir()):
+                yaml_path = pack_dir / "subagent.yaml"
+                if not yaml_path.is_file():
+                    logger.debug(
+                        "SubagentRegistry: %s has no subagent.yaml — skipping",
+                        pack_dir,
+                    )
+                    continue
+
+                data = _load_yaml_file(yaml_path)
+                if data is None:
+                    continue
+
+                spec = _validate_and_build_spec(data, yaml_path, pack_dir)
+                if spec is None:
+                    continue
+
+                if spec.name in seen_names:
+                    logger.debug(
+                        "SubagentRegistry: skipping native %s — '%s' already loaded "
+                        "from a higher-priority path",
+                        pack_dir, spec.name,
+                    )
+                    continue
+
+                tools = _load_local_tools(pack_dir, spec.name)
+
+                skills: dict[str, str] = {}
+                skills_dir = pack_dir / "skills"
+                if skills_dir.is_dir():
+                    for skill_dir in sorted(
+                        p for p in skills_dir.iterdir() if p.is_dir()
+                    ):
+                        skills[skill_dir.name] = str(skill_dir.resolve())
+
+                seen_names.add(spec.name)
+                specs.append(spec)
+                local_tools[spec.name] = tools
+                local_skills[spec.name] = skills
+
+                logger.info(
+                    "SubagentRegistry: loaded native subagent '%s' from %s "
+                    "(%d local tool(s), %d local skill(s))",
+                    spec.name, pack_dir, len(tools), len(skills),
+                )
+
         logger.info("SubagentRegistry: %d subagent(s) loaded", len(specs))
-        return cls(
+        registry = cls(
             _specs=tuple(specs),
             _tool_registry=tool_registry,
             _local_tools_by_subagent=local_tools,
             _local_skills_by_subagent=local_skills,
         )
+        registry._validate_tool_tokens()
+        return registry
 
     @property
     def all_names(self) -> frozenset[str]:
@@ -491,6 +532,70 @@ class SubagentRegistry:
             A frozenset of subagent name strings.
         """
         return frozenset(s.name for s in self._specs)
+
+    @property
+    def degraded_names(self) -> frozenset[str]:
+        """Return names of subagents that have at least one invalid tool token.
+
+        A subagent is considered degraded when one or more of its
+        statically-resolvable tool tokens could not be resolved — either
+        at startup (bare names / module: tokens) or at runtime (local:
+        tokens dropped by ``_resolve_tool_tokens``).
+
+        Returns:
+            A frozenset of subagent name strings whose ``degraded_tokens``
+            tuple is non-empty, or that have runtime failures in
+            ``_runtime_degraded``.
+        """
+        startup = frozenset(s.name for s in self._specs if s.degraded_tokens)
+        return startup | frozenset(self._runtime_degraded)
+
+    def _validate_tool_tokens(self) -> None:
+        """Validate statically-resolvable tool tokens at startup.
+
+        Iterates all loaded specs and checks:
+        - bare ``<name>`` tokens against ``_tool_registry``
+        - ``module:<dotted.path>`` tokens via ``validate_module_token()``
+
+        Skips ``mcp:``, ``inherit``, and ``local:`` tokens — these are
+        dynamic or validated at runtime.
+
+        Rebuilds ``_specs`` as a new tuple (immutability preserved) where
+        any spec with invalid tokens has its ``degraded_tokens`` field set
+        to the tuple of unresolvable token strings.  Logs a WARNING for
+        each failure.
+        """
+        updated: list[SubagentSpec] = []
+        for spec in self._specs:
+            failed: list[str] = []
+            for token in spec.tool_tokens:
+                if token == "inherit" or token.startswith("mcp:") or token.startswith("local:"):
+                    continue
+                if token.startswith("module:"):
+                    module_path = token[len("module:"):]
+                    error = validate_module_token(module_path, spec.name)
+                    if error is not None:
+                        logger.warning(
+                            "SubagentRegistry: subagent '%s' — token '%s' invalid at "
+                            "startup: %s — marking as degraded",
+                            spec.name, token, error,
+                        )
+                        failed.append(token)
+                else:
+                    # Bare static name — look up in ToolRegistry
+                    tool = self._tool_registry.get(token)
+                    if tool is None:
+                        logger.warning(
+                            "SubagentRegistry: subagent '%s' — static tool '%s' not "
+                            "found in ToolRegistry at startup — marking as degraded",
+                            spec.name, token,
+                        )
+                        failed.append(token)
+
+            if failed:
+                spec = dataclasses.replace(spec, degraded_tokens=tuple(failed))
+            updated.append(spec)
+        self._specs = tuple(updated)
 
     def _filter_for_user(self, user_record: dict[str, Any]) -> list[SubagentSpec]:
         """Return specs allowed for the given user record.
@@ -545,10 +650,15 @@ class SubagentRegistry:
 
         for spec in allowed_specs:
             local_tools = self._local_tools_by_subagent.get(spec.name, {})
-            resolved_tools = _resolve_tool_tokens(
+            resolved_tools, failed_tokens = _resolve_tool_tokens(
                 spec.tool_tokens, request_tools, self._tool_registry,
                 local_tools, spec.name,
             )
+
+            # Track runtime failures in _runtime_degraded (never mutates _specs)
+            if failed_tokens:
+                existing = self._runtime_degraded.get(spec.name, frozenset())
+                self._runtime_degraded[spec.name] = existing | frozenset(failed_tokens)
 
             local_skills = self._local_skills_by_subagent.get(spec.name, {})
             resolved_skills = _resolve_skill_tokens(
@@ -564,6 +674,15 @@ class SubagentRegistry:
                 entry["tools"] = resolved_tools
             if resolved_skills:
                 entry["skills"] = resolved_skills
+            if spec.response_format is not None:
+                if "type" not in spec.response_format:
+                    logger.warning(
+                        "SubagentRegistry: subagent '%s' — response_format missing 'type' "
+                        "key — ignoring",
+                        spec.name,
+                    )
+                else:
+                    entry["response_format"] = spec.response_format
 
             result.append(entry)
 
@@ -601,120 +720,3 @@ class SubagentRegistry:
         return f"{_DELEGATION_PREAMBLE}\n\n" + "\n".join(snippets)
 
 
-def _resolve_tool_tokens(
-    tokens: tuple[str, ...],
-    request_tools: list,
-    tool_registry: Any,
-    local_tools: dict[str, Any],
-    spec_name: str,
-) -> list:
-    """Resolve raw YAML tool_tokens into callable/BaseTool instances.
-
-    Token forms:
-    - ``local:<name>`` — tool loaded from pack's tools/ dir
-    - ``mcp:<glob>`` — fnmatch filter on request_tools (MCP pool)
-    - ``inherit`` — all request_tools
-    - ``<name>`` (no prefix) — lookup in static tool_registry
-
-    Unknown / unresolvable tokens are logged as WARNING and dropped
-    (fail-closed; never raises).
-
-    Args:
-        tokens: Raw token strings from the YAML ``tool_tokens`` field.
-        request_tools: Per-request MCP tool pool (already ToolPolicy-filtered).
-        tool_registry: Static ``ToolRegistry`` for bare-name tokens.
-        local_tools: Dict of locally loaded tools for this subagent.
-        spec_name: Subagent name, used in log messages.
-
-    Returns:
-        List of resolved tool/callable instances (deduplicated by name,
-        preserving order of first occurrence).
-    """
-    resolved: list = []
-    seen_names: set[str] = set()
-
-    def _add(tool: object) -> None:
-        name = getattr(tool, "name", None) or str(id(tool))
-        if name not in seen_names:
-            seen_names.add(name)
-            resolved.append(tool)
-
-    for token in tokens:
-        if token == "inherit":
-            for t in request_tools:
-                _add(t)
-        elif token.startswith("local:"):
-            tool_name = token[len("local:"):]
-            tool = local_tools.get(tool_name)
-            if tool is None:
-                logger.warning(
-                    "SubagentRegistry: subagent '%s' references unknown local "
-                    "tool '%s' — dropping (not found in pack's tools/ dir)",
-                    spec_name, tool_name,
-                )
-            else:
-                _add(tool)
-        elif token.startswith("mcp:"):
-            glob = token[len("mcp:"):]
-            matched = [t for t in request_tools if fnmatch.fnmatch(t.name, glob)]
-            for t in matched:
-                _add(t)
-        else:
-            # Bare static tool name — global ToolRegistry
-            tool = tool_registry.get(token)
-            if tool is None:
-                logger.warning(
-                    "SubagentRegistry: subagent '%s' references unknown static "
-                    "tool '%s' — dropping (tool not found in ToolRegistry)",
-                    spec_name, token,
-                )
-            else:
-                _add(tool)
-
-    return resolved
-
-
-def _resolve_skill_tokens(
-    tokens: tuple[str, ...],
-    local_skills: dict[str, str],
-    spec_name: str,
-) -> list[str]:
-    """Resolve raw YAML skill_tokens into absolute path strings.
-
-    Token forms:
-    - ``local:<name>`` — skill directory inside the pack's skills/ dir
-
-    Unknown / unresolvable tokens are logged as WARNING and dropped
-    (fail-closed; never raises).
-
-    Args:
-        tokens: Raw token strings from the YAML ``skill_tokens`` field.
-        local_skills: Dict of {skill_name → abs_path} for this subagent.
-        spec_name: Subagent name, used in log messages.
-
-    Returns:
-        List of resolved absolute path strings (deduplicated, order preserved).
-    """
-    resolved: list[str] = []
-    seen: set[str] = set()
-
-    for token in tokens:
-        if token.startswith("local:"):
-            skill_name = token[len("local:"):]
-            path = local_skills.get(skill_name)
-            if path is None:
-                logger.warning(
-                    "SubagentRegistry: subagent '%s' references unknown local "
-                    "skill '%s' — dropping (not found in pack's skills/ dir)",
-                    spec_name, skill_name,
-                )
-            elif path not in seen:
-                seen.add(path)
-                resolved.append(path)
-        else:
-            logger.warning(
-                "SubagentRegistry: subagent '%s' — unknown skill token form '%s' — dropping",
-                spec_name, token,
-            )
-
-    return resolved

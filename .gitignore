@@ -218,3 +218,4 @@ dump.rdb
 
 # Local Claude Code settings
 .claude/settings.local.json
+.claude/worktrees/

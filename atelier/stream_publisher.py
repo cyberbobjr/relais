@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from common.envelope import Envelope
-    from atelier.progress_config import ProgressConfig
+    from atelier.display_config import DisplayConfig
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class StreamPublisher:
         channel: str,
         correlation_id: str,
         source_envelope: "Envelope | None" = None,
-        progress_config: "ProgressConfig | None" = None,
+        display_config: "DisplayConfig | None" = None,
     ) -> None:
         """Initialise the publisher for a specific channel and correlation ID.
 
@@ -64,10 +64,9 @@ class StreamPublisher:
             source_envelope: When provided, progress events are additionally
                 published to ``relais:messages:outgoing:{channel}`` so that
                 non-streaming adapters (e.g. Discord) can display them.
-            progress_config: Optional ProgressConfig controlling which events
-                are published and whether the outgoing stream is written.
-                When None, all progress events are published unconditionally
-                (backward-compatible behaviour).
+            display_config: Optional DisplayConfig controlling which events
+                are published. When None, all progress events are published
+                unconditionally.
         """
         self._redis = redis_conn
         self._channel = channel
@@ -79,7 +78,7 @@ class StreamPublisher:
             f"relais:messages:outgoing:{channel}" if source_envelope is not None else None
         )
         self._source_envelope = source_envelope
-        self._progress_config = progress_config
+        self._display_config = display_config
         self._seq: int = 0
 
     async def push_chunk(self, chunk: str, is_final: bool = False) -> None:
@@ -112,11 +111,11 @@ class StreamPublisher:
         UX feedback during long tool calls (e.g. typing indicator labels,
         progress bars) without waiting for the final LLM reply.
 
-        When a ``ProgressConfig`` was supplied at construction time, the method
+        When a ``DisplayConfig`` was supplied at construction time, the method
         checks the master ``enabled`` flag and the per-event flag before
-        publishing.  It also truncates ``detail`` to ``detail_max_length`` and
-        honours ``publish_to_outgoing``.  When no ``ProgressConfig`` is present
-        the original unconditional behaviour is preserved.
+        publishing, and truncates ``detail`` to ``detail_max_length``.
+        When no ``DisplayConfig`` is present all progress events are published
+        unconditionally.
 
         The entry uses ``is_final='0'`` and carries ``type='progress'`` so
         that consumers can filter it out of the token stream.
@@ -127,7 +126,7 @@ class StreamPublisher:
             detail: Human-readable detail string, e.g. the tool name or
                 a truncated preview of the tool result.
         """
-        cfg = self._progress_config
+        cfg = self._display_config
 
         if cfg is not None:
             # Master switch
@@ -152,13 +151,8 @@ class StreamPublisher:
         )
         self._seq += 1
 
-        # Publish to outgoing stream only if enabled (or no config — legacy path)
-        publish_to_outgoing = cfg.publish_to_outgoing if cfg is not None else True
-        if (
-            publish_to_outgoing
-            and self._outgoing_key is not None
-            and self._source_envelope is not None
-        ):
+        # Always publish to outgoing when source_envelope is available.
+        if self._outgoing_key is not None and self._source_envelope is not None:
             await self._publish_progress_to_outgoing(event, detail)
 
     async def _publish_progress_to_outgoing(self, event: str, detail: str) -> None:

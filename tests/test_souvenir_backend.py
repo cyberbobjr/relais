@@ -11,6 +11,11 @@ import pytest
 from unittest.mock import MagicMock, patch, call
 
 from atelier.souvenir_backend import SouvenirBackend
+from common.envelope_actions import (
+    ACTION_MEMORY_FILE_LIST,
+    ACTION_MEMORY_FILE_READ,
+    ACTION_MEMORY_FILE_WRITE,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -58,7 +63,7 @@ def test_write_success() -> None:
     result = backend.write("/memories/notes.md", "hello world")
 
     backend._request.assert_called_once_with(
-        "file_write",
+        ACTION_MEMORY_FILE_WRITE,
         path="/memories/notes.md",
         content="hello world",
         overwrite=False,
@@ -132,9 +137,9 @@ def test_edit_success_single_occurrence() -> None:
 
     def fake_request(action, **kwargs):
         call_count["n"] += 1
-        if action == "file_read":
+        if action == ACTION_MEMORY_FILE_READ:
             return {"ok": True, "content": "hello world"}
-        if action == "file_write":
+        if action == ACTION_MEMORY_FILE_WRITE:
             return {"ok": True}
         return {"ok": False, "error": "unexpected"}
 
@@ -147,7 +152,7 @@ def test_edit_success_single_occurrence() -> None:
     assert result.files_update is None
 
     # Verify the written content
-    write_call = [c for c in backend._request.call_args_list if c[0][0] == "file_write"][0]
+    write_call = [c for c in backend._request.call_args_list if c[0][0] == ACTION_MEMORY_FILE_WRITE][0]
     assert "goodbye world" in write_call[1]["content"]
 
 
@@ -178,7 +183,7 @@ def test_edit_replace_all_replaces_all_occurrences() -> None:
     backend, _ = _make_backend()
 
     def fake_request(action, **kwargs):
-        if action == "file_read":
+        if action == ACTION_MEMORY_FILE_READ:
             return {"ok": True, "content": "cat cat cat"}
         return {"ok": True}
 
@@ -188,7 +193,7 @@ def test_edit_replace_all_replaces_all_occurrences() -> None:
 
     assert result.error is None
     assert result.occurrences == 3
-    write_call = [c for c in backend._request.call_args_list if c[0][0] == "file_write"][0]
+    write_call = [c for c in backend._request.call_args_list if c[0][0] == ACTION_MEMORY_FILE_WRITE][0]
     assert write_call[1]["content"] == "dog dog dog"
 
 
@@ -223,7 +228,7 @@ def test_ls_info_normalises_path_without_trailing_slash() -> None:
 
     backend.ls_info("/memories")
 
-    backend._request.assert_called_once_with("file_list", path="/memories/")
+    backend._request.assert_called_once_with(ACTION_MEMORY_FILE_LIST, path="/memories/")
 
 
 def test_ls_info_returns_empty_on_failure() -> None:
@@ -268,9 +273,9 @@ def test_grep_raw_finds_matching_lines() -> None:
     backend, _ = _make_backend()
 
     def fake_request(action, **kwargs):
-        if action == "file_list":
+        if action == ACTION_MEMORY_FILE_LIST:
             return {"ok": True, "files": [{"path": "/memories/notes.md", "size": 30, "modified_at": ""}]}
-        if action == "file_read":
+        if action == ACTION_MEMORY_FILE_READ:
             return {"ok": True, "content": "hello world\nfoo bar\nhello again"}
         return {"ok": False}
 
@@ -289,9 +294,9 @@ def test_grep_raw_returns_empty_when_no_match() -> None:
     backend, _ = _make_backend()
 
     def fake_request(action, **kwargs):
-        if action == "file_list":
+        if action == ACTION_MEMORY_FILE_LIST:
             return {"ok": True, "files": [{"path": "/memories/notes.md", "size": 10, "modified_at": ""}]}
-        if action == "file_read":
+        if action == ACTION_MEMORY_FILE_READ:
             return {"ok": True, "content": "no match here\nor here"}
         return {"ok": False}
 

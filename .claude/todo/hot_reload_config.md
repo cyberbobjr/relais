@@ -46,7 +46,7 @@ Canal Pub/Sub : `relais:config:reload`
 |--------|---------|---------------|---------|
 | **Portail** | `portail/main.py` | `users`, `config` | `UserRegistry.reload()`, `RoleRegistry.reload()`, relit `unknown_user_policy`/`guest_profile` — **fail-closed guard implémenté** : refuse rechargement permissif si config valide déjà chargée (`_config_loaded_once`) |
 | **Sentinelle** | `sentinelle/main.py` | `users` | `ACLManager.reload()` — **fail-closed guard implémenté** : refuse rechargement permissif si ACL valide déjà chargée (`_config_loaded_once`) |
-| **Atelier** | `atelier/main.py` | `profiles`, `mcp_servers`, `atelier` | Remplace `_profiles`, `_mcp_servers_default`, `_progress_config`; MCP restart via `_restart_mcp_sessions()` (singleton McpSessionManager remplacé atomiquement sous `_mcp_lock`) |
+| **Atelier** | `atelier/main.py` | `profiles`, `mcp_servers`, `atelier` | Remplace `_profiles`, `_mcp_servers_default`, `_display_config`; MCP restart via `_restart_mcp_sessions()` (singleton McpSessionManager remplacé atomiquement sous `_mcp_lock`) |
 | **Souvenir** | `souvenir/main.py` | `channels` | Met à jour `_channels`, boucle `_process_outgoing_streams` lit `self._channels` dynamiquement |
 
 Toutes les méthodes `_on_*_reload()` gardent l'ancienne config en cas d'erreur YAML.

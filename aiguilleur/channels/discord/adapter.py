@@ -15,7 +15,7 @@ Two envelope types are consumed from relais:messages:outgoing:discord:
 Progressive streaming (token-by-token) is disabled on this channel.  Atelier
 publishes the full response to relais:messages:outgoing:discord after the
 agentic execution completes.  Progress event publishing is controlled by
-``ProgressConfig`` (config/atelier.yaml, section ``progress:``).
+``DisplayConfig`` (config/atelier.yaml, section ``display:``).
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_INCOMING, ACTION_MESSAGE_PROGRESS
 from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER, AiguilleurCtx, AtelierCtx
 from common.config_loader import get_default_llm_profile
+from common.streams import STREAM_OUTGOING_FAILED
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
 
@@ -355,10 +356,10 @@ class _RelaisDiscordClient(discord.Client):
             logger.warning("Redis connection not available for consumer group creation")
             return
         try:
-            await self._redis_conn.xgroup_create(stream, group, mkstream=True)
+            await self._redis_conn.xgroup_create(stream, group, id="$", mkstream=True)
         except Exception as exc:
             if "BUSYGROUP" not in str(exc):
-                logger.warning("Consumer group error: %s", exc)
+                raise
 
     async def _resolve_discord_channel(
         self, envelope: Envelope
@@ -450,7 +451,7 @@ class _RelaisDiscordClient(discord.Client):
         if not channel:
             return
 
-        preview = envelope.content[:80] + "…" if len(envelope.content) > 80 else envelope.content
+        preview = envelope.content[:100] + "…" if len(envelope.content) > 100 else envelope.content
         logger.debug(
             "SEND discord | corr=%s | channel=%s | content=%r",
             envelope.correlation_id[:8],
@@ -508,7 +509,7 @@ class _RelaisDiscordClient(discord.Client):
                                 exc,
                             )
                             await self._redis_conn.xadd(
-                                "relais:messages:outgoing:failed",
+                                STREAM_OUTGOING_FAILED,
                                 {
                                     "source": self.stream_out,
                                     "message_id": message_id,

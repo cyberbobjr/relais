@@ -62,7 +62,7 @@ Every pipeline stream message wraps its content in an **Envelope**.
 | `session_id` | `string` | Stable session identifier (used by Souvenir for context lookup) |
 | `correlation_id` | `string` | UUID, propagated end-to-end for tracing |
 | `timestamp` | `float` | Unix epoch (seconds) |
-| `action` | `string` | Self-describing action token (e.g. `message_incoming`, `message_validated`, `message_task`) from `common/envelope_actions.py` |
+| `action` | `string` | Self-describing action token (e.g. `message_incoming`, `message_validated`, `message_task`) from `common/envelope_actions.py`. **Required** — `Envelope.to_json()` raises `ValueError` if `action` is empty. Producing sites must set it explicitly after `Envelope.from_parent()` / `Envelope.create_response_to()` (both intentionally clear the parent action). |
 | `traces` | `array` | Pipeline trace list (each entry: `{brick: string, action: string, timestamp: float}`) |
 | `context` | `object` | Namespaced context dictionary. Each brick writes only to `context[CTX_SELF]` but may read any namespace. Namespace constants defined in `common/contexts.py` |
 | `media_refs` | `array` | List of `MediaRef` objects (see below) |
@@ -186,6 +186,34 @@ XADD relais:tasks:failed * payload <original Envelope JSON>
 
 ---
 
+### `relais:messages:outgoing:failed` (DLQ)
+
+**Direction**: Aiguilleur channel adapters → (monitoring / manual review)
+**Consumer group**: none (manual consumption)
+**Stream name constant**: `common.streams.STREAM_OUTGOING_FAILED`
+
+Dead-Letter Queue for outgoing messages that a channel adapter failed to deliver to the
+external platform (e.g. Discord message send exceptions, WhatsApp gateway HTTP errors).
+Written by the adapter that owns `relais:messages:outgoing:{channel}`.
+
+```
+XADD relais:messages:outgoing:failed * source      "relais:messages:outgoing:discord"
+                                       message_id  "<stream entry id>"
+                                       payload     "<original Envelope JSON>"
+                                       reason      "<error string>"
+                                       failed_at   "<Unix epoch float as string>"
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source` | `string` | Origin outgoing stream (e.g. `relais:messages:outgoing:discord`) |
+| `message_id` | `string` | Entry ID of the failed message in its source stream |
+| `payload` | `string` | Original Envelope JSON that failed to deliver |
+| `reason` | `string` | Human-readable error message |
+| `failed_at` | `string` | Unix epoch float as string |
+
+---
+
 ### `relais:messages:outgoing_pending`
 
 **Direction**: Atelier → Sentinelle
@@ -234,30 +262,74 @@ XADD relais:messages:outgoing:discord * payload <Envelope JSON>
 **TTL**: 300 seconds after `finalize()` call
 **Max entries**: ~500 (APPROX trimming)
 
-Carries incremental LLM text chunks for real-time progressive rendering.
-Only produced for channels in `STREAMING_CAPABLE_CHANNELS`: `telegram`, `tui`.
+Carries incremental LLM text chunks and pipeline progress events for real-time progressive rendering.
+Produced for channels in `STREAMING_CAPABLE_CHANNELS`: `telegram`, `tui`, `rest`.
 
+Each entry carries a `type` field that distinguishes two kinds of entries:
+
+**Token entry** (text fragment):
 ```
-XADD relais:messages:streaming:telegram:550e8400-... * chunk "Hello, "
-                                                        seq   "0"
-                                                        is_final "0"
+XADD relais:messages:streaming:rest:550e8400-... * type     "token"
+                                                    chunk    "Hello, "
+                                                    seq      "0"
+                                                    is_final "0"
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `chunk` | `string` | Text fragment (empty string `""` for the final sentinel) |
-| `seq` | `string` | Monotonically increasing integer (as string) |
-| `is_final` | `string` | `"1"` for the terminal sentinel entry, `"0"` otherwise |
+**Progress entry** (tool call, subagent start, …):
+```
+XADD relais:messages:streaming:rest:550e8400-... * type     "progress"
+                                                    chunk    ""
+                                                    seq      "1"
+                                                    is_final "0"
+                                                    event    "tool_call"
+                                                    detail   "Calling web_search…"
+```
 
-**Reading pattern** (Aiguilleur):
+**Final sentinel** (signals end of stream):
+```
+XADD relais:messages:streaming:rest:550e8400-... * type     "token"
+                                                    chunk    ""
+                                                    seq      "42"
+                                                    is_final "1"
+```
+
+| Field | Type | Present on | Description |
+|-------|------|------------|-------------|
+| `type` | `string` | all | `"token"` for text fragments, `"progress"` for pipeline events |
+| `chunk` | `string` | all | Text fragment; empty string `""` on progress entries and the final sentinel |
+| `seq` | `string` | all | Monotonically increasing integer (as string) |
+| `is_final` | `string` | all | `"1"` for the terminal sentinel entry, `"0"` otherwise |
+| `event` | `string` | progress only | Event name: `"tool_call"`, `"tool_result"`, `"subagent_start"`, … |
+| `detail` | `string` | progress only | Human-readable context string |
+
+**Reading pattern** (consumer):
 ```python
 while True:
     results = await redis.xread({stream_key: last_id}, count=10, block=5000)
     for entry_id, fields in results[0][1]:
         last_id = entry_id
-        if fields["is_final"] == "1":
+        entry_type = fields.get("type", b"token")
+        if isinstance(entry_type, bytes):
+            entry_type = entry_type.decode()
+        if fields.get("is_final") == b"1" or fields.get("is_final") == "1":
             break
+        if entry_type == "token":
+            chunk = fields.get("chunk", b"")
+            # render text fragment
+        elif entry_type == "progress":
+            event = fields.get("event", b"")
+            detail = fields.get("detail", b"")
+            # display progress indicator
 ```
+
+**SSE mapping** (REST adapter `GET /docs/sse`):
+
+| Stream entry type | SSE event name | SSE data |
+|-------------------|---------------|----------|
+| `token` | `token` | `{"t": "<chunk>"}` |
+| `progress` | `progress` | `{"event": "<event>", "detail": "<detail>"}` |
+| is_final = 1 | `done` | `{"correlation_id": "…"}` |
+| timeout / error | `error` | `{"error": "<reason>", "correlation_id": "…"}` |
 
 ---
 
@@ -464,6 +536,25 @@ Hash fields: `{channel_name}` → `{Unix epoch float as string}`
 
 ---
 
+### `relais:whatsapp:pairing` (String, not Stream)
+
+**Type**: Redis String (JSON-encoded)
+**TTL**: 300 seconds
+**Direction**: `whatsapp_configure` tool / `python -m aiguilleur.channels.whatsapp configure --action pair` writes, WhatsApp adapter / operator reads
+**Key name constant**: `common.streams.KEY_WHATSAPP_PAIRING`
+
+Holds the context of an active WhatsApp QR pairing flow so the operator running
+`python -m aiguilleur.channels.whatsapp configure --action pair` (or the `whatsapp_configure` LangChain tool)
+can correlate QR display with gateway state. Cleared
+by `python -m aiguilleur.channels.whatsapp configure --action unpair` (or `whatsapp_configure(action="unpair")`) or when the TTL expires.
+
+```
+SET relais:whatsapp:pairing '{"phone":"+33612345678","started_at":1711234567.890,"correlation_id":"..."}' EX 300
+```
+
+The exact JSON schema is owned by `aiguilleur/channels/whatsapp/core.py` — see the module
+for the current field set.
+
 ---
 
 ## Pub/Sub Channels
@@ -528,6 +619,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:commands` | `commandant_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group` | Aiguilleur |
+| `relais:messages:outgoing:failed` | none (manual) | — (DLQ) |
 | `relais:memory:request` | `souvenir_group` | Souvenir |
 | `relais:memory:request` | `forgeron_archive_group` | Forgeron (archive action only — intent labeling + skill creation) |
 | `relais:skill:trace` | `forgeron_group` | Forgeron |

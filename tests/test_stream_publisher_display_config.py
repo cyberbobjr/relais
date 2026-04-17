@@ -1,11 +1,11 @@
-"""Unit tests for StreamPublisher with ProgressConfig gating — written TDD (RED first).
+"""Unit tests for StreamPublisher with DisplayConfig gating.
 
 Tests:
-1. push_progress does nothing if ProgressConfig(enabled=False)
+1. push_progress does nothing if DisplayConfig(enabled=False)
 2. push_progress skips a specific event when events[event]=False
 3. push_progress truncates detail to detail_max_length
-4. push_progress does not publish to outgoing if publish_to_outgoing=False
-5. Without ProgressConfig (None) → current behaviour preserved (everything published)
+4. push_progress publishes to outgoing when source_envelope is present
+5. Without DisplayConfig (None) → all progress events published unconditionally
 """
 
 from __future__ import annotations
@@ -35,23 +35,23 @@ def _make_redis() -> AsyncMock:
 
 
 # ---------------------------------------------------------------------------
-# 1. push_progress does nothing if ProgressConfig(enabled=False)
+# 1. push_progress does nothing if DisplayConfig(enabled=False)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_push_progress_disabled_by_progress_config() -> None:
-    """push_progress() does not call xadd when ProgressConfig.enabled is False.
+async def test_push_progress_disabled_by_display_config() -> None:
+    """push_progress() does not call xadd when DisplayConfig.enabled is False.
 
     When the master switch is off, no Redis call must be made for progress events.
     """
-    from atelier.progress_config import ProgressConfig
+    from atelier.display_config import DisplayConfig
 
     redis = _make_redis()
-    cfg = ProgressConfig(enabled=False)
+    cfg = DisplayConfig(enabled=False)
     pub = StreamPublisher(
-        redis, channel="discord", correlation_id="corr-off", progress_config=cfg
+        redis, channel="discord", correlation_id="corr-off", display_config=cfg
     )
 
     await pub.push_progress("tool_call", "some_tool")
@@ -69,18 +69,18 @@ async def test_push_progress_disabled_by_progress_config() -> None:
 async def test_push_progress_skips_disabled_event() -> None:
     """push_progress() does not publish when the specific event is disabled.
 
-    If ProgressConfig.events['tool_call'] is False, no xadd should be called
+    If DisplayConfig.events['tool_call'] is False, no xadd should be called
     for a 'tool_call' event, but other events should still be published.
     """
-    from atelier.progress_config import ProgressConfig
+    from atelier.display_config import DisplayConfig
 
     redis = _make_redis()
-    cfg = ProgressConfig(
+    cfg = DisplayConfig(
         enabled=True,
-        events={"tool_call": False, "tool_result": True, "subagent_start": True},
+        events={"tool_call": False, "tool_result": True, "subagent_start": True, "thinking": False},
     )
     pub = StreamPublisher(
-        redis, channel="discord", correlation_id="corr-event", progress_config=cfg
+        redis, channel="discord", correlation_id="corr-event", display_config=cfg
     )
 
     # tool_call is disabled — must not publish
@@ -102,15 +102,15 @@ async def test_push_progress_skips_disabled_event() -> None:
 async def test_push_progress_truncates_detail() -> None:
     """push_progress() truncates detail string to detail_max_length characters.
 
-    When detail is longer than ProgressConfig.detail_max_length, the published
+    When detail is longer than DisplayConfig.detail_max_length, the published
     detail must be truncated to that length.
     """
-    from atelier.progress_config import ProgressConfig
+    from atelier.display_config import DisplayConfig
 
     redis = _make_redis()
-    cfg = ProgressConfig(enabled=True, detail_max_length=10)
+    cfg = DisplayConfig(enabled=True, detail_max_length=10)
     pub = StreamPublisher(
-        redis, channel="discord", correlation_id="corr-trunc", progress_config=cfg
+        redis, channel="discord", correlation_id="corr-trunc", display_config=cfg
     )
 
     long_detail = "A" * 50  # longer than limit of 10
@@ -123,62 +123,61 @@ async def test_push_progress_truncates_detail() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. push_progress does not publish to outgoing if publish_to_outgoing=False
+# 4. push_progress publishes to outgoing when source_envelope is present
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_push_progress_no_outgoing_when_publish_to_outgoing_false() -> None:
-    """push_progress() does not publish to outgoing stream when publish_to_outgoing=False.
+async def test_push_progress_publishes_to_outgoing_when_source_envelope_present() -> None:
+    """push_progress() always publishes to outgoing when source_envelope is set.
 
-    Even with a source_envelope present, the outgoing xadd must be suppressed
-    when ProgressConfig.publish_to_outgoing is False.
+    Both the streaming stream and the outgoing stream must receive an entry.
     """
-    from atelier.progress_config import ProgressConfig
+    from atelier.display_config import DisplayConfig
     from common.envelope import Envelope
 
     redis = _make_redis()
-    cfg = ProgressConfig(enabled=True, publish_to_outgoing=False)
+    cfg = DisplayConfig(enabled=True)
     src = Envelope(
         content="hello",
         sender_id="discord:1",
         channel="discord",
         session_id="sess",
-        correlation_id="corr-nout",
+        correlation_id="corr-out",
     )
     pub = StreamPublisher(
         redis,
         channel="discord",
-        correlation_id="corr-nout",
+        correlation_id="corr-out",
         source_envelope=src,
-        progress_config=cfg,
+        display_config=cfg,
     )
 
     await pub.push_progress("tool_call", "a_tool")
 
-    # Only one xadd (streaming key), not two
-    assert redis.xadd.await_count == 1
-    key = redis.xadd.await_args_list[0].args[0]
-    assert key == "relais:messages:streaming:discord:corr-nout"
+    # streaming + outgoing = 2 calls
+    assert redis.xadd.await_count == 2
+    keys = [c.args[0] for c in redis.xadd.await_args_list]
+    assert "relais:messages:streaming:discord:corr-out" in keys
+    assert "relais:messages:outgoing:discord" in keys
 
 
 # ---------------------------------------------------------------------------
-# 5. Without ProgressConfig (None) → current behaviour preserved
+# 5. Without DisplayConfig (None) → all progress events published unconditionally
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_push_progress_without_progress_config_publishes_normally() -> None:
-    """When progress_config is None, push_progress() behaves exactly as before.
+async def test_push_progress_without_display_config_publishes_normally() -> None:
+    """When display_config is None, push_progress() publishes without filtering.
 
-    No filtering, no truncation. The streaming xadd is always called.
+    No gating, no truncation. The streaming xadd is always called.
     """
     redis = _make_redis()
     pub = StreamPublisher(redis, channel="discord", correlation_id="corr-none")
 
-    # No progress_config argument — defaults to None
     await pub.push_progress("tool_call", "search_web")
 
     assert redis.xadd.await_count == 1
@@ -189,11 +188,11 @@ async def test_push_progress_without_progress_config_publishes_normally() -> Non
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_push_progress_without_progress_config_outgoing_still_published() -> None:
-    """When progress_config is None, outgoing xadd is still called with source_envelope.
+async def test_push_progress_without_display_config_outgoing_still_published() -> None:
+    """When display_config is None, outgoing xadd is still called with source_envelope.
 
-    Backward compatibility: if no ProgressConfig is passed, the existing behaviour
-    (publish to outgoing when source_envelope is set) must be preserved.
+    If no DisplayConfig is passed, the outgoing stream is still populated when
+    source_envelope is provided (unconditional publish).
     """
     from common.envelope import Envelope
 

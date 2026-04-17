@@ -102,6 +102,7 @@ class ChannelConfig:
     profile: str | None = None
     prompt_path: str | None = None
     profile_ref: ProfileRef = field(default=_NO_PROFILE_REF, compare=False, hash=False)
+    extras: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Sync profile_ref with profile when constructing without an explicit profile_ref.
@@ -140,6 +141,12 @@ def load_channels_config() -> dict[str, ChannelConfig]:
         config_path: Path = resolve_config_path(_CHANNELS_CONFIG_FILE)
         raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
     except FileNotFoundError:
+        import logging
+        logging.getLogger("aiguilleur.config").warning(
+            "aiguilleur.yaml not found — falling back to discord-only default. "
+            "Run initialize_user_dir() or copy config/aiguilleur.yaml.default to %s",
+            _CHANNELS_CONFIG_FILE,
+        )
         return {
             "discord": ChannelConfig(name="discord", enabled=True, streaming=True)
         }
@@ -149,6 +156,14 @@ def load_channels_config() -> dict[str, ChannelConfig]:
     result: dict[str, ChannelConfig] = {}
     for name, values in channels_raw.items():
         values = values or {}
+        # Collect channel-specific extras (all keys not in the hard field list)
+        _HARD_FIELDS = {
+            "enabled", "streaming", "type", "command", "args",
+            "class", "max_restarts", "profile", "prompt_path",
+        }
+        extras: dict[str, Any] = {
+            k: v for k, v in values.items() if k not in _HARD_FIELDS
+        }
         result[name] = ChannelConfig(
             name=name,
             enabled=bool(values.get("enabled", True)),
@@ -160,6 +175,7 @@ def load_channels_config() -> dict[str, ChannelConfig]:
             max_restarts=_parse_int(values.get("max_restarts", 5), default=5),
             profile=values.get("profile") or None,
             prompt_path=values.get("prompt_path") or None,
+            extras=extras,
         )
 
     return result

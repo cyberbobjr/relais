@@ -16,6 +16,7 @@ import pytest
 
 from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_INCOMING
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,7 @@ def _make_envelope(
         session_id="sess-001",
         correlation_id="corr-001",
         context=context or {},
+        action=ACTION_MESSAGE_INCOMING,
     )
 
 

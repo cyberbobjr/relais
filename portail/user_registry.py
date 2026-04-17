@@ -122,20 +122,33 @@ class UserRegistry:
         raw_id = sender_id.split(":", 1)[1]
 
         # Exact (channel, context, raw_id) match — highest precision.
-        # NOTE: for channel == "rest", REST API keys are stored *only* in
-        # _sender_index (hashed via SHA-256), never in _by_identifier.
-        # This lookup will always miss for REST senders; the hash-based
-        # _sender_index fallback below is the authoritative path for REST.
-        # Do NOT "fix" this by storing plain REST keys here — they are
-        # intentionally kept hashed for security.
         record = self._by_identifier.get((channel, context, raw_id))
         if record is not None:
             return record
 
         # sender_index fallback: works across contexts but within the channel.
-        # REST API keys are stored hashed — hash the raw_id before lookup.
-        lookup_id = _hash_api_key(raw_id) if channel == "rest" else raw_id
-        return self._sender_index.get(f"{channel}:{lookup_id}")
+        # REST: the auth middleware already resolved the API key and stamped
+        # sender_id="rest:<user_id>".  Portail does a direct lookup — no
+        # hashing.  The sender_index contains both "rest:<user_id>" and
+        # "rest:<key_hash>" entries (built at load time).
+        return self._sender_index.get(f"{channel}:{raw_id}")
+
+    def resolve_rest_api_key(self, raw_key: str) -> UserRecord | None:
+        """Resolve a raw REST API key to a UserRecord.
+
+        Hashes the key with HMAC-SHA256 and looks it up in the
+        sender_index.  Used exclusively by the REST auth middleware.
+        ``resolve_user`` does NOT hash — it expects a pre-resolved
+        sender_id (e.g. ``rest:usr_admin``).
+
+        Args:
+            raw_key: The raw API key from the Authorization header.
+
+        Returns:
+            A ``UserRecord`` if the key is valid, ``None`` otherwise.
+        """
+        key_hash = _hash_api_key(raw_key)
+        return self._sender_index.get(f"rest:{key_hash}")
 
     def build_guest_record(self) -> UserRecord:
         """Build a synthetic guest UserRecord with role data from the configured guest role.
@@ -286,6 +299,11 @@ class UserRegistry:
                         if key:
                             key_hash = _hash_api_key(str(key))
                             new_sender_index[f"rest:{key_hash}"] = record
+                    # Also index by user_id so Portail can resolve
+                    # sender_id="rest:usr_xxx" stamped by the REST auth
+                    # middleware (which replaces the raw API key with the
+                    # stable user_id before publishing to the pipeline).
+                    new_sender_index[f"rest:{user_id}"] = record
                 else:
                     for ctx, raw_id in contexts.items():
                         if raw_id:

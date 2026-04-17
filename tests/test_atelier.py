@@ -8,6 +8,7 @@ import pytest
 
 from common.envelope import Envelope
 from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, CTX_ATELIER
+from common.envelope_actions import ACTION_MESSAGE_INCOMING
 from atelier.agent_executor import AgentExecutionError, AgentResult
 
 
@@ -38,6 +39,7 @@ def _make_envelope(
         session_id="sess-abc",
         correlation_id="corr-test-001",
         context=context or {},
+        action=ACTION_MESSAGE_INCOMING,
     )
 
 

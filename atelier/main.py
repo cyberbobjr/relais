@@ -18,7 +18,13 @@ Key classes:
   ``agent.astream(stream_mode=["updates", "messages"], subgraphs=True,
   version="v2")``; accepts an optional ``backend: BackendProtocol`` (for
   DeepAgents persistent memory) and ``progress_callback`` forwarded from
-  the caller.
+  the caller.  Before dispatching to the model, the executor prepends a
+  ``<relais_execution_context>`` block to the first user message containing
+  ``sender_id``, ``channel``, ``session_id``, ``correlation_id`` and
+  ``reply_to``.  This block is technical metadata used by skills that need
+  routing information (notably ``channel-setup`` for WhatsApp pairing); the
+  system prompt explicitly instructs the model not to echo it back to the
+  user.
 * ``McpSessionManager`` (atelier.mcp_session_manager) — **singleton** managing
   stdio/SSE MCP server lifecycle; started once at brick startup via ``start()``,
   shared across all requests; per-server ``asyncio.Lock`` serializes stdio pipe
@@ -112,16 +118,28 @@ Message flow (one task at a time):
     │  (7) if skills_used and tool_call_count > 0 → publish ACTION_SKILL_TRACE envelope
     │      to relais:skill:trace (fire-and-forget → Forgeron stores the trace)
     │      └── Forgeron handles changelog + consolidation autonomously
-    │  (8) build response Envelope; stamp context["atelier"]["skills_used"] if any;
-    │      publish archive to relais:memory:request (Souvenir persists full LangChain history)
+    │  (8) build response Envelope, stamp response_env.action = ACTION_MESSAGE_OUTGOING_PENDING
+    │      (required: Envelope.to_json() raises if action is unset), stamp
+    │      context["atelier"]["skills_used"] if any; publish archive to relais:memory:request
+    │      (Souvenir persists full LangChain history)
     └──► relais:messages:outgoing_pending
 
 Loop guard (AgentExecutor):
-  If the same named tool returns ``status="error"`` 5 consecutive times,
-  ``AgentExecutor.execute()`` raises ``AgentExecutionError`` to abort the
-  request and prevent infinite tool-error loops (e.g. Mistral parallel-tool-
-  call bug with ``write_todos``).  Unnamed tools (name == "?") are excluded
-  from grouping to avoid false positives.
+  ``ToolErrorGuard`` tracks tool errors during the agentic loop.  If the same
+  named tool returns ``status="error"`` 5 consecutive times, or if 8 total
+  errors accumulate across all tools, ``AgentExecutor.execute()`` raises
+  ``AgentExecutionError`` to abort the request and prevent infinite tool-error
+  loops (e.g. Mistral parallel-tool-call bug with ``write_todos``).  The total
+  limit (8) is intentionally higher than the consecutive limit (5): the system
+  prompt includes a ``SELF_DIAGNOSIS_PROMPT`` that instructs the agent to stop
+  and re-read the SKILL.md troubleshooting sections after repeated errors
+  instead of blindly retrying — the extra headroom lets the self-diagnosis
+  loop actually exercise the fix.  Unnamed tools (name == "?") are excluded
+  from consecutive grouping to avoid false positives.  On
+  ``AgentExecutionError``, the partial conversation state is captured into
+  ``exc.messages_raw`` and forwarded to both ``ErrorSynthesizer`` (user-
+  visible error reply) and Forgeron (skill improvement trace with full
+  conversation context).
 
 XACK contract:
   - Return True  → ACK (success, or AgentExecutionError/ExhaustedRetriesError
@@ -143,7 +161,7 @@ channels each text chunk is also published via StreamPublisher for real-time
 rendering before the full reply is ready.  Discord receives a final reply only,
 with live progress events (tool_call, tool_result, subagent_start) sent to
 ``relais:messages:outgoing:{channel}`` as ``message_type=progress`` envelopes.
-Publishing is governed by ``ProgressConfig`` (atelier.yaml ``progress:`` section).
+Publishing is governed by ``DisplayConfig`` (atelier.yaml ``display:`` section).
 """
 
 import asyncio
@@ -157,7 +175,6 @@ from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
 from common.streams import (
-    STREAM_LOGS,
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
@@ -187,7 +204,7 @@ from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
 from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
-from atelier.progress_config import load_progress_config, ProgressConfig
+from atelier.display_config import load_display_config, DisplayConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from atelier.tool_policy import ToolPolicy
@@ -200,14 +217,6 @@ logger = logging.getLogger("atelier")
 # even if configure_logging_once() was skipped or root-level handlers were
 # removed.  This guarantees that logger.info() calls always appear in the
 # supervisord stdout log file.
-import sys as _sys
-if not logger.handlers:
-    _handler = logging.StreamHandler(_sys.stdout)
-    _handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)-18s | %(message)s"
-    ))
-    logger.addHandler(_handler)
-    logger.setLevel(logging.DEBUG)
 
 # Directory containing soul/channels/roles/policies prompts.
 # Resolved via the config cascade so users can override in ~/.relais/prompts/.
@@ -241,7 +250,7 @@ class Atelier(BrickBase):
         # subsequent safe_reload() checkpoints share the same code path.
         self._profiles: dict = {}
         self._mcp_servers_default: dict = {}
-        self._progress_config: ProgressConfig | None = None
+        self._display_config: DisplayConfig | None = None
         self._load()
 
         # Base directory for role-based skill resolution — resolved once at
@@ -282,7 +291,7 @@ class Atelier(BrickBase):
         """Load Atelier's runtime configuration from disk.
 
         Refreshes ``_profiles``, ``_mcp_servers_default``, and
-        ``_progress_config``.  Called once by ``__init__`` for the initial
+        ``_display_config``.  Called once by ``__init__`` for the initial
         load.  Hot-reload goes through ``_build_config_candidate`` →
         ``_apply_config`` (which holds ``_config_lock``) instead.
 
@@ -295,7 +304,7 @@ class Atelier(BrickBase):
         """
         self._profiles = load_profiles()
         self._mcp_servers_default = load_for_sdk()
-        self._progress_config = load_progress_config()
+        self._display_config = load_display_config()
         logger.info("Atelier: configuration loaded from disk")
 
     def stream_specs(self) -> list[StreamSpec]:
@@ -380,14 +389,14 @@ class Atelier(BrickBase):
     def _build_config_candidate(self) -> dict:
         """Build a new configuration snapshot from disk without mutating self.
 
-        NOTE: each loader (load_profiles, load_for_sdk, load_progress_config,
+        NOTE: each loader (load_profiles, load_for_sdk, load_display_config,
         SubagentRegistry.load) re-reads its file from disk independently.  On
         a hot-reload triggered by a single file change this means up to four
         separate disk reads.  Acceptable for the current reload frequency;
         revisit if reload latency becomes a concern.
 
         Returns:
-            A dict with keys ``profiles``, ``mcp_servers``, ``progress``,
+            A dict with keys ``profiles``, ``mcp_servers``, ``display``,
             ``subagent_registry``.
 
         Raises:
@@ -397,7 +406,7 @@ class Atelier(BrickBase):
         return {
             "profiles": load_profiles(),
             "mcp_servers": load_for_sdk(),
-            "progress": load_progress_config(),
+            "display": load_display_config(),
             "subagent_registry": new_subagent_registry,
         }
 
@@ -416,7 +425,7 @@ class Atelier(BrickBase):
         old_mcp = self._mcp_servers_default
         self._profiles = cfg["profiles"]
         self._mcp_servers_default = cfg["mcp_servers"]
-        self._progress_config = cfg["progress"]
+        self._display_config = cfg["display"]
         if "subagent_registry" in cfg:
             self._subagent_registry = cfg["subagent_registry"]
         logger.info("Atelier: configuration applied")
@@ -447,6 +456,7 @@ class Atelier(BrickBase):
             A list of resolved Path instances.
         """
         from common.config_loader import CONFIG_SEARCH_PATH
+        from atelier.subagents import NATIVE_SUBAGENTS_PATH
 
         paths = [
             resolve_config_path("atelier/profiles.yaml"),
@@ -458,6 +468,9 @@ class Atelier(BrickBase):
             subagents_dir = base / "config" / "atelier" / "subagents"
             if subagents_dir.is_dir():
                 paths.append(subagents_dir)
+        # Also watch native subagents bundled in the source tree
+        if NATIVE_SUBAGENTS_PATH.is_dir():
+            paths.append(NATIVE_SUBAGENTS_PATH)
         return paths
 
     def _start_file_watcher(self, shutdown_event: asyncio.Event | None = None) -> "asyncio.Task | None":
@@ -685,6 +698,7 @@ class Atelier(BrickBase):
                 checkpointer=self._checkpointer,
                 subagents=subagents,
                 delegation_prompt=delegation_prompt,
+                display_config=self._display_config,
             )
 
             # 6. Execute
@@ -695,7 +709,7 @@ class Atelier(BrickBase):
                 channel=envelope.channel,
                 correlation_id=corr,
                 source_envelope=envelope,
-                progress_config=self._progress_config,
+                display_config=self._display_config,
             )
             if streaming:
                 await redis_conn.publish(
@@ -754,6 +768,7 @@ class Atelier(BrickBase):
 
             # 8. Build and publish response envelope
             response_env = Envelope.create_response_to(envelope, reply_text)
+            response_env.action = ACTION_MESSAGE_OUTGOING_PENDING
             atelier_ctx = ensure_ctx(response_env, CTX_ATELIER)
             atelier_ctx["user_message"] = envelope.content
             if skills_used:

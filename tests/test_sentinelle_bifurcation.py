@@ -18,6 +18,7 @@ import yaml
 
 from common.envelope import Envelope
 from common.contexts import CTX_PORTAIL
+from common.envelope_actions import ACTION_MESSAGE_INCOMING
 from common.user_record import UserRecord
 from sentinelle.acl import ACLManager
 
@@ -110,6 +111,7 @@ def _make_envelope(
         session_id="sess-001",
         correlation_id="corr-001",
         timestamp=0.0,
+        action=ACTION_MESSAGE_INCOMING,
         context={CTX_PORTAIL: {"user_record": user_record.to_dict()}},
         media_refs=[],
     )
@@ -559,6 +561,7 @@ class TestSentinelleFailClosed:
             session_id="sess-001",
             correlation_id="corr-001",
             timestamp=0.0,
+            action=ACTION_MESSAGE_INCOMING,
             media_refs=[],
         )
         redis = _make_redis(env)
@@ -597,6 +600,7 @@ class TestSentinelleFailClosed:
             session_id="sess-001",
             correlation_id="corr-001",
             timestamp=0.0,
+            action=ACTION_MESSAGE_INCOMING,
             media_refs=[],
         )
         redis = _make_redis(env)

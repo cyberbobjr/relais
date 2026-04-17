@@ -33,7 +33,7 @@ def _make_atelier_minimal():
     with (
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
-        patch("atelier.main.load_progress_config", return_value=fake_progress),
+        patch("atelier.main.load_display_config", return_value=fake_progress),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.ToolRegistry") as mock_tool_registry_cls,
@@ -88,9 +88,9 @@ def test_atelier_watch_paths_contains_four_paths() -> None:
     ):
         paths = atelier._config_watch_paths()
 
-    assert len(paths) == 3, (
-        "_config_watch_paths() must return 3 paths "
-        f"(profiles.yaml, mcp_servers.yaml, atelier.yaml), got {len(paths)}"
+    assert len(paths) == 4, (
+        "_config_watch_paths() must return 4 paths "
+        f"(profiles.yaml, mcp_servers.yaml, atelier.yaml, native subagents dir), got {len(paths)}"
     )
 
 

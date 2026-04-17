@@ -252,24 +252,18 @@ async def test_process_stream_busygroup_error_is_silenced(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_process_stream_non_busygroup_error_is_logged(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+async def test_process_stream_non_busygroup_error_raises(
+    tmp_path: Path,
 ) -> None:
-    """Non-BUSYGROUP errors from xgroup_create must be logged as warnings."""
-    import logging
-
+    """Non-BUSYGROUP errors from xgroup_create must propagate (not be silenced)."""
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
 
     conn.xgroup_create.side_effect = Exception("Some other Redis error")
-    conn.xreadgroup.side_effect = asyncio.CancelledError()
 
     event = asyncio.Event()
-    with caplog.at_level(logging.WARNING, logger="archiviste"):
-        with pytest.raises(asyncio.CancelledError):
-            await arc._process_stream(conn, event)
-
-    assert any("Consumer group error" in r.message for r in caplog.records)
+    with pytest.raises(Exception, match="Some other Redis error"):
+        await arc._process_stream(conn, event)
 
 
 @pytest.mark.unit
@@ -469,6 +463,7 @@ async def test_process_pipeline_streams_logs_envelope_fields(
     """
     import logging
     from common.envelope import Envelope
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
 
     arc = _make_archiviste(tmp_path)
     conn = _make_redis_conn()
@@ -479,6 +474,7 @@ async def test_process_pipeline_streams_logs_envelope_fields(
         channel="discord",
         session_id="sess-abc",
         correlation_id="9b8ddb16-0000-0000-0000-000000000000",
+        action=ACTION_MESSAGE_INCOMING,
     )
     envelope.add_trace("portail", "received")
     envelope.add_trace("sentinelle", "ACL verified")

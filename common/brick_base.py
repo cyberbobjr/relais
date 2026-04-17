@@ -154,6 +154,7 @@ class BrickBase(abc.ABC):
             brick_name: Stable brick identifier used for Redis ACL, logging,
                 and Pub/Sub channel names (e.g. ``"portail"``).
         """
+        configure_logging_once()
         self._brick_name = brick_name
         self._config_lock: asyncio.Lock = asyncio.Lock()
         self._logger = logging.getLogger(brick_name)
@@ -411,12 +412,15 @@ class BrickBase(abc.ABC):
         _name = getattr(self, "_brick_name", "brick")
 
         try:
-            await redis.xgroup_create(spec.stream, spec.group, mkstream=True)
-        except Exception as exc:  # noqa: BLE001
+            # id="$" means: only deliver messages that arrive *after* this group
+            # was created.  Messages already in the stream before the first
+            # startup (or after a group deletion) are intentionally skipped.
+            # This is the correct behaviour for channel relays: we never want to
+            # re-process historical outgoing replies that were already delivered.
+            await redis.xgroup_create(spec.stream, spec.group, id="$", mkstream=True)
+        except Exception as exc:
             if "BUSYGROUP" not in str(exc):
-                _log.warning(
-                    "%s: consumer group error for %s: %s", _name, spec.stream, exc
-                )
+                raise
 
         _log.info(
             "%s: listening on %s (group=%s, ack_mode=%s)",

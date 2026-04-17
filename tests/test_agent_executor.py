@@ -5,7 +5,7 @@ Tests validate:
 - execute() uses astream with v2 format (stream_mode, subgraphs, version)
 - execute() returns the full assembled reply from AI text tokens
 - execute() builds messages from context + envelope correctly
-- Buffer of 80 chars is respected before flushing to stream_callback
+- Buffer of STREAM_BUFFER_CHARS chars is respected before flushing to stream_callback
 - Remaining buffer is flushed at stream end
 - Transient errors (RateLimitError, InternalServerError, APIConnectionError) raise ExhaustedRetriesError after retries
 - ValueError with rate-limit message is classified as transient by _is_transient_provider_error
@@ -207,11 +207,17 @@ async def test_execute_streaming_calls_stream_callback() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_streaming_buffers_below_80_chars() -> None:
-    """Chunks below 80 chars are held in the buffer until stream ends."""
-    from atelier.agent_executor import AgentExecutor
+async def test_execute_streaming_buffers_below_threshold() -> None:
+    """Chunks below STREAM_BUFFER_CHARS are held in the buffer until stream ends.
 
-    short_text = "A" * 75  # below 80-char threshold
+    Uses DisplayConfig(final_only=False) so tokens flow through StreamBuffer
+    in real-time rather than being accumulated until the last tool call.
+    """
+    from atelier.agent_executor import AgentExecutor
+    from atelier.display_config import DisplayConfig
+    from atelier.streaming import STREAM_BUFFER_CHARS
+
+    short_text = "A" * (STREAM_BUFFER_CHARS - 1)  # below threshold
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         yield _v2_chunk("messages", (), (_ai_token(short_text), {}))
@@ -227,7 +233,12 @@ async def test_execute_streaming_buffers_below_80_chars() -> None:
         callback_count += 1
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+            display_config=DisplayConfig(final_only=False),
+        )
         result = await executor.execute(
             _make_envelope("Hi"), stream_callback=callback
         )
@@ -239,13 +250,21 @@ async def test_execute_streaming_buffers_below_80_chars() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_streaming_flushes_at_80_chars() -> None:
-    """Buffer flushes when it reaches 80 chars, then remainder is flushed at end."""
-    from atelier.agent_executor import AgentExecutor
+async def test_execute_streaming_flushes_at_threshold() -> None:
+    """Buffer flushes when it reaches STREAM_BUFFER_CHARS, then remainder is flushed at end.
 
-    chunk_a = "B" * 40
-    chunk_b = "C" * 40
-    remainder = "D" * 10
+    Uses DisplayConfig(final_only=False) so tokens flow through StreamBuffer
+    in real-time rather than being accumulated until the last tool call.
+    """
+    from atelier.agent_executor import AgentExecutor
+    from atelier.display_config import DisplayConfig
+    from atelier.streaming import STREAM_BUFFER_CHARS
+
+    # Two chunks that together exactly hit the threshold, plus a short remainder.
+    half = STREAM_BUFFER_CHARS // 2
+    chunk_a = "B" * half
+    chunk_b = "C" * half
+    remainder = "D" * (STREAM_BUFFER_CHARS - 1)  # below threshold — flushed at end
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         yield _v2_chunk("messages", (), (_ai_token(chunk_a), {}))
@@ -262,14 +281,19 @@ async def test_execute_streaming_flushes_at_80_chars() -> None:
         received.append(chunk)
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+            display_config=DisplayConfig(final_only=False),
+        )
         result = await executor.execute(
             _make_envelope("Hi"), stream_callback=callback
         )
 
     assert len(received) == 2
-    assert received[0] == "B" * 40 + "C" * 40
-    assert received[1] == "D" * 10
+    assert received[0] == chunk_a + chunk_b
+    assert received[1] == remainder
     assert result.reply_text == chunk_a + chunk_b + remainder
 
 

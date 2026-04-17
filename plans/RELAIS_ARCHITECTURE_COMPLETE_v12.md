@@ -388,7 +388,7 @@ L'Aiguilleur est un **processus unique** (`aiguilleur/main.py`) qui gère tous l
 - **Adaptateurs natifs** (`type: native`) — thread Python + `asyncio.run`, ex: `DiscordAiguilleur`
 - **Adaptateurs externes** (`type: external`) — `subprocess.Popen`, pour les adaptateurs non-Python
 - **Restart automatique** — backoff exponentiel `min(2^restart_count, 30)` secondes, `max_restarts` configurable
-- **Découverte automatique** — convention `aiguilleur.channels.{name}.adapter.{Name}Aiguilleur`, surchargeable via `class_path`
+- **Découverte automatique** — convention `aiguilleur.channels.{name}.adapter` (cherche la classe dont le nom se termine par `Aiguilleur`), surchargeable via `class_path`
 
 ### État d'implémentation des canaux
 
@@ -437,14 +437,16 @@ channels:
     class_path: null
     max_restarts: 5
 
-  # Exemples externes (non-Python)
   whatsapp:
     enabled: false
     streaming: false
-    type: external
-    command: "node"
-    args: ["aiguilleur/whatsapp/index.js"]
-    max_restarts: 3
+    profile: default
+    prompt_path: "channels/whatsapp_default.md"
+    max_restarts: 5
+    # L'adaptateur WhatsApp est un NativeAiguilleur Python qui héberge un
+    # serveur webhook aiohttp et dialogue avec la passerelle baileys-api
+    # (Node.js, lancée par scripts/run_baileys.py sous supervisord, programme
+    # `baileys-api` dans le groupe `optional`).
 ```
 
 **Paramètres clés :**
@@ -467,7 +469,7 @@ channels:
 | Slack | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
 | REST | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
 | TUI | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
-| WhatsApp | Exemple externe | Exemple de config `type: external`, pas de code livré |
+| WhatsApp | Implémenté (2026-04-10) | Adaptateur Python natif (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client REST vers la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, programme supervisord `baileys-api` dans le groupe `optional`). Installation, config et pairing QR pris en charge par le sous-agent `relais-config` via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall` (chargés via `tool_tokens: [module:aiguilleur.channels.whatsapp.tools]`). CLI : `python -m aiguilleur.channels.whatsapp`. Voir `docs/WHATSAPP_SETUP.md` et `plans/WHATSAPP_ADAPTER.md`. |
 
 ### Streaming progressif — édition temps réel
 

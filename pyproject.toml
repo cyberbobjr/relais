@@ -14,7 +14,7 @@ dependencies = [
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
     "pydantic>=2.9",
-    "deepagents",
+    "deepagents>=0.5.3",
     "mcp>=1.0.0",
     "sqlmodel>=0.0.37",
     "sqlalchemy[asyncio]>=2.0",
@@ -29,7 +29,11 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "langsmith>=0.7.23",
     "watchfiles>=0.21",
+    "aiohttp>=3.9",
 ]
+
+[project.optional-dependencies]
+whatsapp = ["qrcode>=8.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -44,11 +48,13 @@ packages = [
     "atelier",
     "souvenir",
     "archiviste",
+    "aiguilleur/channels/whatsapp",
 ]
 
 [tool.pytest.ini_options]
 timeout = 30
 asyncio_mode = "strict"
+testpaths = ["tests", "channels"]
 markers = [
     "unit: fast, isolated unit tests",
     "integration: tests that require external services (Redis, LiteLLM, etc.)",

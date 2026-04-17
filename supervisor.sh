@@ -13,7 +13,9 @@ usage() {
 Usage:
   ./supervisor.sh [--verbose] start all
   ./supervisor.sh [--verbose] restart all
+  ./supervisor.sh [--verbose] restart <service>
   ./supervisor.sh stop all
+  ./supervisor.sh stop <service>
   ./supervisor.sh reload all
   ./supervisor.sh status
   ./supervisor.sh clear
@@ -25,10 +27,14 @@ Options:
 
 Notes:
   - start all starts supervisord if needed then launches all programs.
+  - restart <service> restarts a single service (e.g. aiguilleur, atelier).
+  - stop <service> stops a single service without shutting down supervisord.
   - reload all corresponds to supervisorctl reload.
   - stop all stops supervised programs and shuts down the supervisord daemon.
   - clear removes all files in .relais/logs.
-  - force-kill kills all orphan launcher processes blocking debugpy ports.
+  - force-kill kills every RELAIS process (supervisord, courier/redis,
+    launchers) including zombies and orphans reparented to init, then
+    cleans up stale sockets and pidfiles. Use when normal stop is stuck.
 EOF
 }
 
@@ -42,7 +48,11 @@ require_command() {
 }
 
 is_supervisord_running() {
-    [[ -S "$SOCKET_PATH" ]] && supervisorctl -c "$CONFIG_PATH" status >/dev/null 2>&1
+    # Use `pid` (not `status`): supervisorctl status returns exit code 3 as
+    # soon as ANY program is not RUNNING (e.g. autostart=false programs like
+    # baileys-api), which would make us think the daemon is unreachable even
+    # though it is perfectly responsive. `pid` only cares about the daemon.
+    [[ -S "$SOCKET_PATH" ]] && supervisorctl -c "$CONFIG_PATH" pid >/dev/null 2>&1
 }
 
 get_pidfile_pid() {
@@ -94,11 +104,23 @@ list_supervisord_pids() {
 cleanup_stale_artifacts() {
     local pid
 
+    # Rule 1: pidfile points to a live process → not stale
     if pid="$(get_pidfile_pid 2>/dev/null)" && is_pid_running "$pid"; then
         return 0
     fi
 
-    if [[ -S "$SOCKET_PATH" ]] && run_supervisorctl status >/dev/null 2>&1; then
+    # Rule 2: socket is responsive via supervisorctl → not stale
+    # (use `pid` not `status`: see is_supervisord_running for rationale)
+    if [[ -S "$SOCKET_PATH" ]] && run_supervisorctl pid >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Rule 3: any supervisord process for this config is alive → not stale.
+    # This catches the narrow window between `supervisord -c` returning (parent
+    # exited via os._exit after fork) and the child having written its pidfile.
+    # Without this check we would race and delete the socket the freshly-forked
+    # child just created — leaving it running headless with no reachable socket.
+    if [[ -n "$(list_supervisord_pids)" ]]; then
         return 0
     fi
 
@@ -198,7 +220,11 @@ stop_supervisord() {
 wait_for_supervisord() {
     local retries=20
 
-    cleanup_stale_artifacts
+    # NOTE: do NOT call cleanup_stale_artifacts here. At this point supervisord
+    # has just forked and the parent returned — the child may not have written
+    # its pidfile yet, and its freshly-created socket is not yet accepting on
+    # runforever(). Cleaning up here would rm the socket the child just made.
+    # Cleanup is the responsibility of ensure_supervisord_running, BEFORE start.
 
     for ((attempt=1; attempt<=retries; attempt++)); do
         if is_supervisord_running; then
@@ -248,6 +274,14 @@ run_supervisorctl() {
     supervisorctl -c "$CONFIG_PATH" "$@"
 }
 
+validate_service_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_:.-]+$ ]]; then
+        echo "Invalid service name: '$name'. Only alphanumeric characters, '_', ':', '.', and '-' are allowed." >&2
+        exit 1
+    fi
+}
+
 clear_logs() {
     local logs_dir="$REPO_ROOT/.relais/logs"
 
@@ -256,21 +290,58 @@ clear_logs() {
     echo "Logs deleted in $logs_dir."
 }
 
+list_relais_orphans_by_cwd() {
+    # Lists PIDs whose cwd is inside $REPO_ROOT/.relais/. Catches orphan
+    # redis-server, supervisord, launchers, and any process that outlived
+    # its RELAIS parent (reparented to PID 1). macOS `ps` does not expose
+    # cwd, so we go through lsof.
+    local marker="$REPO_ROOT/.relais"
+    lsof -d cwd 2>/dev/null | awk -v m="$marker" '
+        NR > 1 && index($NF, m) == 1 { print $2 }
+    ' | sort -u || true
+}
+
 force_kill_launchers() {
     local killed=0
     local pid
+    local cmd
 
-    # Stop supervisord first — otherwise autorestart will respawn killed processes immediately
+    # 1. Try graceful supervisord stop first to prevent autorestart during kill
     if is_supervisord_running; then
-        echo "supervisord is active — stopping first to prevent respawn..." >&2
-        if ! stop_supervisord; then
-            echo "Unable to stop supervisord. Aborting." >&2
-            return 1
+        echo "supervisord is active — attempting graceful stop first..." >&2
+        if stop_supervisord; then
+            echo "supervisord stopped."
+        else
+            echo "Graceful stop failed — will SIGKILL below." >&2
         fi
-        echo "supervisord stopped."
     fi
 
-    # Kill all python launcher processes
+    # 2. SIGKILL any supervisord still alive for this config (zombie shutdowns,
+    #    orphans, unresponsive instances)
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        if is_pid_running "$pid"; then
+            echo "Force-killing supervisord (PID $pid)..."
+            kill -9 "$pid" >/dev/null 2>&1 || true
+            killed=$((killed + 1))
+        fi
+    done < <(list_supervisord_pids)
+
+    # 3. Kill any RELAIS orphan by cwd (redis-server reparented to init,
+    #    zombie launchers, anything spawned from .relais/ that outlived
+    #    its parent). Safer than blind pkill — only touches processes
+    #    running out of this repo's .relais/ directory.
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        if is_pid_running "$pid"; then
+            cmd="$(ps -o command= -p "$pid" 2>/dev/null || echo '?')"
+            echo "Force-killing RELAIS orphan (PID $pid): $cmd"
+            kill -9 "$pid" >/dev/null 2>&1 || true
+            killed=$((killed + 1))
+        fi
+    done < <(list_relais_orphans_by_cwd)
+
+    # 4. Belt-and-braces: python launcher processes matched by command name
     while IFS= read -r pid; do
         [[ -n "$pid" ]] || continue
         if is_pid_running "$pid"; then
@@ -280,7 +351,7 @@ force_kill_launchers() {
         fi
     done < <(pgrep -if "python.*launcher" 2>/dev/null || true)
 
-    # Kill all processes listening on debugpy ports (5670-5689 only, LISTEN state)
+    # 5. Free debugpy ports (5670-5689 only, LISTEN state)
     while IFS= read -r pid; do
         [[ -n "$pid" ]] || continue
         if is_pid_running "$pid"; then
@@ -290,7 +361,9 @@ force_kill_launchers() {
         fi
     done < <(lsof -i TCP:5670-5689 -sTCP:LISTEN -P -n 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
 
-    # Cleanup stale artifacts
+    # 6. Cleanup stale artifacts — socket file (incl. .PID leftovers from a
+    #    crashed supervisord prebind), pidfile, and orphaned redis socket.
+    rm -f "$SOCKET_PATH" "$SOCKET_PATH".* "$PID_PATH" "$REPO_ROOT/.relais/redis.sock"
     cleanup_stale_artifacts
 
     if [[ $killed -gt 0 ]]; then
@@ -336,45 +409,56 @@ case "$ACTION" in
             exit 1
         fi
         ensure_supervisord_running
-        run_supervisorctl start all
+        run_supervisorctl start infra:* core:* relays:*
         if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
         ;;
     stop)
-        if [[ "$TARGET" != "all" ]]; then
-            usage
-            exit 1
-        fi
-        cleanup_stale_artifacts
-        if ! is_supervisord_running; then
-            if ! stop_orphaned_supervisords; then
-                exit 1
-            fi
+        if [[ "$TARGET" == "all" ]]; then
             cleanup_stale_artifacts
-            echo "supervisord is not running. Nothing to stop."
-            exit 0
-        fi
-        if ! stop_supervisord; then
-            exit 1
-        fi
-        echo "supervisord stopped."
-        ;;
-    restart)
-        if [[ "$TARGET" != "all" ]]; then
-            usage
-            exit 1
-        fi
-        cleanup_stale_artifacts
-        if is_supervisord_running; then
+            if ! is_supervisord_running; then
+                if ! stop_orphaned_supervisords; then
+                    exit 1
+                fi
+                cleanup_stale_artifacts
+                echo "supervisord is not running. Nothing to stop."
+                exit 0
+            fi
             if ! stop_supervisord; then
                 exit 1
             fi
+            echo "supervisord stopped."
+        elif [[ -n "$TARGET" ]]; then
+            validate_service_name "$TARGET"
+            ensure_supervisord_running
+            run_supervisorctl stop "$TARGET"
+        else
+            usage
+            exit 1
         fi
-        load_dotenv
-        echo "Starting supervisord..."
-        supervisord -c "$CONFIG_PATH"
-        wait_for_supervisord
-        run_supervisorctl start all
-        if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
+        ;;
+    restart)
+        if [[ "$TARGET" == "all" ]]; then
+            cleanup_stale_artifacts
+            if is_supervisord_running; then
+                if ! stop_supervisord; then
+                    exit 1
+                fi
+            fi
+            load_dotenv
+            echo "Starting supervisord..."
+            supervisord -c "$CONFIG_PATH"
+            wait_for_supervisord
+            run_supervisorctl start infra:* core:* relays:*
+            if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
+        elif [[ -n "$TARGET" ]]; then
+            validate_service_name "$TARGET"
+            ensure_supervisord_running
+            run_supervisorctl restart "$TARGET"
+            if [[ "$VERBOSE" == 1 ]]; then tail_logs; fi
+        else
+            usage
+            exit 1
+        fi
         ;;
     reload)
         if [[ "$TARGET" != "all" ]]; then

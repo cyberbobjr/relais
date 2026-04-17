@@ -16,6 +16,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch, call
 import pytest
 
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_INCOMING
 from portail.user_registry import UserRegistry
 
 
@@ -38,6 +39,7 @@ def _make_envelope(
         channel=channel,
         session_id=session_id,
         correlation_id=correlation_id,
+        action=ACTION_MESSAGE_INCOMING,
     )
 
 

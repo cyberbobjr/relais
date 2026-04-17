@@ -174,7 +174,10 @@ def test_subagent_registry_load_single_pack(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     assert "my-agent" in registry.all_names
@@ -187,7 +190,10 @@ def test_subagent_registry_load_empty_when_no_directories(tmp_path: Path) -> Non
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     assert registry.all_names == frozenset()
@@ -210,7 +216,10 @@ def test_subagent_registry_load_ignores_flat_yaml(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     assert registry.all_names == frozenset()
@@ -231,7 +240,10 @@ def test_subagent_registry_load_cascade_user_priority(tmp_path: Path) -> None:
     search_path = [tmp_path / "user", tmp_path / "project"]
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", search_path):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", search_path),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     # Only one spec with that name, from user dir
@@ -252,7 +264,10 @@ def test_subagent_registry_load_multiple_agents(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     assert registry.all_names == frozenset({"agent-one", "agent-two", "agent-three"})
@@ -269,7 +284,10 @@ def test_subagent_registry_load_stores_tool_tokens(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     spec = next(s for s in registry._specs if s.name == "tool-agent")
@@ -289,7 +307,10 @@ def test_subagent_registry_load_stores_skill_tokens(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     spec = next(s for s in registry._specs if s.name == "skill-agent")
@@ -306,7 +327,10 @@ def test_subagent_registry_load_sets_pack_dir(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     spec = next(s for s in registry._specs if s.name == "dir-agent")
@@ -335,6 +359,7 @@ def test_subagent_registry_load_skips_malformed_yaml(tmp_path: Path, caplog) -> 
 
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         caplog.at_level(logging.ERROR),
     ):
         registry = SubagentRegistry.load(tool_registry)
@@ -362,6 +387,7 @@ def test_subagent_registry_load_skips_missing_name(tmp_path: Path, caplog) -> No
 
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         caplog.at_level(logging.ERROR),
     ):
         registry = SubagentRegistry.load(tool_registry)
@@ -387,6 +413,7 @@ def test_subagent_registry_load_skips_missing_description(tmp_path: Path, caplog
 
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         caplog.at_level(logging.ERROR),
     ):
         registry = SubagentRegistry.load(tool_registry)
@@ -411,6 +438,7 @@ def test_subagent_registry_load_skips_missing_system_prompt(tmp_path: Path, capl
 
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         caplog.at_level(logging.ERROR),
     ):
         registry = SubagentRegistry.load(tool_registry)
@@ -437,6 +465,7 @@ def test_subagent_registry_load_skips_directory_name_mismatch(tmp_path: Path, ca
 
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         caplog.at_level(logging.ERROR),
     ):
         registry = SubagentRegistry.load(tool_registry)
@@ -462,7 +491,10 @@ def test_subagent_registry_load_skips_dir_without_yaml(tmp_path: Path, caplog) -
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     assert "good-agent" in registry.all_names
@@ -482,6 +514,7 @@ def test_subagent_registry_load_warns_on_unknown_fields(tmp_path: Path, caplog) 
 
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
         caplog.at_level(logging.WARNING),
     ):
         registry = SubagentRegistry.load(tool_registry)
@@ -509,7 +542,10 @@ def test_delegation_prompt_for_user_wildcard(tmp_path: Path) -> None:
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     prompt = registry.delegation_prompt_for_user({"allowed_subagents": ["*"]})
@@ -529,7 +565,10 @@ def test_delegation_prompt_for_user_empty_when_no_allowed(tmp_path: Path) -> Non
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     prompt = registry.delegation_prompt_for_user({"allowed_subagents": []})
@@ -550,7 +589,10 @@ def test_delegation_prompt_for_user_uses_delegation_snippet_when_set(tmp_path: P
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     prompt = registry.delegation_prompt_for_user({"allowed_subagents": ["*"]})
@@ -571,7 +613,10 @@ def test_delegation_prompt_for_user_auto_generates_snippet(tmp_path: Path) -> No
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     prompt = registry.delegation_prompt_for_user({"allowed_subagents": ["*"]})
@@ -589,7 +634,10 @@ def test_delegation_prompt_for_user_no_field_returns_empty(tmp_path: Path) -> No
 
     tool_registry = _make_fake_tool_registry()
 
-    with patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]):
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+    ):
         registry = SubagentRegistry.load(tool_registry)
 
     prompt = registry.delegation_prompt_for_user({})

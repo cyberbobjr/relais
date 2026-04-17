@@ -58,6 +58,12 @@ STREAM_SKILL_TRACE: str = "relais:skill:trace"
 """Skill execution traces published by Atelier after each turn using skills.
 Consumed by Forgeron for statistical analysis and skill improvement."""
 
+STREAM_OUTGOING_FAILED: str = "relais:messages:outgoing:failed"
+"""Dead-letter queue for outgoing messages that failed to deliver."""
+
+KEY_WHATSAPP_PAIRING: str = "relais:whatsapp:pairing"
+"""Redis key storing the active WhatsApp QR pairing context (JSON, TTL 300s)."""
+
 # ---------------------------------------------------------------------------
 # Dynamic stream name helpers
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ The main pipeline flows through these bricks in order:
    - `NativeAiguilleur` (thread + asyncio.run) for Python adapters (e.g., DiscordAiguilleur)
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
-   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` or `class_path` override
+   - Adapter discovery by convention: `aiguilleur.channels.{name}.adapter` (looks for a class ending in `*Aiguilleur`), or `class_path` override
    - **Profile stamping**: each adapter stamps `context["aiguilleur"]["channel_profile"]` from `ChannelConfig.profile` (aiguilleur.yaml) → `get_default_llm_profile()` (config.yaml:llm.default_profile) → `"default"`
    - Produces: `relais:messages:incoming:{channel}`
    - Bridges external APIs to Redis Streams
@@ -44,8 +44,9 @@ The main pipeline flows through these bricks in order:
    - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `aiguilleur.yaml` per-request
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
+   - **Execution context block**: `AgentExecutor._build_execution_context()` prepends a `<relais_execution_context>` block to the first user message on every agent turn, carrying `sender_id`, `channel`, `session_id`, `correlation_id` and `reply_to` extracted from the envelope. Skills (notably `channel-setup` for WhatsApp pairing) can read this metadata directly from the conversation state; the system prompt instructs the model NOT to echo it back to the user.
    - **LLM profile resolution**: reads `context["portail"].get("llm_profile", "default")` (stamped by Portail) to load the appropriate `ProfileConfig` from `atelier/profiles.yaml` (via `common/profile_loader.py`)
-   - **Subagent registry**: YAML files in `config/atelier/subagents/*.yaml` loaded by `SubagentRegistry.load()` from the config cascade (user > system > project); user access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns); currently one subagent: `relais-config` (configuration CRUD); tool tokens support `mcp:<glob>` (MCP pool filter), `inherit` (all request_tools), or `<static_name>` (ToolRegistry lookup); hot-reload swaps the registry atomically when the `config/atelier/subagents/` directory changes
+   - **Subagent registry**: 2-tier subagent architecture — `SubagentRegistry.load()` scans user subagents in `$RELAIS_HOME/config/atelier/subagents/` first, then native subagents in `atelier/subagents/` (bundled with source). User subagents take priority (first-match-wins by name). User access controlled by `allowed_subagents` in portail.yaml roles (fnmatch patterns). Native subagent shipped: `relais-config` (configuration CRUD). Tool tokens support `mcp:<glob>` (MCP pool filter), `inherit` (all request_tools), or `<static_name>` (ToolRegistry lookup). Hot-reload swaps the registry atomically when either tier's directory changes.
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
@@ -134,8 +135,11 @@ Namespace constants are in `common/contexts.py` (`CTX_AIGUILLEUR`, `CTX_PORTAIL`
 Bricks use:
 - `Envelope.from_json()` to deserialize from Redis
 - `Envelope.from_parent()` to derive child envelopes (deep-copies `traces` and `context`, clears `action`)
+- `Envelope.create_response_to()` to build a reply envelope (also clears `action`)
 - `Envelope.add_trace(brick, action)` to record pipeline progression
 - `Envelope.to_json()` to serialize for Redis
+
+**Action is mandatory at serialization**: `Envelope.to_json()` raises `ValueError` if `envelope.action` is empty. Because `from_parent()` and `create_response_to()` intentionally clear the parent action, every producing site must set the target action explicitly before calling `xadd` — e.g. `response.action = ACTION_MESSAGE_OUTGOING_PENDING`. This prevents enveloppes without a declared intent from traversing the pipeline.
 
 ### Error Handling & Resilience
 
@@ -156,7 +160,6 @@ XACK pattern (critical):
 
 Priority order (highest to lowest):
 1. `~/.relais/config/` - User overrides (also serves as dev mode when `RELAIS_HOME` is unset, defaulting to `<project_root>/.relais`)
-2. `/opt/relais/config/` - System defaults
 
 Environment variables override YAML configs (e.g., `REDIS_SOCKET_PATH`, `REDIS_PASSWORD`, per-brick `REDIS_PASS_*`)
 
@@ -164,9 +167,10 @@ Environment variables override YAML configs (e.g., `REDIS_SOCKET_PATH`, `REDIS_P
 
 Priority-based startup (`supervisord.conf`):
 - **Priority 1**: `courier` (Redis server)
+- **Priority 5**: `baileys-api` (WhatsApp gateway, autostart=false)
 - **Priority 8**: `archiviste` (observer, non-blocking)
-- **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir) + **aiguilleur** (unified channel manager)
-- ~~Priority 20~~: Aiguilleur relays (DEPRECATED — single `aiguilleur/main.py` process now manages all channels via `aiguilleur.yaml`)
+- **Priority 10**: Core bricks (portail, sentinelle, atelier, souvenir, forgeron, commandant)
+- **Priority 20**: `aiguilleur` (unified channel manager)
 
 All processes log to `~/.relais/logs/` via supervisord stdout_logfile.
 
@@ -377,16 +381,28 @@ Steps:
 
 ### Adding a New Subagent
 
-1. Create `config/atelier/subagents/{name}.yaml` with required fields: `name`, `description`, `system_prompt` (and optionally `tools`, `delegation_snippet`)
-2. The file stem must exactly match the `name` field (e.g., `my-agent.yaml` → `name: my-agent`)
-3. Add the subagent name to relevant roles' `allowed_subagents` in portail.yaml (fnmatch patterns, e.g. `["my-agent"]` or `["my-*"]`)
-4. No changes needed to `agent_executor.py` or `main.py` — Atelier picks up new files automatically on hot-reload (or restart)
-5. If the subagent should be available by default, also create `config/atelier/subagents/{name}.yaml.default` and register it in `common/init.py` `DEFAULT_FILES`
-6. Add tests in `tests/test_{name}_subagent.py` loading the YAML via `SubagentRegistry.load()`
+#### User Custom Subagents (in `$RELAIS_HOME/config/atelier/subagents/`)
+
+1. Create `$RELAIS_HOME/config/atelier/subagents/{name}/` directory
+2. Add `subagent.yaml` with required fields: `name`, `description`, `system_prompt` (and optionally `tools`, `delegation_snippet`)
+3. The directory name must exactly match the `name` field in the YAML (e.g., `my-agent/subagent.yaml` → `name: my-agent`)
+4. Optional: add `tools/` subdirectory with Python modules exporting BaseTool instances
+5. Add the subagent name to relevant roles' `allowed_subagents` in portail.yaml (fnmatch patterns, e.g. `["my-agent"]` or `["my-*"]`)
+6. No changes needed to `agent_executor.py` or `main.py` — Atelier picks up new files automatically on hot-reload (or restart)
+
+#### Native Subagents (in `atelier/subagents/`, shipped with source)
+
+Native subagents are bundled in the repository. The registry scans them **after** user subagents, so user subagents take priority by name.
+
+To add a native subagent to the shipped source:
+1. Create `atelier/subagents/{name}/` directory with `subagent.yaml` (same structure as user subagents)
+2. Add to `common/init.py` `DEFAULT_FILES` if it should be copied to user directory on first initialization
+3. Register in `atelier/main.py` `_config_watch_paths()` if you want hot-reload (native subagents are already watched)
 
 Tool token reference for the `tools:` field:
 - `mcp:<glob>` — fnmatch filter on per-request MCP tools (e.g. `mcp:git_*`)
 - `inherit` — pass all MCP tools the parent agent received (stays within ToolPolicy scope)
+- `module:<dotted.path>` — import a Python module and collect all `BaseTool` instances from it (e.g. `module:aiguilleur.channels.whatsapp.tools`); only prefixes in `_ALLOWED_MODULE_PREFIXES` (`aiguilleur.channels.`, `atelier.tools.`, `relais_tools.`) are permitted
 - `<name>` — static tool from ToolRegistry (`atelier/tools/*.py` modules)
 
 ### Handling Message Errors

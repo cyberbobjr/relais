@@ -624,7 +624,7 @@ async def test_apply_config_triggers_mcp_restart_on_server_change() -> None:
     new_cfg = {
         "profiles": {},
         "mcp_servers": {"new_server": {"type": "stdio", "command": "new"}},
-        "progress": None,
+        "display": None,
         "subagent_registry": MagicMock(),
     }
 
@@ -654,7 +654,7 @@ def test_apply_config_does_not_trigger_restart_when_mcp_unchanged() -> None:
     new_cfg = {
         "profiles": {},
         "mcp_servers": same_servers,  # same reference / same content
-        "progress": None,
+        "display": None,
         "subagent_registry": MagicMock(),
     }
 

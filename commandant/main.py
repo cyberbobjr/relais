@@ -17,10 +17,21 @@ Consumed:
 Produced (by handlers):
   - relais:memory:request      — /clear delegates to Souvenir
   - relais:messages:outgoing:* — /help replies directly
+    (the response envelope is stamped with
+    ``ACTION_MESSAGE_OUTGOING`` before publication; ``Envelope.to_json()``
+    now raises if ``action`` is unset)
 
 XACK contract
 -------------
   - ``ack_mode="always"`` — all messages are ACKed unconditionally.
+
+Channel install/pair commands
+-----------------------------
+Channel installation, configuration and pairing (including the WhatsApp QR
+flow previously driven by ``/settings whatsapp``) are no longer Commandant
+responsibilities.  They are handled end-to-end by the ``relais-config``
+subagent via the ``channel-setup`` and ``whatsapp`` skills in Atelier —
+users ask the agent in natural language.
 """
 
 import asyncio

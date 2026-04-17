@@ -1,6 +1,6 @@
 # RELAIS — Guide de contribution
 
-**Dernière mise à jour :** 2026-04-03
+**Dernière mise à jour :** 2026-04-17
 
 Ce guide décrit le workflow de contribution réellement adapté au dépôt actuel.
 
@@ -218,6 +218,46 @@ channels:
 
 - mettre à jour [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default)
 - documenter la création manuelle du fichier override dans `RELAIS_HOME/config/aiguilleur.yaml`
+
+---
+
+## Ajouter un sous-agent personnalisé
+
+Les sous-agents sont découverts automatiquement par Atelier sur hot-reload. Deux niveaux sont supportés :
+
+### Sous-agents utilisateur (dans `$RELAIS_HOME/config/atelier/subagents/`)
+
+1. Créer `$RELAIS_HOME/config/atelier/subagents/{name}/` (le nom du répertoire doit correspondre exactement au champ `name` dans le YAML)
+2. Ajouter `subagent.yaml` avec les champs requis : `name`, `description`, `system_prompt` et optionnellement `tool_tokens`, `skill_tokens`, `delegation_snippet`
+3. Ajouter le nom du sous-agent aux rôles concernés dans `portail.yaml` via `allowed_subagents` (patterns fnmatch, ex. `["my-agent"]` ou `["my-*"]`)
+4. Optionnel : créer `tools/` contenant des modules Python exportant des instances `BaseTool`
+5. Optionnel : créer `skills/` contenant des répertoires de skills
+6. Aucune modification de code requise — Atelier découvre les changements sur hot-reload
+
+### Tokens d’outils
+
+<!-- AUTO-GENERATED: Docstring from atelier/subagents.py -->
+La section `tool_tokens` de `subagent.yaml` accepte plusieurs formes de tokens :
+
+- `local:<name>` — outil chargé depuis `tools/<name>.py` dans le répertoire du sous-agent
+- `mcp:<glob>` — filtre fnmatch sur les outils MCP de la requête (déjà filtrés par `ToolPolicy`)
+- `inherit` — tous les outils MCP de la requête
+- `module:<dotted.path>` — importe un module Python et collecte toutes les instances `BaseTool`. **Sécurité** : seules les préfixes dans `_ALLOWED_MODULE_PREFIXES` (`aiguilleur.channels.`, `atelier.tools.`, `relais_tools.`) sont autorisées. Les autres entraînent un WARNING et sont ignorés.
+- `<name>` (pas de préfixe) — outil statique du `ToolRegistry` (`atelier/tools/*.py`)
+
+**Validation des tokens** :
+- À l’appel de `load()`, les tokens `module:` et les références statiques `<name>` sont validés au démarrage
+- Les formes `mcp:`, `inherit` et `local:` sont dynamiques et validées à l’exécution
+- Un sous-agent dégradé (un ou plusieurs tokens invalides) reste accessible mais exécute uniquement avec les outils valides
+- Les tokens non résolus sont loggés comme WARNING avec la raison (module non importable, outil non trouvé, etc.)
+
+### Sous-agents natifs (dans `atelier/subagents/`, livrés avec le code)
+
+Les sous-agents natifs sont scannés **après** les sous-agents utilisateur. Pour en ajouter un au dépôt :
+
+1. Créer `atelier/subagents/{name}/` avec `subagent.yaml` (même structure que les sous-agents utilisateur)
+2. Optionnel : ajouter à `common/init.py` dans `DEFAULT_FILES` si le fichier doit être copié lors de l’initialisation
+3. Hot-reload est supporté automatiquement pour les sous-agents natifs
 
 ---
 

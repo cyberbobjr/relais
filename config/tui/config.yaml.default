@@ -1,0 +1,14 @@
+api_url: http://localhost:8080
+api_key: ""
+history_path: ~/.relais/storage/tui/history
+request_timeout: 120
+theme:
+  background: "#1a1a2e"
+  user_text: "#8be9fd"
+  assistant_text: "#f8f8f2"
+  code_block: "#282a36"
+  progress: "#6272a4"
+  error: "#ff5555"
+  metadata: "#6272a4"
+  status_bar: "#16213e"
+  accent: "#50fa7b"

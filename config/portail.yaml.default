@@ -47,6 +47,17 @@ users:
         api_keys: []    # Liste de clés API rattachées à ce compte
     notes: "Compte administrateur principal"
 
+  # Exemple d'utilisateur REST API — décommentez et configurez une vraie clé.
+  # usr_api:
+  #   display_name: "API Client"
+  #   role: user
+  #   blocked: false
+  #   identifiers:
+  #     rest:
+  #       api_keys:
+  #         - "replace-with-your-secret-key"
+  #   notes: "Accès REST API — remplacer la clé par une valeur aléatoire sécurisée"
+
   # Exemple d'utilisateur standard — à personnaliser ou supprimer
   usr_exemple:
     display_name: "Utilisateur Exemple"

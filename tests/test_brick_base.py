@@ -129,6 +129,7 @@ def _make_envelope_payload(content: str = "hello") -> str:
         JSON string.
     """
     from common.envelope import Envelope
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
 
     env = Envelope(
         content=content,
@@ -136,6 +137,7 @@ def _make_envelope_payload(content: str = "hello") -> str:
         channel="discord",
         session_id="sess-1",
         correlation_id="corr-1",
+        action=ACTION_MESSAGE_INCOMING,
     )
     return env.to_json()
 

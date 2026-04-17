@@ -77,6 +77,12 @@ Processing flow — outgoing
 XACK contract:
   - Both loops ACK unconditionally after processing (errors are logged, not
     retried via PEL, to avoid blocking the outgoing path on transient issues).
+
+Envelope.action contract:
+  Since ``Envelope.to_json()`` now raises when ``action`` is unset, every
+  response envelope built here (inline rejections via ``_send_rejection``)
+  explicitly sets ``reply.action = ACTION_MESSAGE_OUTGOING`` before
+  publishing to ``relais:messages:outgoing:{channel}``.
 """
 
 import asyncio
@@ -91,6 +97,7 @@ from common.command_utils import KNOWN_COMMANDS, extract_command_name, is_comman
 from common.config_reload import safe_reload, watch_and_reload
 from common.contexts import CTX_PORTAIL, PortailCtx
 from common.envelope import Envelope
+from common.envelope_actions import ACTION_MESSAGE_OUTGOING
 from common.redis_client import RedisClient  # noqa: F401 — kept for test-namespace patching
 from common.streams import (
     STREAM_COMMANDS,
@@ -440,6 +447,7 @@ class Sentinelle(BrickBase):
             message: Plain-text reply content.
         """
         reply = Envelope.create_response_to(envelope, message)
+        reply.action = ACTION_MESSAGE_OUTGOING
         out_stream = stream_outgoing(envelope.channel)
         await redis_conn.xadd(out_stream, {"payload": reply.to_json()})
 

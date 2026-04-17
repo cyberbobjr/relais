@@ -29,8 +29,7 @@ def get_relais_home() -> Path:
 # itself is intentionally excluded — ./config/ contains only .default
 # template files, not live configuration.
 CONFIG_SEARCH_PATH = [
-    get_relais_home(),    # 1. ~/.relais/   (user / dev — highest priority)
-    Path("/opt/relais"),  # 2. /opt/relais/ (system installation)
+    get_relais_home(),    # 1. ~/.relais/   (user / dev — only path)
 ]
 
 def resolve_config_path(filename: str) -> Path:

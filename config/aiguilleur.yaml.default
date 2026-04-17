@@ -56,17 +56,22 @@ channels:
 
   rest:
     enabled: false
-    streaming: false
+    streaming: true
+    type: native
+    bind: "127.0.0.1"
+    port: 8080
+    request_timeout: 30
+    cors_origins:
+      - "*"
+    include_traces: false
 
   tui:
     enabled: false
     streaming: true
 
-  # Example external adapter (Node.js / WhatsApp):
-  # whatsapp:
-  #   enabled: false
-  #   streaming: false
-  #   type: external
-  #   command: node
-  #   args:
-  #     - adapters/whatsapp/index.js
+  whatsapp:
+    enabled: false          # disabled by default; enable in ~/.relais/config/aiguilleur.yaml
+    streaming: false        # baileys-api does not support streaming in MVP
+    profile: default
+    prompt_path: "channels/whatsapp_default.md"
+    max_restarts: 5

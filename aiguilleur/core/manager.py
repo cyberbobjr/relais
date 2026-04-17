@@ -99,14 +99,17 @@ class AiguilleurManager:
             cls = getattr(module, class_name)
         else:
             module = importlib.import_module(f"aiguilleur.channels.{name}.adapter")
-            # Find the *Aiguilleur class in the module
+            # Find the *Aiguilleur class *defined* in this module (not imported).
+            # Filtering by __module__ prevents picking up imported base classes such
+            # as NativeAiguilleur or BaseAiguilleur which also end with "Aiguilleur"
+            # but whose __module__ differs from the adapter module's __name__.
             cls = None
             for attr_name in dir(module):
                 attr = getattr(module, attr_name)
                 if (
                     isinstance(attr, type)
                     and attr_name.endswith("Aiguilleur")
-                    and attr_name != "BaseAiguilleur"
+                    and getattr(attr, "__module__", None) == module.__name__
                 ):
                     cls = attr
                     break

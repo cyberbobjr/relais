@@ -17,7 +17,17 @@ Les briques actives du repo sont :
 - `archiviste` : logs et observation partielle du pipeline
 - `forgeron` : amélioration autonome des skills (changelog + consolidation périodique) et création automatique de skills depuis les archives
 
-L'implémentation locale inclut surtout un adaptateur Discord complet. La configuration de canaux prévoit aussi `telegram`, `slack`, `rest` et `tui`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
+Adaptateurs de canaux réellement livrés :
+
+- **Discord** : adaptateur natif Python complet (`aiguilleur/channels/discord/adapter.py`)
+- **WhatsApp** : adaptateur natif Python complet via la passerelle [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client HTTP vers la passerelle. Installation, configuration et pairing via CLI (`python -m aiguilleur.channels.whatsapp install|configure|uninstall`) ou via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall` du sous-agent `relais-config`. Voir [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md).
+- **REST** : adaptateur HTTP/JSON + SSE (`aiguilleur/channels/rest/adapter.py`) — expose `POST /v1/messages` (Bearer API key) et un stream SSE pour les clients programmatiques (CLI, CI, TUI). Playground SSE interactif sur `GET /docs/sse`. Authentification via clés API HMAC-SHA256 déclarées dans `portail.yaml`.
+
+La configuration de canaux prévoit aussi `telegram` et `slack`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
+
+Outils livrés dans le dépôt :
+
+- `tools/tui/` : client terminal autonome (Textual) pour RELAIS, installable indépendamment (`uv pip install -e tools/tui`). Se connecte exclusivement via l'API REST SSE — aucune dépendance sur les internes RELAIS. Voir [plans/TUI.md](plans/TUI.md).
 
 ---
 
@@ -109,7 +119,7 @@ flowchart TD
 - `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`), puis publie sur `relais:security`.
 - `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
 - `Commandant` consomme `relais:commands`. `/help` répond directement sur `relais:messages:outgoing:{channel}`. `/clear` publie une requête `clear` sur `relais:memory:request`.
-- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte des sous-agents déclarés dans `config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels et `skills/` optionnels) ; l'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml`.
+- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte une architecture 2-tier de sous-agents : sous-agents utilisateur dans `$RELAIS_HOME/config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels), et sous-agents natifs dans `atelier/subagents/<nom>/` (livrés avec le code source). L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns). Hot-reload supporté pour les modifications en temps réel.
 - `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier.
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
 - `Forgeron` dispose de deux pipelines autonomes :
@@ -169,24 +179,23 @@ alembic upgrade head
 
 ### Ce que fait l'initialisation
 
-`initialize_user_dir()` crée `RELAIS_HOME` et y copie seulement certains templates. En particulier :
+`initialize_user_dir()` crée `RELAIS_HOME` et y copie l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, notamment :
 
-- copiés : `config/config.yaml`, `config/portail.yaml`, `config/sentinelle.yaml`, `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/HEARTBEAT.md`, les prompts livrés
-- non copié aujourd'hui : `config/aiguilleur.yaml`
+- `config/config.yaml`
+- `config/portail.yaml`, `config/sentinelle.yaml`
+- `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
+- `config/aiguilleur.yaml`
+- `config/tui/config.yaml`
+- `config/HEARTBEAT.md`
+- les prompts livrés (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
-Si vous voulez surcharger `aiguilleur.yaml`, créez-le vous-même dans `RELAIS_HOME/config/aiguilleur.yaml` à partir de [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default).
+Si `config/aiguilleur.yaml` est supprimé après coup, `load_channels_config()` loggue un WARNING et retombe sur un fallback Discord-only.
 
 ### `RELAIS_HOME`
 
 Par défaut, `RELAIS_HOME` vaut `./.relais` à la racine du dépôt. Vous pouvez le surcharger avec la variable d'environnement `RELAIS_HOME`.
 
-La cascade de résolution est :
-
-1. `RELAIS_HOME`
-2. `/opt/relais`
-3. `./`
-
-Cette cascade est utilisée pour la configuration et les prompts. Les répertoires `skills`, `logs`, `media` et `storage` restent centrés sur `RELAIS_HOME`.
+La configuration et les prompts sont lus depuis `RELAIS_HOME`. Les répertoires `skills`, `logs`, `media` et `storage` restent centrés sur `RELAIS_HOME`.
 
 ---
 
@@ -201,10 +210,14 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 │   ├── portail.yaml
 │   ├── sentinelle.yaml
 │   ├── atelier.yaml
+│   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
+│   ├── tui/
+│   │   └── config.yaml
 │   └── atelier/
 │       ├── profiles.yaml
-│       └── mcp_servers.yaml
+│       ├── mcp_servers.yaml
+│       └── subagents/          ← sous-agents custom (vide par défaut)
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -326,17 +339,18 @@ groups: []
 
 ### `config/atelier.yaml`
 
-Le fichier pilote la publication des événements de progression.
+Le fichier pilote la publication des événements vers le channel.
 
 ```yaml
-progress:
+display:
   enabled: true
+  final_only: true
+  detail_max_length: 100
   events:
     tool_call: true
     tool_result: true
     subagent_start: true
-  publish_to_outgoing: true
-  detail_max_length: 100
+    thinking: false
 ```
 
 ### `config/atelier/profiles.yaml`
@@ -406,7 +420,7 @@ mcp_servers:
 
 ### `config/aiguilleur.yaml`
 
-`load_channels_config()` charge ce fichier via la cascade de config. S'il est absent, le code retombe sur un fallback minimal Discord.
+`load_channels_config()` charge ce fichier via la cascade de config. Le template est copié par `initialize_user_dir()`. S'il est supprimé manuellement après coup, un WARNING est loggué et le code retombe sur un fallback minimal Discord-only.
 
 Exemple :
 
@@ -420,13 +434,23 @@ channels:
     enabled: false
     streaming: true
     profile: fast
+
+  whatsapp:
+    enabled: false          # activer dans ~/.relais/config/aiguilleur.yaml
+    streaming: false        # baileys-api ne supporte pas le streaming en MVP
+    profile: default
+    prompt_path: "channels/whatsapp_default.md"
+    max_restarts: 5
 ```
 
 Points importants :
 
-- `streaming` est lu par l'Atelier au démarrage pour déterminer les canaux à streaming incrémental
+- `streaming` est lu par chaque adaptateur et estampillé dans `context.aiguilleur["streaming"]` ; l'Atelier lit cette valeur par message (pas de cache au démarrage)
 - `profile` force un profil LLM pour tout message du canal
-- `type: external`, `command`, `args`, `class` et `max_restarts` sont pris en charge par le superviseur d'adaptateurs
+- `prompt_path` force un overlay de prompt de canal (Layer 4)
+- `type: external`, `command`, `args`, `class_path` et `max_restarts` sont pris en charge par le superviseur d'adaptateurs
+
+> L'installation et la configuration du canal WhatsApp (install de la passerelle baileys-api, création de la clé API, pairing QR) sont prises en charge de bout en bout par le sous-agent `relais-config` via les skills `channel-setup` et `whatsapp`. Voir [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) pour le guide pas-à-pas manuel.
 
 ---
 
@@ -464,8 +488,11 @@ Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](/Use
 - `OPENROUTER_API_KEY`
 - `RELAIS_DB_PATH`
 - `DISCORD_BOT_TOKEN`
+- Canal WhatsApp (optionnel) : `WHATSAPP_GATEWAY_URL`, `WHATSAPP_PHONE_NUMBER`, `WHATSAPP_API_KEY`, `WHATSAPP_WEBHOOK_SECRET`, `WHATSAPP_WEBHOOK_PORT`, `WHATSAPP_WEBHOOK_HOST`, `REDIS_PASS_BAILEYS`
 
 Pour les exemples MCP livrés dans les templates, `GITHUB_TOKEN` et `BRAVE_API_KEY` peuvent aussi être nécessaires selon les serveurs activés.
+
+Pour activer WhatsApp, installez aussi les dépendances optionnelles : `uv sync --extra whatsapp` (ajoute `aiohttp>=3.9` et `qrcode>=7.0`).
 
 ---
 
@@ -489,8 +516,9 @@ Le chemin le plus complet du dépôt est le couple `supervisord.conf` + `supervi
 Le wrapper :
 
 - démarre `supervisord` si nécessaire
-- lance Redis local via `config/redis.conf`
-- démarre les briques `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
+- lance Redis local via `config/redis.conf` (socket Unix + port TCP `127.0.0.1:6379` pour les services annexes)
+- démarre les briques des groupes `infra`, `core` et `relays` : `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
+- ne démarre **pas** automatiquement le groupe `optional` (qui contient la passerelle `baileys-api` pour WhatsApp). L'installation/activation du canal WhatsApp est pilotée par le sous-agent `relais-config`.
 
 ### Démarrage manuel
 
@@ -509,11 +537,11 @@ uv run python archiviste/main.py
 uv run python aiguilleur/main.py
 ```
 
-L'entrée Aiguilleur est [aiguilleur/main.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/main.py), pas un `main.py` séparé par canal. L'adaptateur Discord actuellement implémenté vit dans [aiguilleur/channels/discord/adapter.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/channels/discord/adapter.py).
+L'entrée Aiguilleur est [aiguilleur/main.py](aiguilleur/main.py), pas un `main.py` séparé par canal. L'adaptateur Discord actuellement implémenté vit dans [aiguilleur/channels/discord/adapter.py](aiguilleur/channels/discord/adapter.py).
 
 ### Note Redis locale
 
-Le dépôt démarre Redis avec [config/redis.conf](/Users/benjaminmarchand/IdeaProjects/relais/config/redis.conf), qui crée un socket Unix `./.relais/redis.sock` et des ACL par brique. Les mots de passe utilisés par les briques via `.env` doivent rester alignés avec cette configuration locale.
+Le dépôt démarre Redis avec [config/redis.conf](config/redis.conf), qui crée un socket Unix `./.relais/redis.sock` et des ACL par brique. Les mots de passe utilisés par les briques via `.env` doivent rester alignés avec cette configuration locale.
 
 ---
 
@@ -535,7 +563,7 @@ Logs utiles :
 
 ## Debug
 
-Toutes les briques Python passent par [launcher.py](/Users/benjaminmarchand/IdeaProjects/relais/launcher.py) quand elles sont lancées via `supervisord.conf`. Le wrapper supporte :
+Toutes les briques Python passent par [launcher.py](launcher.py) quand elles sont lancées via `supervisord.conf`. Le wrapper supporte :
 
 - `DEBUGPY_ENABLED`
 - `DEBUGPY_PORT`
@@ -573,6 +601,6 @@ Tests particulièrement utiles pour vérifier les affirmations structurelles :
 
 ## Documentation liée
 
-- [docs/ARCHITECTURE.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/ARCHITECTURE.md) : référence technique par brique et par stream
-- [docs/ENV.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/ENV.md) : variables d'environnement réellement utiles
-- [docs/CONTRIBUTING.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/CONTRIBUTING.md) : workflow de contribution
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) : référence technique par brique et par stream
+- [docs/ENV.md](docs/ENV.md) : variables d'environnement réellement utiles
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) : workflow de contribution

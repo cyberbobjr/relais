@@ -130,9 +130,18 @@ class Envelope:
     def to_json(self) -> str:
         """Serializes the envelope to a JSON string.
 
+        Raises:
+            ValueError: If ``action`` is empty or None. Each producing brick
+                must set action explicitly before publishing.
+
         Returns:
             JSON string representation.
         """
+        if not self.action:
+            raise ValueError(
+                "Envelope.action must be set before serialization. "
+                "Set it explicitly after from_parent() — e.g. env.action = ACTION_MESSAGE_OUTGOING"
+            )
         return json.dumps(self.to_dict())
 
     @classmethod

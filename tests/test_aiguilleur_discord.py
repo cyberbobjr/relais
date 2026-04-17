@@ -14,7 +14,7 @@ import pytest
 
 from common.envelope import Envelope
 from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
-from common.envelope_actions import ACTION_MESSAGE_PROGRESS
+from common.envelope_actions import ACTION_MESSAGE_INCOMING, ACTION_MESSAGE_OUTGOING, ACTION_MESSAGE_PROGRESS
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +60,7 @@ def _make_envelope(
         channel="discord",
         session_id="sess-001",
         correlation_id=correlation_id,
+        action=ACTION_MESSAGE_OUTGOING,
         context={
             CTX_AIGUILLEUR: {"reply_to": str(channel_id)},
         },
@@ -818,6 +819,7 @@ async def test_deliver_outgoing_sends_multiple_parts_for_long_message():
         channel="discord",
         session_id="sess-1",
         correlation_id="corr-long",
+        action=ACTION_MESSAGE_OUTGOING,
         context={CTX_AIGUILLEUR: {"reply_to": "999"}},
     )
 

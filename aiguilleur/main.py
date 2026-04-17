@@ -2,10 +2,22 @@
 
 Functional role
 ---------------
-Entry point for all external channel integrations (Discord, Telegram, etc.).
-Loads channel definitions from aiguilleur.yaml and spawns one adapter per
-enabled channel.  Acts as the ingestion boundary: each adapter translates
-external API events into Envelope messages and pushes them onto the Redis bus.
+Entry point for all external channel integrations (Discord, WhatsApp, and
+others defined in aiguilleur.yaml).  Loads channel definitions from
+``aiguilleur.yaml`` and spawns one adapter per enabled channel.  Acts as the
+ingestion boundary: each adapter translates external API events into Envelope
+messages and pushes them onto the Redis bus.
+
+Channels shipped in the repository:
+
+* **Discord** — ``aiguilleur/channels/discord/adapter.py``; uses ``discord.py``
+  for bot mentions/DMs and typing indicators.
+* **WhatsApp** — ``aiguilleur/channels/whatsapp/adapter.py`` (channel pack); hosts an
+  aiohttp webhook server for the `fazer-ai/baileys-api` gateway.  Install,
+  config, pair and unpair are handled by ``aiguilleur/channels/whatsapp/core.py`` and
+  exposed as 3 LangChain BaseTools (``whatsapp_install``,
+  ``whatsapp_configure``, ``whatsapp_uninstall``) via the ``relais-config``
+  subagent.  CLI: ``python -m aiguilleur.channels.whatsapp``.
 
 Technical overview
 ------------------
