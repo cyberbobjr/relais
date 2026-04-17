@@ -305,6 +305,15 @@ L'Atelier dispose d'une architecture 2-tier pour les sous-agents :
 - Un changement dans l'un ou l'autre déclenche un rechargement atomique du registre
 - Les subagents en cours d'exécution ne sont pas interrompus
 
+**Validation des tokens d'outils et état dégradé** :
+- À l'appel de `load()`, les tokens `module:<dotted.path>` et les références statiques `<bare-name>` sont validés au démarrage (les formes `mcp:`, `inherit` et `local:` sont dynamiques et sautées à ce stade)
+- Un subagent est considéré comme **dégradé** si au moins un de ses tokens d'outils n'a pas pu être résolu :
+  - **Au démarrage** (validation statique) : le token invalide est enregistré dans le champ `degraded_tokens` du `SubagentSpec`
+  - **À l'exécution** (résolution runtime) : le token échoue lors du traitement d'une requête et est ajouté à `_runtime_degraded` du registre
+- La propriété `degraded_names` retourne l'ensemble des noms de subagents dégradés (startup + runtime)
+- Chaque subagent dégradé est loggé avec un WARNING indiquant le token problématique et la raison (module non importable, outil statique non trouvé, etc.)
+- Les subagents dégradés ne sont pas exclus du pipeline — ils restent accessibles, mais exécutent uniquement avec les outils valides (fail-closed, jamais fail-silent)
+
 ### Rechargement à chaud de la configuration
 
 Toutes les briques supportent le rechargement à chaud de leur configuration sans redémarrage :

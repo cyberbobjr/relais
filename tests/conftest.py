@@ -5,7 +5,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import yaml
 
 
 @contextmanager
@@ -39,3 +41,58 @@ def isolated_search_path(
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", native_root),
     ):
         yield
+
+
+def make_mock_tool(name: str) -> MagicMock:
+    """Return a MagicMock that duck-types as a BaseTool.
+
+    Args:
+        name: Tool name attribute.
+
+    Returns:
+        MagicMock with .name and .run set.
+    """
+    from langchain_core.tools import BaseTool
+    m = MagicMock(spec=BaseTool)
+    m.name = name
+    return m
+
+
+def make_fake_tool_registry(tools: dict | None = None) -> MagicMock:
+    """Return a mock ToolRegistry.
+
+    Args:
+        tools: Dict mapping name -> BaseTool mock.
+
+    Returns:
+        MagicMock behaving like ToolRegistry.
+    """
+    registry = MagicMock()
+    registry.get = lambda name: (tools or {}).get(name)
+    registry.all = lambda: dict(tools or {})
+    return registry
+
+
+def write_pack(base_dir: Path, name: str, extra: dict | None = None) -> Path:
+    """Create a minimal subagent pack directory.
+
+    Args:
+        base_dir: Parent directory (``config/atelier/subagents/``).
+        name: Subagent name and directory name.
+        extra: Extra YAML fields to merge.
+
+    Returns:
+        Path to the created ``subagent.yaml``.
+    """
+    pack_dir = base_dir / name
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    data: dict = {
+        "name": name,
+        "description": f"Description of {name}",
+        "system_prompt": f"You are {name}.",
+    }
+    if extra:
+        data.update(extra)
+    yaml_path = pack_dir / "subagent.yaml"
+    yaml_path.write_text(yaml.dump(data))
+    return yaml_path

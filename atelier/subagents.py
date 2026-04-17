@@ -52,6 +52,7 @@ Validation rules (fail-closed per directory — ERROR log + skip on violation):
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import logging
 import re
@@ -68,6 +69,7 @@ from atelier.subagents_resolver import (  # noqa: F401 — re-exported for test 
     _load_tools_from_module,
     _resolve_tool_tokens,
     _resolve_skill_tokens,
+    validate_module_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,7 @@ class SubagentSpec:
     source_path: Path
     pack_dir: Path
     response_format: dict | None = field(default=None)
+    degraded_tokens: tuple[str, ...] = field(default=())
 
 
 def _parse_subagent_patterns(raw: object) -> tuple[str, ...]:
@@ -359,15 +362,23 @@ class SubagentRegistry:
 
     Attributes:
         _specs: Tuple of all loaded SubagentSpec instances (unique by name).
+            Immutable after construction — rebuilt atomically by
+            ``_validate_tool_tokens()`` (called once inside ``load()`` before
+            the registry is shared with any caller).
         _tool_registry: The static ToolRegistry used for bare-name token resolution.
         _local_tools_by_subagent: Dict mapping subagent name → {tool_name → callable}.
         _local_skills_by_subagent: Dict mapping subagent name → {skill_name → abs_path}.
+        _runtime_degraded: Dict mapping subagent name → frozenset of token strings
+            that failed during ``specs_for_user()`` resolution.  Accumulated
+            across requests; never reset except by a new ``load()`` call that
+            replaces the registry reference entirely.
     """
 
     _specs: tuple[SubagentSpec, ...]
     _tool_registry: Any  # ToolRegistry — avoid circular import at type-check time
     _local_tools_by_subagent: dict[str, dict[str, Any]] = field(default_factory=dict)
     _local_skills_by_subagent: dict[str, dict[str, str]] = field(default_factory=dict)
+    _runtime_degraded: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, tool_registry: Any) -> SubagentRegistry:
@@ -504,12 +515,14 @@ class SubagentRegistry:
                 )
 
         logger.info("SubagentRegistry: %d subagent(s) loaded", len(specs))
-        return cls(
+        registry = cls(
             _specs=tuple(specs),
             _tool_registry=tool_registry,
             _local_tools_by_subagent=local_tools,
             _local_skills_by_subagent=local_skills,
         )
+        registry._validate_tool_tokens()
+        return registry
 
     @property
     def all_names(self) -> frozenset[str]:
@@ -519,6 +532,70 @@ class SubagentRegistry:
             A frozenset of subagent name strings.
         """
         return frozenset(s.name for s in self._specs)
+
+    @property
+    def degraded_names(self) -> frozenset[str]:
+        """Return names of subagents that have at least one invalid tool token.
+
+        A subagent is considered degraded when one or more of its
+        statically-resolvable tool tokens could not be resolved — either
+        at startup (bare names / module: tokens) or at runtime (local:
+        tokens dropped by ``_resolve_tool_tokens``).
+
+        Returns:
+            A frozenset of subagent name strings whose ``degraded_tokens``
+            tuple is non-empty, or that have runtime failures in
+            ``_runtime_degraded``.
+        """
+        startup = frozenset(s.name for s in self._specs if s.degraded_tokens)
+        return startup | frozenset(self._runtime_degraded)
+
+    def _validate_tool_tokens(self) -> None:
+        """Validate statically-resolvable tool tokens at startup.
+
+        Iterates all loaded specs and checks:
+        - bare ``<name>`` tokens against ``_tool_registry``
+        - ``module:<dotted.path>`` tokens via ``validate_module_token()``
+
+        Skips ``mcp:``, ``inherit``, and ``local:`` tokens — these are
+        dynamic or validated at runtime.
+
+        Rebuilds ``_specs`` as a new tuple (immutability preserved) where
+        any spec with invalid tokens has its ``degraded_tokens`` field set
+        to the tuple of unresolvable token strings.  Logs a WARNING for
+        each failure.
+        """
+        updated: list[SubagentSpec] = []
+        for spec in self._specs:
+            failed: list[str] = []
+            for token in spec.tool_tokens:
+                if token == "inherit" or token.startswith("mcp:") or token.startswith("local:"):
+                    continue
+                if token.startswith("module:"):
+                    module_path = token[len("module:"):]
+                    error = validate_module_token(module_path, spec.name)
+                    if error is not None:
+                        logger.warning(
+                            "SubagentRegistry: subagent '%s' — token '%s' invalid at "
+                            "startup: %s — marking as degraded",
+                            spec.name, token, error,
+                        )
+                        failed.append(token)
+                else:
+                    # Bare static name — look up in ToolRegistry
+                    tool = self._tool_registry.get(token)
+                    if tool is None:
+                        logger.warning(
+                            "SubagentRegistry: subagent '%s' — static tool '%s' not "
+                            "found in ToolRegistry at startup — marking as degraded",
+                            spec.name, token,
+                        )
+                        failed.append(token)
+
+            if failed:
+                spec = dataclasses.replace(spec, degraded_tokens=tuple(failed))
+            updated.append(spec)
+        self._specs = tuple(updated)
 
     def _filter_for_user(self, user_record: dict[str, Any]) -> list[SubagentSpec]:
         """Return specs allowed for the given user record.
@@ -573,10 +650,15 @@ class SubagentRegistry:
 
         for spec in allowed_specs:
             local_tools = self._local_tools_by_subagent.get(spec.name, {})
-            resolved_tools = _resolve_tool_tokens(
+            resolved_tools, failed_tokens = _resolve_tool_tokens(
                 spec.tool_tokens, request_tools, self._tool_registry,
                 local_tools, spec.name,
             )
+
+            # Track runtime failures in _runtime_degraded (never mutates _specs)
+            if failed_tokens:
+                existing = self._runtime_degraded.get(spec.name, frozenset())
+                self._runtime_degraded[spec.name] = existing | frozenset(failed_tokens)
 
             local_skills = self._local_skills_by_subagent.get(spec.name, {})
             resolved_skills = _resolve_skill_tokens(

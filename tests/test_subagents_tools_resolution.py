@@ -98,7 +98,7 @@ def test_resolve_inherit_yields_all_request_tools() -> None:
     tool_b = _make_mock_tool("tool_b")
     registry = _make_fake_tool_registry()
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("inherit",),
         request_tools=[tool_a, tool_b],
         tool_registry=registry,
@@ -121,7 +121,7 @@ def test_resolve_mcp_glob_matches_by_name() -> None:
     git_commit = _make_mock_tool("git_commit")
     registry = _make_fake_tool_registry()
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("mcp:filesystem_*",),
         request_tools=[fs_read, fs_write, git_commit],
         tool_registry=registry,
@@ -143,7 +143,7 @@ def test_resolve_mcp_glob_star_matches_all() -> None:
     tool_b = _make_mock_tool("other_thing")
     registry = _make_fake_tool_registry()
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("mcp:*",),
         request_tools=[tool_a, tool_b],
         tool_registry=registry,
@@ -163,7 +163,7 @@ def test_resolve_mcp_glob_no_match_returns_empty() -> None:
     tool_a = _make_mock_tool("unrelated_tool")
     registry = _make_fake_tool_registry()
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("mcp:nonexistent_*",),
         request_tools=[tool_a],
         tool_registry=registry,
@@ -182,7 +182,7 @@ def test_resolve_bare_name_from_tool_registry() -> None:
     static_tool = _make_mock_tool("read_config_file")
     registry = _make_fake_tool_registry({"read_config_file": static_tool})
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("read_config_file",),
         request_tools=[],
         tool_registry=registry,
@@ -202,7 +202,7 @@ def test_resolve_local_token_from_local_tools() -> None:
     local_tool = _make_mock_tool("my_search")
     registry = _make_fake_tool_registry()
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("local:my_search",),
         request_tools=[],
         tool_registry=registry,
@@ -222,7 +222,7 @@ def test_resolve_local_token_unknown_name_logs_warning_and_drops(caplog) -> None
     registry = _make_fake_tool_registry()
 
     with caplog.at_level(logging.WARNING):
-        result = _resolve_tool_tokens(
+        result, _ = _resolve_tool_tokens(
             tokens=("local:nonexistent",),
             request_tools=[],
             tool_registry=registry,
@@ -246,7 +246,7 @@ def test_resolve_unknown_bare_name_logs_warning_and_drops(caplog) -> None:
     registry = _make_fake_tool_registry()  # empty, no tools
 
     with caplog.at_level(logging.WARNING):
-        result = _resolve_tool_tokens(
+        result, _ = _resolve_tool_tokens(
             tokens=("nonexistent_tool",),
             request_tools=[],
             tool_registry=registry,
@@ -275,7 +275,7 @@ def test_resolve_mixed_tokens() -> None:
 
     registry = _make_fake_tool_registry({"my_static": static_tool})
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("mcp:fs_*", "my_static", "local:local_helper"),
         request_tools=[fs_read, fs_write, git_tool],
         tool_registry=registry,
@@ -301,7 +301,7 @@ def test_resolve_inherit_does_not_widen_beyond_request_tools() -> None:
     # blocked_tool is in static registry but NOT in request_tools
     registry = _make_fake_tool_registry({"blocked": blocked_tool})
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("inherit",),
         request_tools=[allowed_tool],  # only allowed_tool is in scope
         tool_registry=registry,
@@ -321,7 +321,7 @@ def test_resolve_deduplicates_tools_from_multiple_tokens() -> None:
     tool = _make_mock_tool("fs_read")
     registry = _make_fake_tool_registry()
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=("mcp:fs_read", "inherit"),  # both would include fs_read
         request_tools=[tool],
         tool_registry=registry,
@@ -340,7 +340,7 @@ def test_resolve_empty_tokens_returns_empty_list() -> None:
     tool = _make_mock_tool("any_tool")
     registry = _make_fake_tool_registry({"any_tool": tool})
 
-    result = _resolve_tool_tokens(
+    result, _ = _resolve_tool_tokens(
         tokens=(),
         request_tools=[tool],
         tool_registry=registry,

@@ -125,13 +125,46 @@ def _load_tools_from_module(py_path: Path, spec_name: str) -> dict[str, Any]:
     return tools
 
 
+def validate_module_token(module_path: str, spec_name: str) -> str | None:
+    """Validate a ``module:`` token at startup.
+
+    Checks that the module uses an allowed prefix and that it can be
+    imported and exports at least one ``BaseTool`` instance.
+
+    Note: This function calls ``_load_tools_from_import``, which uses
+    ``importlib.import_module`` and therefore inserts the module into
+    ``sys.modules``.  This is intentional — the module is expected to
+    remain importable for the lifetime of the process.
+
+    Args:
+        module_path: Dotted Python module path extracted from the token
+            (e.g. ``aiguilleur.channels.whatsapp.tools``).
+        spec_name: Subagent name used in log messages.
+
+    Returns:
+        ``None`` if the token is valid (importable, exports ≥ 1 BaseTool).
+        An error string describing the problem otherwise.
+    """
+    if not any(module_path.startswith(prefix) for prefix in _ALLOWED_MODULE_PREFIXES):
+        return (
+            f"module '{module_path}' uses a disallowed prefix "
+            f"(allowed prefixes: {_ALLOWED_MODULE_PREFIXES})"
+        )
+
+    tools = _load_tools_from_import(module_path, spec_name)
+    if not tools:
+        return f"module '{module_path}' is not importable or exports no BaseTools"
+
+    return None
+
+
 def _resolve_tool_tokens(
     tokens: tuple[str, ...],
     request_tools: list,
     tool_registry: Any,
     local_tools: dict[str, Any],
     spec_name: str,
-) -> list:
+) -> tuple[list, list[str]]:
     """Resolve raw YAML tool_tokens into callable/BaseTool instances.
 
     Token forms:
@@ -144,6 +177,9 @@ def _resolve_tool_tokens(
     Unknown / unresolvable tokens are logged as WARNING and dropped
     (fail-closed; never raises).
 
+    ``mcp:`` and ``inherit`` tokens are never considered failures — they are
+    dynamic and their resolution depends on the per-request MCP pool.
+
     Args:
         tokens: Raw token strings from the YAML ``tool_tokens`` field.
         request_tools: Per-request MCP tool pool (already ToolPolicy-filtered).
@@ -152,10 +188,15 @@ def _resolve_tool_tokens(
         spec_name: Subagent name, used in log messages.
 
     Returns:
-        List of resolved tool/callable instances (deduplicated by name,
-        preserving order of first occurrence).
+        A 2-tuple ``(resolved, failed_tokens)`` where *resolved* is a list
+        of tool/callable instances (deduplicated by name, preserving order of
+        first occurrence) and *failed_tokens* is a list of token strings that
+        could not be resolved (bare names missing from ToolRegistry,
+        unresolvable ``module:`` tokens, and ``local:`` tools not found in the
+        pack's tools/ dir).
     """
     resolved: list = []
+    failed_tokens: list[str] = []
     seen_names: set[str] = set()
 
     def _add(tool: object) -> None:
@@ -177,6 +218,7 @@ def _resolve_tool_tokens(
                     "tool '%s' — dropping (not found in pack's tools/ dir)",
                     spec_name, tool_name,
                 )
+                failed_tokens.append(token)
             else:
                 _add(tool)
         elif token.startswith("mcp:"):
@@ -187,8 +229,16 @@ def _resolve_tool_tokens(
         elif token.startswith("module:"):
             module_path = token[len("module:"):]
             imported_tools = _load_tools_from_import(module_path, spec_name)
-            for t in imported_tools.values():
-                _add(t)
+            if not imported_tools:
+                logger.warning(
+                    "SubagentRegistry: subagent '%s' — module: token '%s' "
+                    "resolved to zero tools at runtime — dropping",
+                    spec_name, token,
+                )
+                failed_tokens.append(token)
+            else:
+                for t in imported_tools.values():
+                    _add(t)
         else:
             # Bare static tool name — global ToolRegistry
             tool = tool_registry.get(token)
@@ -198,10 +248,11 @@ def _resolve_tool_tokens(
                     "tool '%s' — dropping (tool not found in ToolRegistry)",
                     spec_name, token,
                 )
+                failed_tokens.append(token)
             else:
                 _add(tool)
 
-    return resolved
+    return resolved, failed_tokens
 
 
 def _resolve_skill_tokens(
