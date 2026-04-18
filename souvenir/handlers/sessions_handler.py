@@ -92,7 +92,7 @@ class SessionsHandler(BaseActionHandler):
             preview_display = (preview[:37] + "...") if len(preview) > 40 else preview
 
             lines.append(
-                f" {i}. [{date_str}] {turn_count} tours — \"{preview_display}\" (id: {session_id[:8]})"
+                f" {i}. [{date_str}] {turn_count} tours — \"{preview_display}\" (id: {session_id})"
             )
 
         lines.append("Tape /resume <session_id> pour reprendre.")

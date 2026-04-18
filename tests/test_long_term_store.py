@@ -229,7 +229,7 @@ async def test_list_sessions_limit(store: LongTermStore) -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_list_sessions_user_filter(store: LongTermStore) -> None:
-    """list_sessions only returns sessions matching sender_id LIKE '%user_id%'."""
+    """list_sessions only returns sessions whose sender_id ends with f\":{user_id}\"."""
     await _insert_row(
         store,
         session_id="sess-alice",

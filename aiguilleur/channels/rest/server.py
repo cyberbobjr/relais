@@ -357,7 +357,7 @@ async def get_history(request: web.Request) -> web.Response:
         return web.json_response({"error": "session_id required"}, status=400)
 
     try:
-        limit = min(int(request.rel_url.query.get("limit", "50")), 200)
+        limit = max(1, min(int(request.rel_url.query.get("limit", "50")), 200))
     except ValueError:
         limit = 50
 

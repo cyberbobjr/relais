@@ -34,6 +34,10 @@ class ResumeHandler(BaseActionHandler):
         user_id: str | None = ctx.req.get("user_id") or None
         envelope_json: str | None = ctx.req.get("envelope_json")
 
+        if not user_id:
+            logger.warning("ResumeHandler: missing user_id — refusing ownership-unchecked resume")
+            return
+
         if not envelope_json:
             logger.warning("ResumeHandler: no envelope_json in request, cannot reply")
             return

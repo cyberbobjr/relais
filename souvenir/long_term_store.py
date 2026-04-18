@@ -212,6 +212,7 @@ class LongTermStore:
         preview_sq = (
             select(am_inner.c.assistant_content)
             .where(am_inner.c.session_id == ArchivedMessage.session_id)
+            .where(am_inner.c.sender_id.like(sender_pattern, escape="\\"))
             .order_by(am_inner.c.created_at.desc())
             .limit(1)
             .correlate(ArchivedMessage)
