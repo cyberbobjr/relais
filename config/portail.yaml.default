@@ -106,7 +106,7 @@ roles:
     actions: []
     skills_dirs: []
     allowed_mcp_tools: []
-    allowed_subagents: []
+    allowed_subagents: ["skill-designer"]
     prompt_path: null
   guest:
     # Rôle attribué aux utilisateurs inconnus si unknown_user_policy=guest

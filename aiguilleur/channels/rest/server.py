@@ -51,6 +51,7 @@ from common.streams import (
 from aiguilleur.channels.rest.auth import make_bearer_auth_middleware
 from aiguilleur.channels.rest.sse import HEARTBEAT, format_sse
 from aiguilleur.channels.rest.templates import SWAGGER_UI_HTML, SSE_PLAYGROUND_HTML
+from souvenir.long_term_store import LongTermStore
 
 if TYPE_CHECKING:
     from aiguilleur.channels.rest.correlator import ResponseCorrelator
@@ -213,7 +214,55 @@ _OPENAPI_SPEC: dict = {
                     },
                 },
             }
-        }
+        },
+        "/history": {
+            "get": {
+                "summary": "Get session history",
+                "operationId": "getHistory",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "query",
+                        "required": True,
+                        "schema": {"type": "string"},
+                        "description": "Session ID to retrieve history for.",
+                    },
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "default": 50, "maximum": 200},
+                        "description": "Maximum number of turns to return.",
+                    },
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Session history",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "session_id": {"type": "string"},
+                                        "turns": {"type": "array"},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "400": {"description": "Missing session_id"},
+                    "401": {
+                        "description": "Unauthorized (missing or invalid API key)",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                            }
+                        },
+                    },
+                },
+            }
+        },
     },
 }
 
@@ -281,6 +330,53 @@ async def sse_playground_handler(request: web.Request) -> web.Response:
         200 HTML response with the SSE playground.
     """
     return web.Response(text=SSE_PLAYGROUND_HTML, content_type="text/html")
+
+
+async def get_history(request: web.Request) -> web.Response:
+    """Handle GET /v1/history.
+
+    Returns the archived conversation turns for the requested session,
+    oldest-first, up to ``limit`` entries (default 50, max 200).
+    Only returns turns that belong to the authenticated caller — if the
+    session exists but belongs to a different user a 404 is returned
+    (avoiding information leakage about which session IDs exist).
+
+    Args:
+        request: Authenticated incoming request with optional query params
+            ``session_id`` (required) and ``limit`` (optional, int).
+
+    Returns:
+        200 JSON ``{"session_id": str, "turns": list[dict]}``.
+        400 JSON ``{"error": "session_id required"}`` when session_id is absent.
+        404 JSON ``{"error": "session not found"}`` when the session does not
+            exist or belongs to a different user.
+        500 JSON ``{"error": "internal error"}`` on unexpected storage failure.
+    """
+    session_id = request.rel_url.query.get("session_id")
+    if not session_id:
+        return web.json_response({"error": "session_id required"}, status=400)
+
+    try:
+        limit = max(1, min(int(request.rel_url.query.get("limit", "50")), 200))
+    except ValueError:
+        limit = 50
+
+    user_record = request.get("user_record")
+    owner_user_id: str | None = user_record.user_id if user_record else None
+
+    store: LongTermStore = request.app["_long_term_store"]
+    try:
+        turns = await store.get_session_history(session_id, limit, user_id=owner_user_id)
+    except Exception as exc:
+        logger.error("get_history storage error session=%s: %s", session_id, exc)
+        return web.json_response({"error": "internal error"}, status=500)
+
+    if owner_user_id and not turns:
+        # Session not found OR owned by a different user — return 404 to avoid
+        # leaking which session IDs exist for other users.
+        return web.json_response({"error": "session not found"}, status=404)
+
+    return web.json_response({"session_id": session_id, "turns": turns})
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +594,17 @@ def create_app(
     app["_correlator"] = correlator
     app["_config"] = config
 
+    # Long-term store — initialised once per application lifetime and shared
+    # across all authenticated /v1 handlers via the api_app dict.
+    _long_term_store = LongTermStore()
+    app["_long_term_store"] = _long_term_store
+
+    async def _cleanup_store(app: web.Application) -> None:
+        """Close the LongTermStore engine on application shutdown."""
+        await app["_long_term_store"].close()
+
+    app.on_cleanup.append(_cleanup_store)
+
     app.router.add_get("/healthz", healthz_handler)
     app.router.add_get("/openapi.json", openapi_handler)
     app.router.add_get("/docs", docs_handler)
@@ -505,7 +612,9 @@ def create_app(
 
     # Sub-app with new-style auth middleware for /v1
     api_app = web.Application(middlewares=[auth_middleware])
+    api_app["_long_term_store"] = _long_term_store
     api_app.router.add_post("/messages", post_message)
+    api_app.router.add_get("/history", get_history)
     app.add_subapp("/v1", api_app)
 
     return app

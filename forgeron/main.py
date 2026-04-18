@@ -146,7 +146,9 @@ from common.contexts import CTX_FORGERON, CTX_SKILL_TRACE, CTX_SOUVENIR_REQUEST,
 from common.envelope import Envelope
 from common.envelope_actions import (
     ACTION_MEMORY_ARCHIVE,
+    ACTION_MEMORY_HISTORY_READ,
     ACTION_MESSAGE_OUTGOING_PENDING,
+    ACTION_MESSAGE_TASK,
     ACTION_SKILL_CREATED,
 )
 from common.profile_loader import ProfileConfig, load_profiles, resolve_profile
@@ -155,6 +157,7 @@ from common.streams import (
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
+    STREAM_TASKS,
 )
 from forgeron.changelog_writer import ChangelogWriter
 from forgeron.config import ForgeonConfig, load_forgeron_config
@@ -518,9 +521,9 @@ class Forgeron(BrickBase):
             envelope.sender_id,
             envelope.session_id,
         )
-        if not self._config.creation_mode:
+        if not self._config.creation_mode and not self._config.correction_mode:
             logger.info(
-                "[ARCHIVE] SKIP — creation_mode=False corr=%s",
+                "[ARCHIVE] SKIP — creation_mode=False and correction_mode=False corr=%s",
                 envelope.correlation_id,
             )
             return True
@@ -594,6 +597,9 @@ class Forgeron(BrickBase):
         )
 
         # Run intent labeling with the cheap annotation profile
+        from forgeron.intent_labeler import IntentLabelResult  # noqa: PLC0415
+
+        label_result: IntentLabelResult | None = None
         intent_label: str | None = None
         if self._annotation_profile is not None:
             logger.info(
@@ -605,11 +611,13 @@ class Forgeron(BrickBase):
                 from forgeron.intent_labeler import IntentLabeler  # noqa: PLC0415
 
                 labeler = IntentLabeler(profile=self._annotation_profile)
-                intent_label = await labeler.label(messages_raw)
+                label_result = await labeler.label(messages_raw)
+                intent_label = label_result.label
                 logger.info(
-                    "[ARCHIVE] intent result — corr=%s label='%s'",
+                    "[ARCHIVE] intent result — corr=%s label='%s' is_correction=%s",
                     corr,
                     intent_label,
+                    label_result.is_correction,
                 )
             except ImportError:
                 logger.warning(
@@ -627,6 +635,36 @@ class Forgeron(BrickBase):
                 "[ARCHIVE] SKIP intent labeling — annotation_profile=None corr=%s",
                 corr,
             )
+
+        # Correction pipeline — independent of creation_mode
+        if (
+            label_result is not None
+            and label_result.is_correction
+            and self._config.correction_mode
+        ):
+            logger.info(
+                "[ARCHIVE] correction detected — triggering skill-designer corr=%s "
+                "behavior='%s' hint='%s'",
+                corr,
+                label_result.corrected_behavior,
+                label_result.skill_name_hint,
+            )
+            await self._trigger_skill_design(
+                envelope=envelope,
+                channel=channel,
+                sender_id=sender_id,
+                corrected_behavior=label_result.corrected_behavior or "",
+                skill_name_hint=label_result.skill_name_hint,
+                redis_conn=redis_conn,
+            )
+            return
+
+        if not self._config.creation_mode:
+            logger.info(
+                "[ARCHIVE] SKIP creation — creation_mode=False corr=%s",
+                envelope.correlation_id,
+            )
+            return
 
         # Record in SQLite
         await self._session_store.record_session(
@@ -674,6 +712,107 @@ class Forgeron(BrickBase):
                 correlation_id=envelope.correlation_id,
                 redis_conn=redis_conn,
             )
+
+    async def _trigger_skill_design(
+        self,
+        envelope: Envelope,
+        channel: str,
+        sender_id: str,
+        corrected_behavior: str,
+        skill_name_hint: str | None,
+        redis_conn: Any,
+    ) -> None:
+        """Orchestrate the correction pipeline: fetch history, notify user, then publish task.
+
+        Publishes a history-read request to Souvenir, sends a user notification
+        (before the BRPOP so it's never blocked), then waits for the history
+        payload.  If history is returned, publishes a task envelope to Atelier
+        with ``force_subagent = "skill-designer"`` so it redesigns the skill.
+
+        The notification is always published (even on BRPOP timeout) because it
+        fires before the blocking call.
+
+        Args:
+            envelope: Original archive envelope (provides session/correlation context).
+            channel: Channel for routing the outgoing notification.
+            sender_id: Sender identifier for the outgoing notification.
+            corrected_behavior: Description of the desired corrected behavior.
+            skill_name_hint: Optional hint for the skill name to redesign.
+            redis_conn: Active Redis connection.
+        """
+        corr = envelope.correlation_id
+        session_id = envelope.session_id
+        response_key = f"relais:memory:response:{corr}"
+
+        # 1. Publish history-read request to Souvenir
+        history_req = Envelope.create_response_to(envelope, "")
+        history_req.action = ACTION_MEMORY_HISTORY_READ
+        ctx = ensure_ctx(history_req, "souvenir_request")
+        ctx["action"] = "history_read"
+        ctx["session_id"] = session_id
+        ctx["correlation_id"] = corr
+        ctx["response_key"] = response_key
+        await redis_conn.xadd(STREAM_MEMORY_REQUEST, {"payload": history_req.to_json()})
+        logger.info(
+            "[CORRECTION] history-read published — corr=%s session=%s key=%s",
+            corr,
+            session_id,
+            response_key,
+        )
+
+        # 2. Publish user notification BEFORE BRPOP (non-blocking)
+        notif = Envelope.create_response_to(envelope, "")
+        notif.action = ACTION_MESSAGE_OUTGOING_PENDING
+        notif.content = (
+            "Je travaille sur l'amélioration de mes compétences, "
+            "un nouveau skill est en cours de création..."
+        )
+        await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": notif.to_json()})
+        logger.info(
+            "[CORRECTION] user notification published — corr=%s",
+            corr,
+        )
+
+        # 3. Wait for history payload (BRPOP)
+        result = await redis_conn.brpop(
+            response_key,
+            timeout=self._config.history_read_timeout_seconds,
+        )
+        if result is None:
+            logger.warning(
+                "[CORRECTION] BRPOP timeout — no history received — corr=%s key=%s",
+                corr,
+                response_key,
+            )
+            return
+
+        # 4. Parse history and publish task for skill-designer
+        try:
+            _key, raw_payload = result
+            history_turns: list[list[dict]] = json.loads(raw_payload)
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            logger.warning(
+                "[CORRECTION] invalid history payload — corr=%s error=%s",
+                corr,
+                exc,
+            )
+            return
+
+        task_env = Envelope.create_response_to(envelope, "")
+        task_env.action = ACTION_MESSAGE_TASK
+        forgeron_ctx = ensure_ctx(task_env, CTX_FORGERON)
+        forgeron_ctx["force_subagent"] = "skill-designer"
+        forgeron_ctx["corrected_behavior"] = corrected_behavior
+        if skill_name_hint:
+            forgeron_ctx["skill_name_hint"] = skill_name_hint
+        forgeron_ctx["history_turns"] = history_turns
+
+        await redis_conn.xadd(STREAM_TASKS, {"payload": task_env.to_json()})
+        logger.info(
+            "[CORRECTION] task published to skill-designer — corr=%s turns=%d",
+            corr,
+            len(history_turns),
+        )
 
     async def _trigger_creation(
         self,

@@ -73,8 +73,9 @@ Aiguilleur
 
 | Stream / clé | Producteur | Consommateur |
 |--------------|------------|--------------|
-| `relais:memory:request` | Atelier, Commandant | Souvenir (`souvenir_group`), Forgeron (`forgeron_archive_group`) |
+| `relais:memory:request` | Atelier, Commandant, Forgeron | Souvenir (`souvenir_group`), Forgeron (`forgeron_archive_group`) |
 | `relais:memory:response` | Souvenir | agents (via SouvenirBackend) |
+| `relais:memory:response:{correlation_id}` (Redis List) | Souvenir (HistoryReadHandler) | Forgeron (BRPOP synchrone) |
 
 ### Amélioration autonome (Forgeron)
 
@@ -135,7 +136,12 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Adaptateurs natifs Python complets présents dans le dépôt :
   - **Discord** (`aiguilleur/channels/discord/adapter.py`) — entrée `relais:messages:incoming`, sortie `relais:messages:outgoing:discord`.
   - **WhatsApp** (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp écoutant la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, lancée par `scripts/run_baileys.py` sous supervisord, programme `baileys-api` dans le groupe `optional`). L'adaptateur transcrit les events WhatsApp entrants en Envelope → `relais:messages:incoming`, et envoie les réponses sortantes via l'API REST de la passerelle après conversion Markdown→WhatsApp (`common/markdown_converter.convert_md_to_whatsapp()` pour `*bold*`, `_italic_`, `~strike~` natifs). Installation, configuration et pairing via `python -m aiguilleur.channels.whatsapp` CLI ou via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall`.
-  - **REST** (`aiguilleur/channels/rest/adapter.py`) — adaptateur HTTP/JSON et SSE pour les clients programmatiques (CLI, CI, TUI). Expose `POST /v1/messages` (authentification Bearer via clés API dans `portail.yaml`), réponse JSON synchrone ou stream SSE. Les clés API sont résolues via `UserRegistry.resolve_rest_api_key()` (hachage HMAC-SHA256, jamais stockées en clair). L'adaptateur filtre les `ACTION_MESSAGE_PROGRESS` entrants pour ne résoudre que la réponse finale. La route `GET /docs/sse` expose un playground SSE interactif.
+  - **REST** (`aiguilleur/channels/rest/adapter.py`) — adaptateur HTTP/JSON et SSE pour les clients programmatiques (CLI, CI, TUI). Expose:
+    - `POST /v1/messages` — Envoyer un message et recevoir la réponse LLM (JSON ou SSE streaming)
+    - `GET /v1/history?session_id=...&limit=...` — Récupérer l'historique d'une session (ownership enforcement via user_id)
+    - `GET /docs/sse` — Playground SSE interactif
+    
+    Authentification Bearer via clés API dans `portail.yaml`. Les clés API sont résolues via `UserRegistry.resolve_rest_api_key()` (hachage HMAC-SHA256, jamais stockées en clair). L'adaptateur filtre les `ACTION_MESSAGE_PROGRESS` entrants pour ne résoudre que la réponse finale.
 - Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (aiguilleur.yaml).
 - Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 - Chaque adaptateur estampille `context.aiguilleur["streaming"]` (`bool`) depuis `ChannelConfig.streaming` (lu par Atelier par message, pas au démarrage).
@@ -166,7 +172,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 ### Atelier
 
 - Consomme `relais:tasks`.
-- Gère l'historique conversationnel via un checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`). L'ID de thread est `user_id` (stable cross-session).
+- Gère l'historique conversationnel via un checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`). L'ID de thread est `f"{user_id}:{session_id}"` (isolation par session pour Phase 4b).
 - Assemble le prompt système avec `SoulAssembler`.
 - Pour chaque appel, `AgentExecutor` préfixe le premier message utilisateur par un bloc `<relais_execution_context>` qui contient `sender_id`, `channel`, `session_id`, `correlation_id` et `reply_to` extraits de l'enveloppe. Ce bloc est strictement de la métadonnée technique — les skills (notamment `channel-setup` pour le pairing WhatsApp) peuvent le lire pour router correctement leurs actions, et le prompt système demande au modèle de **ne pas** le renvoyer à l'utilisateur.
 - Exécute `AgentExecutor` — retourne `AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count)`.
@@ -189,16 +195,22 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Hérite de `BrickBase` ; `stream_specs()` déclare un seul flux : `relais:commands` (`commandant_group`, `ack_mode="always"`).
 - `/help` écrit directement sur `relais:messages:outgoing:{channel}`.
 - `/clear` écrit une action `clear` sur `relais:memory:request`.
+- `/sessions` écrit une action `sessions` sur `relais:memory:request` pour lister les sessions récentes de l'utilisateur.
+- `/resume <session_id>` écrit une action `resume` sur `relais:memory:request` pour reprendre une session précédente. Valide que la session_id appartient à l'utilisateur (ownership enforcement).
 
 ### Souvenir
 
-- Consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`).
+- Consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`, `history_read`).
 - Action `archive` : publiée par Atelier après chaque tour LLM complété, contient l'enveloppe de réponse + `messages_raw` (historique LangChain sérialisé pour ce tour).
 - Archive chaque tour dans `storage/memory.db` via `LongTermStore`.
 - `LongTermStore` : une ligne par tour dans `archived_messages` (upsert sur `correlation_id`) avec
   `messages_raw` JSON, `user_content` et `assistant_content` comme champs dénormalisés.
-- L'action `clear` efface les lignes SQLite pour la session et supprime le thread du checkpointer LangGraph (`user_id`).
+- L'action `clear` efface les lignes SQLite pour la session et supprime le thread du checkpointer LangGraph (thread_id `user_id:session_id`).
+- Action `sessions` : retourne une liste formatée des sessions récentes de l'utilisateur (avec ownership enforcement via `user_id`), publie la réponse sur `relais:messages:outgoing:{channel}` via `SessionsHandler`.
+- Action `resume` : récupère l'historique complet d'une session précédente (ownership enforcement via `user_id`), publie la réponse sur `relais:messages:outgoing:{channel}` via `ResumeHandler`.
+- Action `history_read` : publiée par Forgeron pour lire l'historique complet des messages bruts d'une session ; le handler lit de SQLite, tronque selon un budget de tokens (~4 chars/token), et publie le résultat JSON sur `relais:memory:response:{correlation_id}` (Redis List avec TTL 60s) pour que Forgeron le récupère via `BRPOP` (handshake synchrone).
 - Les actions de fichiers (`file_*`) servent les requêtes d'agents via `SouvenirBackend`, répondent sur `relais:memory:response`.
+- Handlers: `ArchiveHandler`, `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`, `SessionsHandler`, `ResumeHandler`, `HistoryReadHandler` — pas d'appels LLM dans Souvenir.
 
 ### Archiviste
 
@@ -245,6 +257,16 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 - La création est idempotente : si le fichier existe déjà, `SkillCreator` retourne `None` sans écraser.
 - L'événement `skill.created` (`ACTION_SKILL_CREATED`) est publié sur `relais:events:system` avec `context["forgeron"]` contenant `skill_created`, `skill_path`, `intent_label`, `contributing_sessions`.
 - Si `notify_user_on_creation` est activé, une notification est publiée sur `relais:messages:outgoing_pending` pour informer l'utilisateur de la création du skill.
+
+#### Pipeline correction — Redesign de skills via analyse des traces
+
+- Déclenché par `IntentLabeler` qui détecte une correction dans un pattern de session (champ `is_correction` de `IntentLabelResult`).
+- `_trigger_skill_design()` orchestre un handshake synchrone :
+  1. Publie une requête `history_read` sur `relais:memory:request` pour que Souvenir serve l'historique complet.
+  2. Envoie une notification utilisateur sur `relais:messages:outgoing_pending` (avant le BRPOP pour éviter tout blocage).
+  3. Attend la réponse via `BRPOP` sur `relais:memory:response:{correlation_id}` (timeout configurable, défaut quelques secondes).
+  4. Si l'historique arrive, publie un `ACTION_MESSAGE_TASK` sur `relais:tasks` avec `force_subagent="skill-designer"` et les données de correction dans `context["forgeron"]` (`corrected_behavior`, `history_turns`, `skill_name_hint` optionnel).
+- Le sous-agent `skill-designer` (natif Atelier) reçoit ces données et génère un SKILL.md révisé via l'outil `WriteSkillTool`.
 
 **Fichiers SQLite** (dans `~/.relais/storage/forgeron.db`) :
 

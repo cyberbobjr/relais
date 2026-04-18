@@ -64,6 +64,7 @@ class Config:
     api_key: str = ""
     history_path: str = "~/.relais/storage/tui/history"
     request_timeout: int = 120
+    last_session_id: str = ""
     theme: ThemeConfig = field(default_factory=ThemeConfig)
 
 

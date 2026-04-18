@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 

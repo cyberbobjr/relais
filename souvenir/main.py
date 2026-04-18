@@ -75,25 +75,10 @@ from typing import Any
 from common.brick_base import BrickBase, StreamSpec
 from common.contexts import CTX_SOUVENIR_REQUEST, SouvenirRequest
 from common.envelope import Envelope
-from common.envelope_actions import (
-    ACTION_MEMORY_ARCHIVE,
-    ACTION_MEMORY_CLEAR,
-    ACTION_MEMORY_FILE_LIST,
-    ACTION_MEMORY_FILE_READ,
-    ACTION_MEMORY_FILE_WRITE,
-)
 from common.streams import STREAM_MEMORY_REQUEST, STREAM_MEMORY_RESPONSE
 from souvenir.file_store import FileStore
 from souvenir.handlers import HandlerContext, build_registry
 from souvenir.long_term_store import LongTermStore
-
-_ALLOWED_ACTIONS: frozenset[str] = frozenset({
-    ACTION_MEMORY_ARCHIVE,
-    ACTION_MEMORY_CLEAR,
-    ACTION_MEMORY_FILE_WRITE,
-    ACTION_MEMORY_FILE_READ,
-    ACTION_MEMORY_FILE_LIST,
-})
 
 
 class Souvenir(BrickBase):
@@ -199,13 +184,6 @@ class Souvenir(BrickBase):
         req.setdefault("correlation_id", envelope.correlation_id)
         action = envelope.action or req.get("action")
 
-        if action not in _ALLOWED_ACTIONS:
-            await self.log.error(
-                f"Souvenir: rejected unknown action {action!r} from {envelope.correlation_id}",
-                correlation_id=envelope.correlation_id,
-            )
-            return True  # ACK to avoid infinite re-delivery of malformed messages
-
         ctx = HandlerContext(
             redis_conn=redis_conn,
             long_term_store=self._long_term,
@@ -217,8 +195,8 @@ class Souvenir(BrickBase):
         if handler:
             await handler.handle(ctx)
         else:
-            await self.log.warning(
-                f"Unknown memory action: {action}",
+            await self.log.error(
+                f"Souvenir: rejected unknown action {action!r} from {envelope.correlation_id}",
                 correlation_id=envelope.correlation_id,
             )
         return True

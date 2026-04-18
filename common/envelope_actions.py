@@ -32,6 +32,9 @@ ACTION_MEMORY_CLEAR = "memory.clear"
 ACTION_MEMORY_FILE_WRITE = "memory.file_write"
 ACTION_MEMORY_FILE_READ = "memory.file_read"
 ACTION_MEMORY_FILE_LIST = "memory.file_list"
+ACTION_MEMORY_SESSIONS = "memory.sessions"
+ACTION_MEMORY_RESUME = "memory.resume"
+ACTION_MEMORY_HISTORY_READ = "memory.history_read"
 
 # Skill execution trace (Atelier → Forgeron)
 ACTION_SKILL_TRACE = "skill.trace"

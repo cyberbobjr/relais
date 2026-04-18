@@ -50,11 +50,12 @@ The main pipeline flows through these bricks in order:
    - Produces: `relais:messages:outgoing_pending` (→ consumed by Sentinelle outgoing loop) + `relais:memory:request` (archive action with full message history for Souvenir)
 
 5. **Souvenir** (`souvenir/`) - Consumer managing short/long-term memory and user facts
-   - Single-stream consumer: `relais:memory:request` for archive/clear/file_* actions
+   - Single-stream consumer: `relais:memory:request` for archive/clear/file_*/history_read/sessions/resume actions
    - Archive action: Atelier publishes completed turns with full `messages_raw` list (serialized LangChain messages); Souvenir persists to SQLite
    - Short-term: Redis List `relais:context:{session_id}` (max 20 turn blobs, each blob = full serialized LangChain message list for one turn, TTL 24h)
    - Long-term: SQLite `~/.relais/storage/memory.db`; one row per turn (upsert on `correlation_id`), fields `user_content`, `assistant_content`, `messages_raw` JSON
-   - Handlers: `ArchiveHandler` (persist turn), `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler` — no LLM calls inside Souvenir (memory extraction removed)
+   - Handlers: `ArchiveHandler` (persist turn), `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`, `SessionsHandler`, `ResumeHandler`, `HistoryReadHandler` — no LLM calls inside Souvenir (memory extraction removed)
+   - `HistoryReadHandler`: reads full session history from SQLite, truncates by token budget (~4 chars/token), publishes JSON array to `relais:memory:response:{correlation_id}` (Redis List, TTL 60s) for Forgeron to retrieve via `BRPOP` during correction pipeline
 
 ### Observer & Support Services
 

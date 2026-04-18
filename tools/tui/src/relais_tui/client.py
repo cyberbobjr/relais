@@ -183,6 +183,35 @@ class RelaisClient:
                         yield event
 
     # ------------------------------------------------------------------
+    # fetch_history
+    # ------------------------------------------------------------------
+
+    async def fetch_history(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Fetch conversation history for a session.
+
+        Args:
+            session_id: The session whose history to retrieve.
+            limit: Maximum number of turns to return (default 20).
+
+        Returns:
+            List of turn dicts (each with ``user_content`` and
+            ``assistant_content`` keys).  Returns ``[]`` on any error
+            (network failure, non-200 status, missing key, etc.).
+        """
+        try:
+            resp = await self._http.get(
+                "/v1/history",
+                params={"session_id": session_id, "limit": limit},
+                headers=self._auth_headers(),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("turns", [])
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 

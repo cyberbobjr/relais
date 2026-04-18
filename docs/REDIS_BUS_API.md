@@ -335,12 +335,12 @@ while True:
 
 ### `relais:memory:request`
 
-**Direction**: Atelier, Commandant → Souvenir, Forgeron
+**Direction**: Atelier, Commandant, Forgeron → Souvenir, Forgeron
 **Consumer groups**: `souvenir_group` (Souvenir), `forgeron_archive_group` (Forgeron)
 
 Carries memory action requests. Two independent consumer groups read this stream:
 
-- **`souvenir_group`** — Souvenir brick persists turns and handles memory actions (archive, clear, file_*)
+- **`souvenir_group`** — Souvenir brick persists turns and handles memory actions (archive, clear, file_*, history_read, sessions, resume)
 - **`forgeron_archive_group`** — Forgeron brick reads `archive` actions only, extracts intent labels via IntentLabeler (Haiku LLM), and triggers auto-creation of SKILL.md files when a pattern recurs (auto-creation pipeline)
 
 Three producers:
@@ -372,7 +372,7 @@ The payload is a serialized `Envelope` (`Envelope.to_json()`). The `action` fiel
 | `envelope_json` | `string` | Serialized outgoing response `Envelope` |
 | `messages_raw` | `array` | Full serialized LangChain message list for the completed turn |
 
-**`clear` action** (published by Commandant) / **`file_*` actions** (published by SouvenirBackend):
+**`clear`, `sessions`, `resume`, `history_read`, and `file_*` actions** (published by Commandant, Forgeron, or SouvenirBackend):
 
 ```json
 {
@@ -386,11 +386,70 @@ The payload is a serialized `Envelope` (`Envelope.to_json()`). The `action` fiel
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `action` | `string` | One of `"clear"`, `"file_write"`, `"file_read"`, `"file_list"` |
-| `session_id` | `string` | Session identifier (used by `clear`) |
-| `user_id` | `string` | Stable user identifier — used by `clear` to erase the LangGraph checkpointer thread |
+| `action` | `string` | One of `"clear"`, `"file_write"`, `"file_read"`, `"file_list"`, `"sessions"`, `"resume"`, `"history_read"` |
+| `session_id` | `string` | Session identifier (used by `clear`, `resume`, and `history_read`); omitted for `sessions` |
+| `user_id` | `string` | Stable user identifier — used by all actions for ownership enforcement |
+| `target_session_id` | `string` (resume only) | The session_id to resume (parsed from `/resume <id>` command) |
+| `max_tokens` | `int` (history_read only) | Token budget for truncating history; defaults to 64000 |
 | `correlation_id` | `string` | UUID for tracing |
-| `envelope_json` | `string` (optional) | Serialized original envelope; used by `clear` to send a confirmation reply |
+| `envelope_json` | `string` (optional) | Serialized original envelope; used to send confirmation/response replies |
+
+**`sessions` action** (published by Commandant):
+- Lists recent sessions for the requesting user
+- User ownership enforced via `user_id` in `LongTermStore.list_sessions(user_id)`
+- Response published back to `relais:messages:outgoing:{channel}` via SessionsHandler
+
+**`resume` action** (published by Commandant):
+- Resumes a previous session by retrieving its full message history
+- User ownership enforced: resume only allowed if `target_session_id` belongs to `user_id`
+- Response published back to `relais:messages:outgoing:{channel}` via ResumeHandler
+
+**`history_read` action** (published by Forgeron):
+- Requests the full conversation history for a session (all `messages_raw` turns)
+- Forgeron uses this in the correction/skill-design pipeline to fetch context for skill redesign
+- Response returned synchronously via `BRPOP` on `relais:memory:response:{correlation_id}` (see below)
+- Handler (`HistoryReadHandler`) reads from SQLite, truncates by token budget (~4 chars/token), and publishes JSON array to response key with 60s TTL
+
+---
+
+### `relais:memory:response:{correlation_id}`
+
+**Type**: Redis List (not Stream)
+**Direction**: Souvenir (HistoryReadHandler) → Forgeron
+**TTL**: 60 seconds after `LPUSH`
+**Access pattern**: `BRPOP` by the requesting process
+
+Carries responses to synchronous memory requests (currently: `history_read` action). Used as a handshake channel for operations requiring bidirectional communication.
+
+**Published by**: Souvenir's `HistoryReadHandler` when processing a `history_read` action.
+
+```
+LPUSH relais:memory:response:550e8400-... <JSON array of messages_raw lists>
+EXPIRE relais:memory:response:550e8400-... 60
+```
+
+**Payload schema** (single element, JSON array):
+
+```json
+[
+  [{"type": "human", "content": "...", ...}, {"type": "ai", "content": "...", ...}],
+  [{"type": "human", "content": "...", ...}, {"type": "ai", "content": "...", ...}],
+  ...
+]
+```
+
+Each element is a `messages_raw` turn (list of serialized LangChain messages for one agent exchange).
+
+**Reading pattern** (consumer):
+
+```python
+result = await redis_conn.brpop(response_key, timeout=timeout_seconds)
+if result:
+    _key, raw_payload = result
+    history_turns = json.loads(raw_payload)  # list[list[dict]]
+```
+
+**Truncation**: The handler applies token-based truncation (oldest-first) to fit within the `max_tokens` budget specified in the `history_read` action. Token estimation: ~4 characters per token.
 
 ---
 

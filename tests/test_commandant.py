@@ -358,3 +358,244 @@ async def test_handle_clear_command_dispatches(mock_redis):
     all_xadd_streams = [str(c) for c in mock_redis.xadd.call_args_list]
     assert any("relais:memory:request" in s for s in all_xadd_streams)
     assert not any("relais:messages:outgoing:discord" in s for s in all_xadd_streams)
+
+
+# ---------------------------------------------------------------------------
+# Tests handle_sessions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_sessions_sends_memory_request(mock_redis, sample_envelope):
+    """handle_sessions must publish to relais:memory:request."""
+    from commandant.commands import handle_sessions
+    await handle_sessions(sample_envelope, mock_redis)
+
+    calls = [str(c) for c in mock_redis.xadd.call_args_list]
+    assert any("relais:memory:request" in c for c in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_sessions_publishes_correct_action(mock_redis, sample_envelope):
+    """handle_sessions payload must carry action=ACTION_MEMORY_SESSIONS."""
+    from commandant.commands import handle_sessions
+    from common.envelope_actions import ACTION_MEMORY_SESSIONS
+    await handle_sessions(sample_envelope, mock_redis)
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    assert memory_calls, "No xadd call to relais:memory:request"
+    payload_arg = memory_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    assert sent_env.action == ACTION_MEMORY_SESSIONS
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_sessions_includes_user_id(mock_redis):
+    """handle_sessions must include user_id from CTX_PORTAIL in CTX_SOUVENIR_REQUEST."""
+    from commandant.commands import handle_sessions
+    from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST
+    from common.envelope_actions import ACTION_MESSAGE_COMMAND
+
+    envelope = Envelope(
+        content="/sessions",
+        sender_id="discord:42",
+        channel="discord",
+        session_id="s1",
+        correlation_id="c1",
+        action=ACTION_MESSAGE_COMMAND,
+        context={CTX_PORTAIL: {"user_id": "usr_alice"}},
+    )
+    await handle_sessions(envelope, mock_redis)
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    payload_arg = memory_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    assert sent_env.context[CTX_SOUVENIR_REQUEST]["user_id"] == "usr_alice"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_sessions_falls_back_to_sender_id_when_no_portail(mock_redis):
+    """handle_sessions must fall back to envelope.sender_id when CTX_PORTAIL is absent."""
+    from commandant.commands import handle_sessions
+    from common.contexts import CTX_SOUVENIR_REQUEST
+    from common.envelope_actions import ACTION_MESSAGE_COMMAND
+
+    envelope = Envelope(
+        content="/sessions",
+        sender_id="telegram:99",
+        channel="telegram",
+        session_id="s2",
+        correlation_id="c2",
+        action=ACTION_MESSAGE_COMMAND,
+    )
+    await handle_sessions(envelope, mock_redis)
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    payload_arg = memory_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    assert sent_env.context[CTX_SOUVENIR_REQUEST]["user_id"] == "telegram:99"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_sessions_includes_envelope_json(mock_redis, sample_envelope):
+    """handle_sessions CTX_SOUVENIR_REQUEST must include envelope_json key."""
+    from commandant.commands import handle_sessions
+    from common.contexts import CTX_SOUVENIR_REQUEST
+    await handle_sessions(sample_envelope, mock_redis)
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    payload_arg = memory_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    souvenir_ctx = sent_env.context[CTX_SOUVENIR_REQUEST]
+    assert "envelope_json" in souvenir_ctx
+    # envelope_json must be valid JSON
+    parsed = json.loads(souvenir_ctx["envelope_json"])
+    assert parsed["sender_id"] == sample_envelope.sender_id
+
+
+# ---------------------------------------------------------------------------
+# Tests handle_resume
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_resume_with_session_id(mock_redis):
+    """handle_resume with a session_id must publish ACTION_MEMORY_RESUME to relais:memory:request."""
+    from commandant.commands import handle_resume
+    from common.contexts import CTX_SOUVENIR_REQUEST
+    from common.envelope_actions import ACTION_MESSAGE_COMMAND, ACTION_MEMORY_RESUME
+
+    envelope = Envelope(
+        content="/resume sess_xyz",
+        sender_id="discord:77",
+        channel="discord",
+        session_id="s3",
+        correlation_id="c3",
+        action=ACTION_MESSAGE_COMMAND,
+        context={},
+    )
+    await handle_resume(envelope, mock_redis)
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    assert memory_calls, "Expected xadd on relais:memory:request"
+    payload_arg = memory_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    assert sent_env.action == ACTION_MEMORY_RESUME
+    assert sent_env.context[CTX_SOUVENIR_REQUEST]["target_session_id"] == "sess_xyz"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_resume_includes_user_id(mock_redis):
+    """handle_resume must include user_id from CTX_PORTAIL in CTX_SOUVENIR_REQUEST."""
+    from commandant.commands import handle_resume
+    from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST
+    from common.envelope_actions import ACTION_MESSAGE_COMMAND
+
+    envelope = Envelope(
+        content="/resume sess_xyz",
+        sender_id="discord:77",
+        channel="discord",
+        session_id="s3",
+        correlation_id="c3",
+        action=ACTION_MESSAGE_COMMAND,
+        context={CTX_PORTAIL: {"user_id": "usr_bob"}},
+    )
+    await handle_resume(envelope, mock_redis)
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    payload_arg = memory_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    assert sent_env.context[CTX_SOUVENIR_REQUEST]["user_id"] == "usr_bob"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_resume_without_session_id(mock_redis):
+    """/resume with no argument must send a usage message to the outgoing stream."""
+    from commandant.commands import handle_resume
+    from common.envelope_actions import ACTION_MESSAGE_COMMAND
+
+    envelope = Envelope(
+        content="/resume ",
+        sender_id="discord:77",
+        channel="discord",
+        session_id="s4",
+        correlation_id="c4",
+        action=ACTION_MESSAGE_COMMAND,
+    )
+    await handle_resume(envelope, mock_redis)
+
+    outgoing_calls = [c for c in mock_redis.xadd.call_args_list
+                      if "relais:messages:outgoing:discord" in str(c)]
+    assert outgoing_calls, "Expected a usage error message on the outgoing stream"
+
+    memory_calls = [c for c in mock_redis.xadd.call_args_list
+                    if "relais:memory:request" in str(c)]
+    assert not memory_calls, "Should NOT publish to memory:request when no session_id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_resume_without_session_id_content(mock_redis):
+    """/resume with no argument must include 'Usage' in the reply content."""
+    from commandant.commands import handle_resume
+    from common.envelope_actions import ACTION_MESSAGE_COMMAND
+
+    envelope = Envelope(
+        content="/resume",
+        sender_id="discord:77",
+        channel="discord",
+        session_id="s4",
+        correlation_id="c4",
+        action=ACTION_MESSAGE_COMMAND,
+    )
+    await handle_resume(envelope, mock_redis)
+
+    outgoing_calls = [c for c in mock_redis.xadd.call_args_list
+                      if "relais:messages:outgoing:discord" in str(c)]
+    payload_arg = outgoing_calls[0].args[1]
+    sent_env = Envelope.from_json(payload_arg["payload"])
+    assert "Usage" in sent_env.content or "usage" in sent_env.content.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests parse_command — sessions & resume
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_parse_command_sessions():
+    """/sessions → CommandResult(command='sessions', args=[])."""
+    from commandant.commands import parse_command
+    result = parse_command("/sessions")
+    assert result is not None
+    assert result.command == "sessions"
+    assert result.args == []
+
+
+@pytest.mark.unit
+def test_parse_command_resume_with_arg():
+    """/resume abc123 → CommandResult(command='resume', args=['abc123'])."""
+    from commandant.commands import parse_command
+    result = parse_command("/resume abc123")
+    assert result is not None
+    assert result.command == "resume"
+    assert result.args == ["abc123"]
+
+
+@pytest.mark.unit
+def test_known_commands_includes_sessions_and_resume():
+    """KNOWN_COMMANDS must include 'sessions' and 'resume'."""
+    from commandant.commands import KNOWN_COMMANDS
+    assert "sessions" in KNOWN_COMMANDS
+    assert "resume" in KNOWN_COMMANDS
