@@ -36,7 +36,7 @@ import shutil
 import uuid
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 import yaml
@@ -323,14 +323,16 @@ def _check_path_traversal(infos: list[zipfile.ZipInfo], root_dir: str) -> None:
     """
     for info in infos:
         raw = info.filename
+        # ZIP paths are always POSIX — use PurePosixPath to avoid OS-dependent separators
+        posix_path = PurePosixPath(raw)
         # Reject any literal ".." component
-        if ".." in Path(raw).parts:
+        if ".." in posix_path.parts:
             raise BundleValidationError(
                 f"path traversal detected in ZIP member: {raw!r}"
             )
-        # Normalise and verify the member stays inside root_dir
-        normalised = str(Path(raw))
-        if normalised != root_dir and not normalised.startswith(root_dir + "/"):
+        # Verify the member stays inside root_dir using path parts (not string prefix)
+        parts = posix_path.parts
+        if not parts or parts[0] != root_dir:
             raise BundleValidationError(
                 f"ZIP member {raw!r} is outside the bundle root {root_dir!r}"
             )

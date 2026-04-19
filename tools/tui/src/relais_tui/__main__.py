@@ -337,6 +337,14 @@ class RelaisApp(App[None]):
         if self._busy and self._stream_worker is not None:
             self._stream_worker.cancel()
 
+    def action_switch_tab(self, tab_id: str) -> None:
+        """Switch the active TabbedContent tab by id (e.g. Ctrl+B → bundles).
+
+        Args:
+            tab_id: The ``id`` attribute of the target ``TabPane``.
+        """
+        self.query_one(TabbedContent).active = tab_id
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

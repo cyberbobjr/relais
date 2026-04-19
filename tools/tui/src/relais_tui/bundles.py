@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -199,8 +200,23 @@ def install_bundle(
 
         bundle_name: str = str(raw["name"])
 
+        # Validate bundle name: only lowercase alphanumerics and hyphens,
+        # must start with alphanumeric — blocks "../" and any path separators.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9\-]*", bundle_name):
+            raise ValueError(
+                f"Invalid bundle name {bundle_name!r}: only lowercase letters, "
+                "digits, and hyphens are allowed."
+            )
+
         # --- Path traversal check -------------------------------------------
         dest_dir = (bundles_dir / bundle_name).resolve()
+        # Guard: resolved dest_dir must stay inside bundles_dir
+        try:
+            dest_dir.relative_to(bundles_dir.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Bundle name {bundle_name!r} resolves outside the bundles directory."
+            )
         for member in zf.infolist():
             member_path = (bundles_dir / member.filename).resolve()
             try:
@@ -225,10 +241,22 @@ def install_bundle(
             extracted = staging_parent / bundle_name
             extracted.rename(staging)
 
-            # Atomically swap: remove existing, rename staging into place
+            # Two-phase swap: keep a backup of the previous install until the
+            # new directory is in place, so a failed rename doesn't leave the
+            # bundle uninstalled.
+            backup = bundles_dir / f".backup-{bundle_name}"
             if dest_dir.exists():
-                shutil.rmtree(dest_dir)
-            staging.rename(dest_dir)
+                dest_dir.rename(backup)
+            try:
+                staging.rename(dest_dir)
+            except Exception:
+                # Restore previous version on failure
+                if backup.exists():
+                    backup.rename(dest_dir)
+                raise
+            else:
+                if backup.exists():
+                    shutil.rmtree(backup)
         except Exception:
             if staging.exists():
                 shutil.rmtree(staging)
