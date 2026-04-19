@@ -240,15 +240,24 @@ def _resolve_tool_tokens(
                 for t in imported_tools.values():
                     _add(t)
         else:
-            # Bare static tool name — global ToolRegistry
+            # Bare static tool name — global ToolRegistry, then local fallback
             tool = tool_registry.get(token)
             if tool is None:
-                logger.warning(
-                    "SubagentRegistry: subagent '%s' references unknown static "
-                    "tool '%s' — dropping (tool not found in ToolRegistry)",
-                    spec_name, token,
-                )
-                failed_tokens.append(token)
+                tool = local_tools.get(token)
+                if tool is None:
+                    logger.warning(
+                        "SubagentRegistry: subagent '%s' references unknown static "
+                        "tool '%s' — dropping (tool not found in ToolRegistry or local pack)",
+                        spec_name, token,
+                    )
+                    failed_tokens.append(token)
+                else:
+                    logger.debug(
+                        "SubagentRegistry: subagent '%s' — bare token '%s' resolved via "
+                        "local pack fallback",
+                        spec_name, token,
+                    )
+                    _add(tool)
             else:
                 _add(tool)
 

@@ -62,7 +62,7 @@ from typing import Any
 
 import yaml
 
-from common.config_loader import CONFIG_SEARCH_PATH
+from common.config_loader import CONFIG_SEARCH_PATH, resolve_bundles_dir
 from atelier.subagents_resolver import (  # noqa: F401 — re-exported for test imports
     _ALLOWED_MODULE_PREFIXES,
     _load_tools_from_import,
@@ -514,6 +514,62 @@ class SubagentRegistry:
                     spec.name, pack_dir, len(tools), len(skills),
                 )
 
+        # Scan bundle subagents (third tier — user and native packs take priority)
+        bundles_dir = resolve_bundles_dir()
+        if bundles_dir.is_dir():
+            for bundle_dir in sorted(p for p in bundles_dir.iterdir() if p.is_dir()):
+                bundle_subagents_dir = bundle_dir / "subagents"
+                if not bundle_subagents_dir.is_dir():
+                    continue
+
+                for pack_dir in sorted(
+                    p for p in bundle_subagents_dir.iterdir() if p.is_dir()
+                ):
+                    yaml_path = pack_dir / "subagent.yaml"
+                    if not yaml_path.is_file():
+                        logger.debug(
+                            "SubagentRegistry: %s has no subagent.yaml — skipping",
+                            pack_dir,
+                        )
+                        continue
+
+                    data = _load_yaml_file(yaml_path)
+                    if data is None:
+                        continue
+
+                    spec = _validate_and_build_spec(data, yaml_path, pack_dir)
+                    if spec is None:
+                        continue
+
+                    if spec.name in seen_names:
+                        logger.debug(
+                            "SubagentRegistry: skipping bundle %s — '%s' already loaded "
+                            "from a higher-priority path",
+                            pack_dir, spec.name,
+                        )
+                        continue
+
+                    tools = _load_local_tools(pack_dir, spec.name)
+
+                    skills: dict[str, str] = {}
+                    skills_dir = pack_dir / "skills"
+                    if skills_dir.is_dir():
+                        for skill_dir in sorted(
+                            p for p in skills_dir.iterdir() if p.is_dir()
+                        ):
+                            skills[skill_dir.name] = str(skill_dir.resolve())
+
+                    seen_names.add(spec.name)
+                    specs.append(spec)
+                    local_tools[spec.name] = tools
+                    local_skills[spec.name] = skills
+
+                    logger.info(
+                        "SubagentRegistry: loaded bundle subagent '%s' from %s "
+                        "(%d local tool(s), %d local skill(s))",
+                        spec.name, pack_dir, len(tools), len(skills),
+                    )
+
         logger.info("SubagentRegistry: %d subagent(s) loaded", len(specs))
         registry = cls(
             _specs=tuple(specs),
@@ -582,15 +638,23 @@ class SubagentRegistry:
                         )
                         failed.append(token)
                 else:
-                    # Bare static name — look up in ToolRegistry
+                    # Bare static name — global ToolRegistry, then local pack fallback
                     tool = self._tool_registry.get(token)
                     if tool is None:
-                        logger.warning(
-                            "SubagentRegistry: subagent '%s' — static tool '%s' not "
-                            "found in ToolRegistry at startup — marking as degraded",
-                            spec.name, token,
-                        )
-                        failed.append(token)
+                        local_tools = self._local_tools_by_subagent.get(spec.name, {})
+                        if local_tools.get(token) is not None:
+                            logger.debug(
+                                "SubagentRegistry: subagent '%s' — bare token '%s' not in "
+                                "ToolRegistry at startup, resolved via local pack fallback",
+                                spec.name, token,
+                            )
+                        else:
+                            logger.warning(
+                                "SubagentRegistry: subagent '%s' — static tool '%s' not "
+                                "found in ToolRegistry or local pack at startup — marking as degraded",
+                                spec.name, token,
+                            )
+                            failed.append(token)
 
             if failed:
                 spec = dataclasses.replace(spec, degraded_tokens=tuple(failed))

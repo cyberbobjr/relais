@@ -18,6 +18,8 @@ untrusted data from envelope metadata stamped upstream by Portail.
 import fnmatch
 from pathlib import Path
 
+from common.config_loader import resolve_bundles_dir
+
 
 class ToolPolicy:
     """Encapsulates skill and MCP-tool access policy for a single Atelier instance.
@@ -62,15 +64,26 @@ class ToolPolicy:
         dir; other entries are resolved relative to the base dir.
         Non-existent paths and path-traversal attempts are silently dropped.
 
+        Bundle skills from ``resolve_bundles_dir() / "*/skills/"`` are
+        appended after the local skills, with deduplication by path.
+
         Args:
             metadata_value: The raw value from ``envelope.context[namespace]``
                 (list of directory names, ``["*"]``, None, …).
 
         Returns:
-            List of absolute path strings for directories that exist on disk.
+            List of absolute path strings for directories that exist on disk,
+            including bundle skill directories deduplicated by path.
         """
         dirs = self._parse_policy(metadata_value)
-        return self._resolve_paths(dirs)
+        local = self._resolve_paths(dirs)
+        seen: set[str] = set(local)
+        result = list(local)
+        for bundle_skill_path in self._bundle_skill_dirs():
+            if bundle_skill_path not in seen:
+                seen.add(bundle_skill_path)
+                result.append(bundle_skill_path)
+        return result
 
     def filter_mcp_tools(self, tools: list, metadata_value: object) -> list:
         """Parse metadata patterns and return matching tools (fnmatch).
@@ -131,6 +144,40 @@ class ToolPolicy:
                 if candidate.is_dir() and candidate.is_relative_to(self._base_dir):
                     resolved.append(str(candidate))
         return resolved
+
+    def _bundle_skill_dirs(self) -> list[str]:
+        """Return absolute path strings for all existing bundle skills directories.
+
+        Scans ``resolve_bundles_dir() / "<bundle>/" / "skills/" / "<skill>/"``
+        for each installed bundle.  Only directories that physically exist on
+        disk are included.
+
+        Returns:
+            Sorted list of absolute path strings for bundle skill directories.
+            Empty list when the bundles directory does not exist or no bundle
+            has a ``skills/`` subdirectory.
+        """
+        result: list[str] = []
+        bundles_dir: Path = resolve_bundles_dir()
+        if not bundles_dir.is_dir():
+            return result
+        bundles_dir_resolved = bundles_dir.resolve()
+        for bundle_dir in sorted(bundles_dir.iterdir()):
+            if not bundle_dir.is_dir():
+                continue
+            skills_dir = bundle_dir / "skills"
+            if not skills_dir.is_dir():
+                continue
+            for skill_dir in sorted(skills_dir.iterdir()):
+                if not skill_dir.is_dir():
+                    continue
+                resolved = skill_dir.resolve()
+                try:
+                    resolved.relative_to(bundles_dir_resolved)
+                except ValueError:
+                    continue
+                result.append(str(resolved))
+        return result
 
     @staticmethod
     def _filter_tools(tools: list, patterns: tuple[str, ...]) -> list:

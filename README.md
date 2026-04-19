@@ -1,58 +1,83 @@
 # RELAIS
 
-RELAIS est une architecture micro-briques pour assistant IA, orchestrée via Redis Streams. Ce README décrit l'état réellement implémenté dans le code du dépôt aujourd'hui.
+RELAIS is a micro-brick architecture for an AI assistant, orchestrated via Redis Streams. This README describes the state actually implemented in the repository code today.
 
 ---
 
-## Vue d'ensemble
+## Overview
 
-Les briques actives du repo sont :
+Active bricks in the repo:
 
-- `aiguilleur` : adaptateurs de canaux entrants/sortants
-- `portail` : validation d'enveloppe + résolution d'identité
-- `sentinelle` : ACL et routage messages/commandes
-- `atelier` : exécution LLM via DeepAgents/LangGraph
-- `commandant` : commandes slash hors LLM
-- `souvenir` : mémoire court terme Redis + archivage SQLite
-- `archiviste` : logs et observation partielle du pipeline
-- `forgeron` : amélioration autonome des skills (changelog + consolidation périodique) et création automatique de skills depuis les archives
+- `aiguilleur`: inbound/outbound channel adapters
+- `portail`: envelope validation + identity resolution
+- `sentinelle`: ACL and message/command routing
+- `atelier`: LLM execution via DeepAgents/LangGraph
+- `commandant`: slash commands outside the LLM
+- `souvenir`: Redis short-term memory + SQLite archiving
+- `archiviste`: logs and partial pipeline observation
+- `forgeron`: autonomous skill improvement (changelog + periodic consolidation) and automatic skill creation from archives
 
-Adaptateurs de canaux réellement livrés :
+Channel adapters actually shipped:
 
-- **Discord** : adaptateur natif Python complet (`aiguilleur/channels/discord/adapter.py`)
-- **WhatsApp** : adaptateur natif Python complet via la passerelle [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client HTTP vers la passerelle. Installation, configuration et pairing via CLI (`python -m aiguilleur.channels.whatsapp install|configure|uninstall`) ou via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall` du sous-agent `relais-config`. Voir [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md).
-- **REST** : adaptateur HTTP/JSON + SSE (`aiguilleur/channels/rest/adapter.py`) — expose `POST /v1/messages` (Bearer API key) et un stream SSE pour les clients programmatiques (CLI, CI, TUI). Playground SSE interactif sur `GET /docs/sse`. Authentification via clés API HMAC-SHA256 déclarées dans `portail.yaml`.
+- **Discord**: full native Python adapter (`aiguilleur/channels/discord/adapter.py`)
+- **WhatsApp**: full native Python adapter via the [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) gateway (`aiguilleur/channels/whatsapp/adapter.py`) — aiohttp webhook server + HTTP client to the gateway. Install, configure, and pair via CLI (`python -m aiguilleur.channels.whatsapp install|configure|uninstall`) or via the `relais-config` sub-agent's LangChain tools `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall`. See [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md).
+- **REST**: HTTP/JSON + SSE adapter (`aiguilleur/channels/rest/adapter.py`) — exposes `POST /v1/messages` (Bearer API key) and an SSE stream for programmatic clients (CLI, CI, TUI). Interactive SSE playground at `GET /docs/sse`. Authentication via HMAC-SHA256 API keys declared in `portail.yaml`.
 
-La configuration de canaux prévoit aussi `telegram` et `slack`, mais leur présence dans les fichiers de config ne signifie pas qu'un adaptateur complet existe forcément dans ce dépôt.
+The channel configuration also covers `telegram` and `slack`, but their presence in config files does not guarantee a complete adapter exists in this repo.
 
-Outils livrés dans le dépôt :
+Tools shipped in the repo:
 
-- `tools/tui/` : client terminal autonome (Textual) pour RELAIS, installable indépendamment (`uv pip install -e tools/tui`). Se connecte exclusivement via l'API REST SSE — aucune dépendance sur les internes RELAIS. Voir [plans/TUI.md](plans/TUI.md).
+- `tools/tui/`: standalone terminal client (Textual) for RELAIS, installable independently (`uv pip install -e tools/tui`). Connects exclusively via the REST SSE API — no dependency on RELAIS internals. See [plans/TUI.md](plans/TUI.md).
 
 ---
 
 ## Architecture
 
-### Flux réel
+### Simplified view
+
+```
+User
+    │
+    ▼
+┌─────────────┐     ┌─────────────────────────────────────────────────────────┐
+│  AIGUILLEUR │     │                     PIPELINE                            │
+│  (channel)  │────▶│  PORTAIL ──▶ SENTINELLE ──▶ ATELIER ──▶ SOUVENIR       │
+│  Discord    │     │  (identity)   (ACL)       (LLM loop)  (SQLite memory)   │
+│  WhatsApp   │◀────│                  │                                       │
+│  REST       │     │                  └──▶ COMMANDANT (slash commands)       │
+└─────────────┘     └─────────────────────────────────────────────────────────┘
+                                            │
+                                            ▼ relais:skill:trace
+                                      ┌──────────────┐
+                                      │   FORGERON   │◀── relais:memory:request
+                                      │  - changelog │
+                                      │  - skill auto│
+                                      │  - correction│──▶ skill-designer
+                                      └──────────────┘
+```
+
+Each arrow corresponds to a **Redis Stream**. Each brick is an independent Python process. Communication is asynchronous and resilient: unacknowledged messages (`XACK`) remain in the PEL (Pending Entry List) and are automatically redelivered.
+
+### Actual flow
 
 ```mermaid
 flowchart TD
-    USERS([Utilisateurs externes])
-  AIG["AIGUILLEUR<br/>adaptateur de canal"]
-  PORTAIL["PORTAIL<br/>valide Envelope<br/>résout UserRegistry<br/>stamp user_record + user_id + llm_profile"]
+    USERS([External users])
+  AIG["AIGUILLEUR<br/>channel adapter"]
+  PORTAIL["PORTAIL<br/>validates Envelope<br/>resolves UserRegistry<br/>stamps user_record + user_id + llm_profile"]
     PENDING[(relais:admin:pending_users)]
-  SENT_IN["SENTINELLE entrant<br/>ACL + routage"]
+  SENT_IN["SENTINELLE inbound<br/>ACL + routing"]
   ATELIER["ATELIER<br/>DeepAgents LangGraph"]
-  COMMANDANT["COMMANDANT<br/>slash commands hors LLM"]
-  SOUVENIR["SOUVENIR<br/>archive SQLite + fichiers agent"]
-  SENT_OUT["SENTINELLE sortant<br/>pass-through actuel"]
+  COMMANDANT["COMMANDANT<br/>slash commands outside LLM"]
+  SOUVENIR["SOUVENIR<br/>SQLite archive + agent files"]
+  SENT_OUT["SENTINELLE outbound<br/>current pass-through"]
     OUT["relais:messages:outgoing:{channel}"]
     STREAM["relais:messages:streaming:{channel}:{correlation_id}"]
     MEM_REQ[relais:memory:request]
     MEM_RES[relais:memory:response]
     DLQ[(relais:tasks:failed)]
-    ARCHIVISTE["ARCHIVISTE<br/>observe logs events<br/>et une partie du pipeline"]
-    FORGERON["FORGERON<br/>changelog + consolidation skills (S3)<br/>+ création auto skills"]
+    ARCHIVISTE["ARCHIVISTE<br/>observes logs events<br/>and part of the pipeline"]
+    FORGERON["FORGERON<br/>changelog + skill consolidation (S3)<br/>+ auto skill creation"]
     SKILL_TRACE[relais:skill:trace]
     EVENTS_SYS[relais:events:system]
 
@@ -62,12 +87,12 @@ flowchart TD
     PORTAIL -->|"relais:security"| SENT_IN
     PORTAIL -.->|"unknown_user_policy = pending"| PENDING
 
-    SENT_IN -->|"message autorise<br/>relais:tasks"| ATELIER
-    SENT_IN -->|"commande connue + ACL OK<br/>relais:commands"| COMMANDANT
-    SENT_IN -->|"commande inconnue ou refusee<br/>reply inline"| OUT
+    SENT_IN -->|"message authorized<br/>relais:tasks"| ATELIER
+    SENT_IN -->|"known command + ACL OK<br/>relais:commands"| COMMANDANT
+    SENT_IN -->|"unknown or denied command<br/>inline reply"| OUT
 
     ATELIER -->|"relais:messages:streaming:{channel}:{correlation_id}"| STREAM
-    ATELIER -->|"relais:messages:outgoing_pending<br/>reponse finale"| SENT_OUT
+    ATELIER -->|"relais:messages:outgoing_pending<br/>final response"| SENT_OUT
     ATELIER -->|"relais:messages:outgoing:{channel}<br/>progress events"| OUT
     ATELIER -->|"relais:memory:request<br/>archive action"| MEM_REQ
     ATELIER -->|"relais:tasks:failed"| DLQ
@@ -84,7 +109,7 @@ flowchart TD
     SKILL_TRACE --> FORGERON
     MEM_REQ -->|"forgeron_archive_group<br/>intent labeling + skill creation"| FORGERON
     FORGERON -->|"relais:events:system<br/>skill.created"| EVENTS_SYS
-    FORGERON -->|"relais:messages:outgoing_pending<br/>notifications utilisateur"| SENT_OUT
+    FORGERON -->|"relais:messages:outgoing_pending<br/>user notifications"| SENT_OUT
 
     PORTAIL -. logs .-> ARCHIVISTE
     SENT_IN -. logs .-> ARCHIVISTE
@@ -92,14 +117,14 @@ flowchart TD
     COMMANDANT -. logs .-> ARCHIVISTE
     SOUVENIR -. logs .-> ARCHIVISTE
     FORGERON -. logs .-> ARCHIVISTE
-    OUT -. pipeline observe partiel .-> ARCHIVISTE
+    OUT -. partial pipeline observation .-> ARCHIVISTE
     EVENTS_SYS -. events .-> ARCHIVISTE
 ```
 
-### Streams Redis importants
+### Key Redis Streams
 
-| Stream | Producteur | Consommateur |
-|--------|------------|--------------|
+| Stream | Producer | Consumer |
+|--------|----------|----------|
 | `relais:messages:incoming` | Aiguilleur | Portail |
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
@@ -107,62 +132,97 @@ flowchart TD
 | `relais:memory:request` | Atelier, Commandant | Souvenir (`souvenir_group`), Forgeron (`forgeron_archive_group`) |
 | `relais:messages:outgoing_pending` | Atelier | Sentinelle |
 | `relais:messages:outgoing:{channel}` | Sentinelle, Atelier, Commandant | Aiguilleur |
-| `relais:messages:streaming:{channel}:{correlation_id}` | Atelier | adaptateur de canal streaming |
-| `relais:tasks:failed` | Atelier | observateurs / diagnostics |
-| `relais:admin:pending_users` | Portail | revue manuelle |
+| `relais:messages:streaming:{channel}:{correlation_id}` | Atelier | streaming channel adapter |
+| `relais:tasks:failed` | Atelier | observers / diagnostics |
+| `relais:admin:pending_users` | Portail | manual review |
 | `relais:skill:trace` | Atelier | Forgeron |
 | `relais:events:system` | Forgeron | Archiviste |
-| `relais:logs` | toutes les briques | Archiviste |
+| `relais:logs` | all bricks | Archiviste |
 
-### Comportement des briques
+### Brick behavior
 
-- `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `metadata["user_record"]`, `metadata["user_id"]` et `metadata["llm_profile"]` (depuis `channel_profile` ou `"default"`), puis publie sur `relais:security`.
-- `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
-- `Commandant` consomme `relais:commands`. `/help` répond avec la liste des commandes disponibles. `/clear` publie une requête `clear` sur `relais:memory:request`. `/sessions` liste les sessions récentes de l'utilisateur. `/resume <session_id>` reprend une session précédente en chargeant son historique complet.
-- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte une architecture 2-tier de sous-agents : sous-agents utilisateur dans `$RELAIS_HOME/config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels), et sous-agents natifs dans `atelier/subagents/<nom>/` (livrés avec le code source). L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns). Hot-reload supporté pour les modifications en temps réel.
-- `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions `sessions` et `resume` retournent les données à l'utilisateur via `relais:messages:outgoing:{channel}` (avec ownership enforcement). Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier (keyed par `user_id:session_id`).
-- `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
-- `Forgeron` dispose de deux pipelines autonomes :
+- `Portail` consumes `relais:messages:incoming`, resolves the user via `UserRegistry`, writes `context["portail"]["user_record"]`, `context["portail"]["user_id"]` and `context["portail"]["llm_profile"]` (from `channel_profile` or `"default"`), then publishes to `relais:security`.
+- `Sentinelle` consumes `relais:security`, applies ACLs, routes normal messages to `relais:tasks` and slash commands to `relais:commands`. Unknown or unauthorized commands generate a direct inline response on `relais:messages:outgoing:{channel}`.
+- `Commandant` consumes `relais:commands`. `/help` responds with the list of available commands. `/clear` publishes a `clear` request to `relais:memory:request`. `/sessions` lists the user's recent sessions. `/resume <session_id>` resumes a previous session by loading its full history.
+- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), optionally publishes streaming to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, then the final response to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD) and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
+- `Souvenir` consumes `relais:memory:request` (actions: `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`). The `archive` action is published by Atelier with the full turn content and `messages_raw` for archiving in SQLite. The `sessions` and `resume` actions return data to the user via `relais:messages:outgoing:{channel}` (with ownership enforcement). File actions are triggered by agents via `SouvenirBackend`. Short-term history is managed by the Atelier LangGraph checkpointer (keyed by `user_id:session_id`).
+- `Archiviste` observes `relais:logs`, `relais:events:*` and a partial list of pipeline streams. It does not literally observe all streams.
+- `Forgeron` has three autonomous pipelines:
 
-  **Pipeline 1 — Amélioration des skills existants** (changelog + consolidation)
+  **Pipeline 1 — Improving existing skills** (changelog + consolidation)
 
-  Consomme `relais:skill:trace` (`forgeron_group`). Pour chaque trace, Forgeron évalue quatre conditions de déclenchement par skill. L'analyse se déclenche dès qu'**au moins une** est vraie (et que `annotation_mode` est activé) :
+  Consumes `relais:skill:trace` (`forgeron_group`). For each trace, Forgeron evaluates four trigger conditions per skill. Analysis fires as soon as **at least one** is true (and `annotation_mode` is enabled):
 
-  | Condition | Seuil | Ce qui est capturé |
-  |-----------|-------|--------------------|
-  | **Erreurs d'outils** | `tool_error_count >= 1` | Turns où l'agent a échoué |
-  | **Turn avorté (DLQ)** | `tool_error_count == -1` | Turns avortés par `ToolErrorGuard` — `messages_raw` contient la conversation partielle |
-  | **Success after failure** | Turn courant 0 erreurs, turn précédent (même skill) avait des erreurs | Le "turn de correction" — là où l'agent a trouvé la bonne approche |
-  | **Seuil d'usage** | `annotation_call_threshold` appels cumulés (défaut 5) | Patterns d'utilisation normaux, même sans erreur |
+  | Condition | Threshold | What is captured |
+  |-----------|-----------|-----------------|
+  | **Tool errors** | `tool_error_count >= 1` | Turns where the agent failed |
+  | **Aborted turn (DLQ)** | `tool_error_count == -1` | Turns aborted by `ToolErrorGuard` — `messages_raw` contains the partial conversation |
+  | **Success after failure** | Current turn 0 errors, previous turn (same skill) had errors | The "correction turn" — where the agent found the right approach |
+  | **Usage threshold** | `annotation_call_threshold` cumulative calls (default 5) | Normal usage patterns, even without errors |
 
-  Un **cooldown Redis** par skill (`annotation_cooldown_seconds`, défaut 300 s) empêche le spam d'annotations.
+  A **Redis cooldown** per skill (`annotation_cooldown_seconds`, default 300 s) prevents annotation spam.
 
-  L'amélioration se fait en deux phases :
-  - **Phase 1 — Changelog** : `ChangelogWriter` (LLM rapide) extrait 1–3 observations depuis le SKILL.md actuel + la conversation, et les ajoute à `CHANGELOG.md`. Le SKILL.md n'est **jamais modifié** en Phase 1.
-  - **Phase 2 — Consolidation** : quand `CHANGELOG.md` dépasse `consolidation_line_threshold` lignes (défaut 80) et que le cooldown de consolidation a expiré (défaut 30 min), `SkillConsolidator` (LLM precise) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail) et vide le changelog. Notification optionnelle à l'utilisateur.
+  Improvement happens in two phases:
+  - **Phase 1 — Changelog**: `ChangelogWriter` (fast LLM) extracts 1–3 observations from the current SKILL.md + the conversation, and appends them to `CHANGELOG.md`. The SKILL.md is **never modified** in Phase 1.
+  - **Phase 2 — Consolidation**: when `CHANGELOG.md` exceeds `consolidation_line_threshold` lines (default 80) and the consolidation cooldown has expired (default 30 min), `SkillConsolidator` (precise LLM) rewrites SKILL.md by absorbing the observations, produces a `CHANGELOG_DIGEST.md` (audit trail), and clears the changelog. Optional user notification.
 
-  **Pipeline 2 — Création automatique de skills**
+  **Pipeline 2 — Automatic skill creation**
 
-  Consomme `relais:memory:request` (`forgeron_archive_group`, fan-out indépendant de Souvenir). Pour chaque session archivée :
-  1. `IntentLabeler` (LLM rapide) extrait un label d'intention normalisé (ex: `"send_email"`). Si aucun pattern clair → arrêt.
-  2. La session est enregistrée en SQLite avec son label.
-  3. Quand `min_sessions_for_creation` sessions (défaut 3) partagent le même label ET que le cooldown de création a expiré (défaut 24h) :
-     - `SkillCreator` (LLM precise) génère un `SKILL.md` complet à partir des sessions représentatives.
-     - L'événement `skill.created` est publié sur `relais:events:system`.
-     - Notification optionnelle à l'utilisateur via `relais:messages:outgoing_pending`.
+  Consumes `relais:memory:request` (`forgeron_archive_group`, independent fan-out from Souvenir). For each archived session:
+  1. `IntentLabeler` (fast LLM) extracts a normalized intent label (e.g. `"send_email"`). If no clear pattern → stop.
+  2. The session is recorded in SQLite with its label.
+  3. When `min_sessions_for_creation` sessions (default 3) share the same label AND the creation cooldown has expired (default 24h):
+     - `SkillCreator` (precise LLM) generates a complete `SKILL.md` from the representative sessions.
+     - The `skill.created` event is published to `relais:events:system`.
+     - Optional user notification via `relais:messages:outgoing_pending`.
+
+  **Pipeline 3 — User correction → `skill-designer`**
+
+  Also consumes `relais:memory:request` (`forgeron_archive_group`). The `IntentLabeler` can detect that a session is an **explicit user correction** (`is_correction=True`) rather than normal usage. In that case (and if `correction_mode` is enabled):
+  1. Forgeron fetches the full session history from Souvenir via `relais:memory:response:{correlation_id}` (BRPOP).
+  2. A notification is sent to the user informing them that a correction was detected.
+  3. An `ACTION_MESSAGE_TASK` message is published to `relais:tasks` with `force_subagent = "skill-designer"` in the context. Atelier then delegates directly to `skill-designer`, which engages a dialogue with the user to create an appropriate `SKILL.md`.
+
+---
+
+## Available Commands
+
+Slash commands are handled outside the LLM by **Commandant**. They all start with `/` and are routed before reaching Atelier.
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Displays the list of available commands. |
+| `/clear` | Clears the current session history (Redis + SQLite). |
+| `/sessions` | Lists your recent sessions with their identifiers. |
+| `/resume <id>` | Resumes a previous session and loads its history. |
+
+**Access control**: commands authorized per role are declared in `roles.*.actions` in `portail.yaml`. `["*"]` grants access to all commands, `[]` denies all.
+
+```yaml
+# portail.yaml
+roles:
+  admin:
+    actions: ["*"]        # all commands
+  user:
+    actions: ["clear", "sessions", "resume"]
+  guest:
+    actions: []           # no commands allowed
+```
+
+Unknown or unauthorized commands generate a direct inline response (without going through Atelier).
 
 ---
 
 ## Installation
 
-### Prérequis
+### Prerequisites
 
 - Python `>=3.11`
 - `uv`
-- `supervisord` si vous voulez utiliser le lancement supervisé
-- Redis local si vous démarrez le système complet
+- `supervisord` if you want supervised launching
+- Local Redis if you start the full system
 
-### Chemin recommandé
+### Recommended path
 
 ```bash
 git clone <repo-url>
@@ -177,9 +237,9 @@ python -c "from common.init import initialize_user_dir; initialize_user_dir()"
 alembic upgrade head
 ```
 
-### Ce que fait l'initialisation
+### What initialization does
 
-`initialize_user_dir()` crée `RELAIS_HOME` et y copie l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, notamment :
+`initialize_user_dir()` creates `RELAIS_HOME` and copies all templates declared in `common/init.DEFAULT_FILES`, including:
 
 - `config/config.yaml`
 - `config/portail.yaml`, `config/sentinelle.yaml`
@@ -187,21 +247,21 @@ alembic upgrade head
 - `config/aiguilleur.yaml`
 - `config/tui/config.yaml`
 - `config/HEARTBEAT.md`
-- les prompts livrés (`prompts/soul/SOUL.md`, channels, policies, roles, users)
+- shipped prompts (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
-Si `config/aiguilleur.yaml` est supprimé après coup, `load_channels_config()` loggue un WARNING et retombe sur un fallback Discord-only.
+If `config/aiguilleur.yaml` is deleted afterwards, `load_channels_config()` logs a WARNING and falls back to a Discord-only minimal fallback.
 
 ### `RELAIS_HOME`
 
-Par défaut, `RELAIS_HOME` vaut `./.relais` à la racine du dépôt. Vous pouvez le surcharger avec la variable d'environnement `RELAIS_HOME`.
+By default, `RELAIS_HOME` is `./.relais` at the repository root. You can override it with the `RELAIS_HOME` environment variable.
 
-La configuration et les prompts sont lus depuis `RELAIS_HOME`. Les répertoires `skills`, `logs`, `media` et `storage` restent centrés sur `RELAIS_HOME`.
+Configuration and prompts are read from `RELAIS_HOME`. The `skills`, `logs`, `media` and `storage` directories remain centered on `RELAIS_HOME`.
 
 ---
 
-## Arborescence de travail
+## Working directory structure
 
-Après initialisation, l'arborescence utilisateur ressemble à ceci :
+After initialization, the user directory looks like this:
 
 ```text
 <RELAIS_HOME>/
@@ -217,7 +277,7 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 │   └── atelier/
 │       ├── profiles.yaml
 │       ├── mcp_servers.yaml
-│       └── subagents/          ← sous-agents custom (vide par défaut)
+│       └── subagents/          ← custom sub-agents (empty by default)
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -234,64 +294,64 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
     └── memory.db
 ```
 
-`audit.db` n'est pas une base actuellement gérée par le code. L'Archiviste écrit surtout dans `logs/events.jsonl` et dans les logs de processus.
+`audit.db` is not a database currently managed by the code. Archiviste writes mainly to `logs/events.jsonl` and process logs.
 
 ---
 
-## Configuration et rechargement à chaud
+## Configuration and hot-reload
 
-### Rechargement à chaud (hot-reload)
+### Hot-reload
 
-Toutes les briques supportent le rechargement de leur configuration sans redémarrage de la brique.
+All bricks support reloading their configuration without restarting.
 
-**Mécanisme:**
-- Chaque brique surveille ses fichiers YAML de configuration via `watchfiles` (détection système de changements fichier)
-- À chaque changement détecté, la configuration est rechargée et validée atomiquement
-- En cas d'erreur YAML, la configuration précédente est préservée (fallback sûr)
-- Les configurations rechargées sont archivées dans `~/.relais/config/backups/{brick}_{timestamp}.yaml` (max 5 versions par brique)
-- Les opérateurs peuvent aussi déclencher le rechargement manuellement via Redis Pub/Sub en envoyant `"reload"` sur `relais:config:reload:{brick_name}`
+**Mechanism:**
+- Each brick watches its YAML configuration files via `watchfiles` (filesystem change detection)
+- On each detected change, the configuration is reloaded and validated atomically
+- On YAML error, the previous configuration is preserved (safe fallback)
+- Reloaded configurations are archived in `~/.relais/config/backups/{brick}_{timestamp}.yaml` (max 5 versions per brick)
+- Operators can also trigger reload manually via Redis Pub/Sub by sending `"reload"` on `relais:config:reload:{brick_name}`
 
-**Fichiers surveillés par brique:**
-- **Portail**: `config/portail.yaml` (utilisateurs, rôles, politiques)
-- **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
+**Files watched per brick:**
+- **Portail**: `config/portail.yaml` (users, roles, policies)
+- **Sentinelle**: `config/sentinelle.yaml` (ACLs, groups)
 - **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
-- **Souvenir**: aucun fichier surveillé — pas de config rechargeable
-- **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux)
+- **Souvenir**: no watched files — no reloadable config
+- **Aiguilleur**: `config/aiguilleur.yaml` (channel definitions)
 
-**Cas d'usage:**
-- Modification des ACL (Sentinelle) sans redémarrage
-- Ajout/suppression de profils LLM (Atelier) en direct
-- Changement de politique utilisateur (Portail)
-- Activation/désactivation de canaux (Aiguilleur)
+**Use cases:**
+- Modifying ACLs (Sentinelle) without restart
+- Adding/removing LLM profiles (Atelier) live
+- Changing user policies (Portail)
+- Enabling/disabling channels (Aiguilleur)
 
 ### `config/config.yaml`
 
-Le runtime lit aujourd'hui surtout `llm.default_profile` dans ce fichier, via `common.config_loader.get_default_llm_profile()`.
+The runtime currently reads mainly `llm.default_profile` from this file, via `common.config_loader.get_default_llm_profile()`.
 
-Exemple minimal fidèle :
+Minimal faithful example:
 
 ```yaml
 llm:
   default_profile: default
 ```
 
-Le template livré contient aussi des blocs `redis`, `logging`, `security` et `paths`, mais le chemin d'exécution actuel s'appuie principalement sur les variables d'environnement pour Redis et les chemins runtime.
+The shipped template also contains `redis`, `logging`, `security` and `paths` blocks, but the current execution path relies primarily on environment variables for Redis and runtime paths.
 
 ### `config/portail.yaml`
 
-Ce fichier pilote l'identité utilisateur et la politique des inconnus.
+This file drives user identity and unknown user policy.
 
-Points importants :
+Key points:
 
-- `unknown_user_policy` : `deny`, `guest` ou `pending`
-- `guest_role` : rôle utilisé si `unknown_user_policy=guest`
+- `unknown_user_policy`: `deny`, `guest` or `pending`
+- `guest_role`: role used if `unknown_user_policy=guest`
 - `users.*.prompt_path`
 - `roles.*.prompt_path`
 - `roles.*.skills_dirs`
 - `roles.*.allowed_mcp_tools`
 - `roles.*.allowed_subagents`
 
-Exemple réduit :
+Reduced example:
 
 ```yaml
 unknown_user_policy: deny
@@ -299,7 +359,7 @@ guest_role: guest
 
 users:
   usr_admin:
-    display_name: "Administrateur"
+    display_name: "Administrator"
     role: admin
     blocked: false
     prompt_path: null
@@ -325,9 +385,9 @@ roles:
 
 ### `config/sentinelle.yaml`
 
-La Sentinelle ne résout pas l'identité. Elle lit `user_record` depuis l'enveloppe enrichie par le Portail et applique ses règles ACL.
+Sentinelle does not resolve identity. It reads `user_record` from the envelope enriched by Portail and applies its ACL rules.
 
-Exemple :
+Example:
 
 ```yaml
 access_control:
@@ -339,7 +399,7 @@ groups: []
 
 ### `config/atelier.yaml`
 
-Le fichier pilote la publication des événements vers le channel.
+This file drives event publication to the channel.
 
 ```yaml
 display:
@@ -355,7 +415,7 @@ display:
 
 ### `config/atelier/profiles.yaml`
 
-Le loader lit ces champs :
+The loader reads these fields:
 
 - `model`
 - `temperature`
@@ -370,7 +430,7 @@ Le loader lit ces champs :
 - `resilience.retry_delays`
 - `resilience.fallback_model`
 
-Exemple minimal :
+Minimal example:
 
 ```yaml
 profiles:
@@ -390,13 +450,13 @@ profiles:
       fallback_model: null
 ```
 
-`base_url` peut utiliser une interpolation `${VAR}`. Si la variable n'existe pas au chargement, `load_profiles()` échoue immédiatement.
+`base_url` can use `${VAR}` interpolation. If the variable does not exist at load time, `load_profiles()` fails immediately.
 
 ### `config/atelier/mcp_servers.yaml`
 
-Le loader actuel lit les sections `mcp_servers.global` et `mcp_servers.contextual`, avec les entrées `enabled`, `type`, `command`, `args`, `url`, `env`, `profiles`.
+The current loader reads the `mcp_servers.global` and `mcp_servers.contextual` sections, with entries for `enabled`, `type`, `command`, `args`, `url`, `env`, `profiles`.
 
-Exemple :
+Example:
 
 ```yaml
 mcp_servers:
@@ -420,9 +480,9 @@ mcp_servers:
 
 ### `config/aiguilleur.yaml`
 
-`load_channels_config()` charge ce fichier via la cascade de config. Le template est copié par `initialize_user_dir()`. S'il est supprimé manuellement après coup, un WARNING est loggué et le code retombe sur un fallback minimal Discord-only.
+`load_channels_config()` loads this file via the config cascade. The template is copied by `initialize_user_dir()`. If deleted manually afterwards, a WARNING is logged and the code falls back to a minimal Discord-only fallback.
 
-Exemple :
+Example:
 
 ```yaml
 channels:
@@ -436,42 +496,49 @@ channels:
     profile: fast
 
   whatsapp:
-    enabled: false          # activer dans ~/.relais/config/aiguilleur.yaml
-    streaming: false        # baileys-api ne supporte pas le streaming en MVP
+    enabled: false          # enable in ~/.relais/config/aiguilleur.yaml
+    streaming: false        # baileys-api does not support streaming in MVP
     profile: default
     prompt_path: "channels/whatsapp_default.md"
     max_restarts: 5
 ```
 
-Points importants :
+Key points:
 
-- `streaming` est lu par chaque adaptateur et estampillé dans `context.aiguilleur["streaming"]` ; l'Atelier lit cette valeur par message (pas de cache au démarrage)
-- `profile` force un profil LLM pour tout message du canal
-- `prompt_path` force un overlay de prompt de canal (Layer 4)
-- `type: external`, `command`, `args`, `class_path` et `max_restarts` sont pris en charge par le superviseur d'adaptateurs
+- `streaming` is read by each adapter and stamped into `context.aiguilleur["streaming"]`; Atelier reads this value per message (no startup cache)
+- `profile` forces an LLM profile for all messages from the channel
+- `prompt_path` forces a channel prompt overlay (Layer 4)
+- `type: external`, `command`, `args`, `class_path` and `max_restarts` are supported by the adapter supervisor
 
-> L'installation et la configuration du canal WhatsApp (install de la passerelle baileys-api, création de la clé API, pairing QR) sont prises en charge de bout en bout par le sous-agent `relais-config` via les skills `channel-setup` et `whatsapp`. Voir [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) pour le guide pas-à-pas manuel.
+> WhatsApp channel installation and configuration (baileys-api gateway install, API key creation, QR pairing) are handled end-to-end by the `relais-config` sub-agent via the `channel-setup` and `whatsapp` skills. See [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) for the manual step-by-step guide.
 
 ---
 
 ## Prompts
 
-Le prompt système est assemblé par `atelier.soul_assembler.assemble_system_prompt()` en 4 couches, dans cet ordre :
+The system prompt is assembled by `atelier.soul_assembler.assemble_system_prompt()` in 4 layers, in this order:
 
-1. `prompts/soul/SOUL.md`
-2. `prompts/roles/{user_role}.md`
-3. `user_prompt_path` relatif à `prompts/`
-4. `prompts/channels/{channel}_default.md`
+| # | Source | Path configured in |
+|---|--------|--------------------|
+| 1 | `prompts/soul/SOUL.md` | always loaded |
+| 2 | role overlay | `roles[*].prompt_path` in `portail.yaml` |
+| 3 | user override | `users[*].prompt_path` in `portail.yaml` |
+| 4 | channel overlay | `channels[*].prompt_path` in `aiguilleur.yaml` |
 
-Les fichiers manquants sont ignorés. Les couches sont jointes avec `---`.
+All paths are **explicit** (read from YAML configuration, not inferred by convention). Missing or empty files are silently ignored. Present layers are joined with `\n\n---\n\n`.
 
-Le code actuel n'assemble pas automatiquement les overlays `prompts/policies/*.md` dans le prompt principal, même si ces fichiers sont créés par `initialize_user_dir()`.
+How these paths transit through the pipeline:
+- Portail reads `portail.yaml`, resolves the `UserRecord` and includes `role_prompt_path` (from `roles[*].prompt_path`) and `prompt_path` (from `users[*].prompt_path`).
+- Aiguilleur stamps `channel_prompt_path` into `context["aiguilleur"]` from `aiguilleur.yaml`.
+- Atelier reads these three fields on each turn to call `assemble_system_prompt()`.
+
+The `prompts/policies/*.md` files (e.g. `vacation.md`, `in_meeting.md`) are shipped in the repo but **are not automatically assembled** into the prompt — they exist as templates to be referenced manually in a role or user `prompt_path`.
 
 ---
 
-## Variables d'environnement
+## Environment Variables
 
-Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/ENV.md). Les plus importantes :
+Variables useful to the current runtime are detailed in [docs/ENV.md](docs/ENV.md). The most important:
 
 - `RELAIS_HOME`
 - `REDIS_SOCKET_PATH`
@@ -488,19 +555,19 @@ Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](/Use
 - `OPENROUTER_API_KEY`
 - `RELAIS_DB_PATH`
 - `DISCORD_BOT_TOKEN`
-- Canal WhatsApp (optionnel) : `WHATSAPP_GATEWAY_URL`, `WHATSAPP_PHONE_NUMBER`, `WHATSAPP_API_KEY`, `WHATSAPP_WEBHOOK_SECRET`, `WHATSAPP_WEBHOOK_PORT`, `WHATSAPP_WEBHOOK_HOST`, `REDIS_PASS_BAILEYS`
+- WhatsApp channel (optional): `WHATSAPP_GATEWAY_URL`, `WHATSAPP_PHONE_NUMBER`, `WHATSAPP_API_KEY`, `WHATSAPP_WEBHOOK_SECRET`, `WHATSAPP_WEBHOOK_PORT`, `WHATSAPP_WEBHOOK_HOST`, `REDIS_PASS_BAILEYS`
 
-Pour les exemples MCP livrés dans les templates, `GITHUB_TOKEN` et `BRAVE_API_KEY` peuvent aussi être nécessaires selon les serveurs activés.
+For MCP examples shipped in templates, `GITHUB_TOKEN` and `BRAVE_API_KEY` may also be required depending on the enabled servers.
 
-Pour activer WhatsApp, installez aussi les dépendances optionnelles : `uv sync --extra whatsapp` (ajoute `aiohttp>=3.9` et `qrcode>=7.0`).
+To enable WhatsApp, also install the optional dependencies: `uv sync --extra whatsapp` (adds `aiohttp>=3.9` and `qrcode>=7.0`).
 
 ---
 
-## Démarrage
+## Starting
 
-### Option recommandée : supervisord
+### Recommended option: supervisord
 
-Le chemin le plus complet du dépôt est le couple `supervisord.conf` + `supervisor.sh`.
+The most complete path in the repo is the `supervisord.conf` + `supervisor.sh` pair.
 
 ```bash
 ./supervisor.sh start all
@@ -511,22 +578,22 @@ Le chemin le plus complet du dépôt est le couple `supervisord.conf` + `supervi
 ./supervisor.sh reload all
 ```
 
-**Flag `--verbose`** : Après démarrage/redémarrage, suit les logs de toutes les briques en temps réel. Appuyez sur `Ctrl+C` pour détacher les logs sans arrêter supervisord.
+**`--verbose` flag**: After starting/restarting, follows all brick logs in real time. Press `Ctrl+C` to detach logs without stopping supervisord.
 
-Le wrapper :
+The wrapper:
 
-- démarre `supervisord` si nécessaire
-- lance Redis local via `config/redis.conf` (socket Unix + port TCP `127.0.0.1:6379` pour les services annexes)
-- démarre les briques des groupes `infra`, `core` et `relays` : `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
-- ne démarre **pas** automatiquement le groupe `optional` (qui contient la passerelle `baileys-api` pour WhatsApp). L'installation/activation du canal WhatsApp est pilotée par le sous-agent `relais-config`.
+- starts `supervisord` if needed
+- launches local Redis via `config/redis.conf` (Unix socket + TCP port `127.0.0.1:6379` for ancillary services)
+- starts bricks from the `infra`, `core` and `relays` groups: `portail`, `sentinelle`, `atelier`, `souvenir`, `forgeron`, `commandant`, `archiviste`, `aiguilleur`
+- does **not** automatically start the `optional` group (which contains the `baileys-api` gateway for WhatsApp). WhatsApp channel installation/activation is driven by the `relais-config` sub-agent.
 
-### Démarrage manuel
+### Manual start
 
 ```bash
 # Terminal 1
 redis-server config/redis.conf
 
-# Terminals suivants
+# Following terminals
 uv run python portail/main.py
 uv run python sentinelle/main.py
 uv run python atelier/main.py
@@ -537,15 +604,15 @@ uv run python archiviste/main.py
 uv run python aiguilleur/main.py
 ```
 
-L'entrée Aiguilleur est [aiguilleur/main.py](aiguilleur/main.py), pas un `main.py` séparé par canal. L'adaptateur Discord actuellement implémenté vit dans [aiguilleur/channels/discord/adapter.py](aiguilleur/channels/discord/adapter.py).
+The Aiguilleur entry point is [aiguilleur/main.py](aiguilleur/main.py), not a separate `main.py` per channel. The currently implemented Discord adapter lives in [aiguilleur/channels/discord/adapter.py](aiguilleur/channels/discord/adapter.py).
 
-### Note Redis locale
+### Local Redis note
 
-Le dépôt démarre Redis avec [config/redis.conf](config/redis.conf), qui crée un socket Unix `./.relais/redis.sock` et des ACL par brique. Les mots de passe utilisés par les briques via `.env` doivent rester alignés avec cette configuration locale.
+The repo starts Redis with [config/redis.conf](config/redis.conf), which creates a Unix socket `./.relais/redis.sock` and per-brick ACLs. Brick passwords used via `.env` must remain aligned with this local configuration.
 
 ---
 
-## Vérification rapide
+## Quick check
 
 ```bash
 redis-cli -s ./.relais/redis.sock XLEN relais:messages:incoming
@@ -554,7 +621,7 @@ redis-cli -s ./.relais/redis.sock XLEN relais:tasks
 redis-cli -s ./.relais/redis.sock XRANGE relais:tasks - +
 ```
 
-Logs utiles :
+Useful logs:
 
 - `./.relais/logs/events.jsonl`
 - `./.relais/logs/*.log`
@@ -563,16 +630,16 @@ Logs utiles :
 
 ## Debug
 
-Toutes les briques Python passent par [launcher.py](launcher.py) quand elles sont lancées via `supervisord.conf`. Le wrapper supporte :
+All Python bricks go through [launcher.py](launcher.py) when launched via `supervisord.conf`. The wrapper supports:
 
 - `DEBUGPY_ENABLED`
 - `DEBUGPY_PORT`
 - `DEBUGPY_WAIT`
 
-Les ports configurés dans `supervisord.conf` sont :
+Ports configured in `supervisord.conf`:
 
-| Brique | Port |
-|--------|------|
+| Brick | Port |
+|-------|------|
 | `atelier` | `5678` |
 | `portail` | `5679` |
 | `sentinelle` | `5680` |
@@ -590,7 +657,7 @@ Les ports configurés dans `supervisord.conf` sont :
 pytest tests/ -v
 ```
 
-Tests particulièrement utiles pour vérifier les affirmations structurelles :
+Particularly useful tests for verifying structural assertions:
 
 - `tests/test_smoke_e2e.py`
 - `tests/test_commandant_new_stream.py`
@@ -599,8 +666,8 @@ Tests particulièrement utiles pour vérifier les affirmations structurelles :
 
 ---
 
-## Documentation liée
+## Related documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) : référence technique par brique et par stream
-- [docs/ENV.md](docs/ENV.md) : variables d'environnement réellement utiles
-- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) : workflow de contribution
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): technical reference per brick and per stream
+- [docs/ENV.md](docs/ENV.md): actually useful environment variables
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md): contribution workflow
