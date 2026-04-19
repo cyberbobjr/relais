@@ -77,7 +77,7 @@ The main pipeline flows through these bricks in order:
   - `config_loader.py`: YAML config cascade (user > system > project)
   - `user_registry.py`: UserRegistry and UserRecord for user resolution from portail.yaml; REST API keys stored as HMAC-SHA256 hashes (`_hash_api_key()`, salt from `RELAIS_API_KEY_SALT` env var)
   - `user_record.py`: UserRecord dataclass
-  - `streams.py`: Canonical Redis stream name constants (`STREAM_*`) and helpers (`stream_outgoing(channel)`, `stream_streaming(channel, corr_id)`, `key_active_sessions(sender_id)`, `stream_config_reload(brick)`); all bricks import stream names from here
+  - `streams.py`: Canonical Redis stream name constants (`STREAM_*`) and helpers (`stream_outgoing(channel)`, `stream_outgoing_user(channel, user_id)`, `stream_streaming(channel, corr_id)`, `key_active_sessions(sender_id)`, `stream_config_reload(brick)`); all bricks import stream names from here
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings

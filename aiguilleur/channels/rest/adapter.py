@@ -23,17 +23,27 @@ from aiohttp import web
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
 from aiguilleur.channels.rest.correlator import ResponseCorrelator
+from aiguilleur.channels.rest.push_registry import PushRegistry
 from aiguilleur.channels.rest.server import create_app
 from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_PROGRESS
 from common.redis_client import RedisClient
-from common.streams import stream_outgoing
+from common.streams import stream_outgoing, stream_outgoing_user
 
 logger = logging.getLogger("aiguilleur.rest")
 
 _CHANNEL = "rest"
 _GROUP = "rest_relay_group"
 _CONSUMER = "rest_relay_1"
+_PUSH_STREAM_MAXLEN = 100
+
+
+def _sender_to_user_id(sender_id: str) -> str | None:
+    """Return the user_id portion of a REST sender_id, or None for non-REST senders."""
+    prefix = _CHANNEL + ":"
+    if not sender_id or not sender_id.startswith(prefix):
+        return None
+    return sender_id[len(prefix):]
 
 
 class RestAiguilleur(NativeAiguilleur):
@@ -75,6 +85,7 @@ class RestAiguilleur(NativeAiguilleur):
         """
         redis_conn = await self._redis_client.get_connection()
         correlator = ResponseCorrelator()
+        push_registry = PushRegistry(redis_conn)
 
         # Load user registry for auth middleware
         try:
@@ -100,6 +111,7 @@ class RestAiguilleur(NativeAiguilleur):
             correlator=correlator,
             registry=registry,
             config=server_config,
+            push_registry=push_registry,
         )
 
         runner = web.AppRunner(app)
@@ -126,6 +138,7 @@ class RestAiguilleur(NativeAiguilleur):
                 await consumer_task
             except asyncio.CancelledError:
                 pass
+            await push_registry.close()
             await runner.cleanup()
             logger.info("REST adapter stopped.")
 
@@ -214,6 +227,28 @@ class RestAiguilleur(NativeAiguilleur):
             if envelope.action == ACTION_MESSAGE_PROGRESS:
                 return  # Skip progress events — only resolve on final reply
             await correlator.resolve(envelope.correlation_id, envelope)
+
+            user_id = _sender_to_user_id(envelope.sender_id)
+            if user_id is not None:
+                push_stream = stream_outgoing_user(_CHANNEL, user_id)
+                try:
+                    await redis_conn.xadd(
+                        push_stream,
+                        {"payload": payload},
+                        maxlen=_PUSH_STREAM_MAXLEN,
+                        approximate=True,
+                    )
+                    logger.debug(
+                        "Mirrored reply to push stream %s corr=%s",
+                        push_stream,
+                        envelope.correlation_id[:8],
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to mirror reply to push stream %s: %s",
+                        push_stream,
+                        exc,
+                    )
         except Exception as exc:
             logger.error("Failed to process outgoing REST message %s: %s", message_id, exc)
         finally:

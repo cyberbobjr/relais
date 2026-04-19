@@ -49,6 +49,7 @@ from common.streams import (
 )
 
 from aiguilleur.channels.rest.auth import make_bearer_auth_middleware
+from aiguilleur.channels.rest.events_handler import events_handler
 from aiguilleur.channels.rest.sse import HEARTBEAT, format_sse
 from aiguilleur.channels.rest.templates import SWAGGER_UI_HTML, SSE_PLAYGROUND_HTML
 from souvenir.long_term_store import LongTermStore
@@ -263,6 +264,44 @@ _OPENAPI_SPEC: dict = {
                 },
             }
         },
+        "/events": {
+            "get": {
+                "summary": "Persistent SSE push stream for outgoing messages",
+                "operationId": "getEvents",
+                "security": [{"bearerAuth": []}],
+                "description": (
+                    "Opens a persistent Server-Sent Events stream that pushes all outgoing messages "
+                    "destined for the authenticated user. Useful for real-time updates in web clients, "
+                    "TUI tools, and other long-lived connections.\n\n"
+                    "The stream is fan-out: multiple concurrent subscribers (e.g. different browser tabs "
+                    "or TUI instances) authenticated with the same API key will each receive all messages "
+                    "independently.\n\n"
+                    "Events emitted:\n"
+                    "- `data: {\"content\": \"...\", \"correlation_id\": \"...\", ...}` — Envelope JSON for each outgoing message"
+                ),
+                "responses": {
+                    "200": {
+                        "description": "SSE stream of outgoing message envelopes",
+                        "content": {
+                            "text/event-stream": {
+                                "schema": {
+                                    "type": "string",
+                                    "description": "Server-Sent Events stream; each event is a JSON-serialized Envelope.",
+                                }
+                            }
+                        },
+                    },
+                    "401": {
+                        "description": "Unauthorized (missing or invalid API key)",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                            }
+                        },
+                    },
+                },
+            }
+        },
     },
 }
 
@@ -390,6 +429,7 @@ def create_app(
     correlator: "ResponseCorrelator",
     registry: "UserRegistry",
     config: dict[str, Any],
+    push_registry: Any = None,
 ) -> web.Application:
     """Build and return a configured aiohttp Application.
 
@@ -402,6 +442,11 @@ def create_app(
             - ``cors_origins`` (list[str]): Allowed CORS origins.
             - ``request_timeout`` (float): Seconds to wait for LLM reply.
             - ``include_traces`` (bool): Whether to include traces in JSON response.
+        push_registry: Optional ``PushRegistry`` instance for the SSE push
+            endpoint (``GET /v1/events``).  When ``None`` the events endpoint
+            is still registered but the handler will raise ``AttributeError``
+            because ``app["_push_registry"]`` will be missing — callers must
+            provide a real ``PushRegistry`` instance in production.
 
     Returns:
         A fully-configured ``web.Application`` ready for ``AppRunner``.
@@ -615,6 +660,9 @@ def create_app(
     api_app["_long_term_store"] = _long_term_store
     api_app.router.add_post("/messages", post_message)
     api_app.router.add_get("/history", get_history)
+    api_app.router.add_get("/events", events_handler)
+    if push_registry is not None:
+        api_app["_push_registry"] = push_registry
     app.add_subapp("/v1", api_app)
 
     return app

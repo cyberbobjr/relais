@@ -207,7 +207,7 @@ from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
 from atelier.display_config import load_display_config, DisplayConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from common.config_loader import resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
+from common.config_loader import resolve_bundles_dir, resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from atelier.tool_policy import ToolPolicy
 from atelier.subagents import SubagentRegistry
 from atelier.tools._registry import ToolRegistry
@@ -277,6 +277,11 @@ class Atelier(BrickBase):
         checkpoints_db = str(resolve_storage_dir() / "checkpoints.db")
         self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoints_db)
         self._checkpointer: AsyncSqliteSaver | None = None
+
+        # Ensure bundles dir exists so the file watcher can target it directly
+        # instead of falling back to its parent (~/.relais/), which would cause
+        # an infinite reload loop (log writes under ~/.relais/ would re-trigger).
+        resolve_bundles_dir().mkdir(parents=True, exist_ok=True)
 
         # Option A — Singleton McpSessionManager started once at brick startup.
         # All requests share the same server connections and tool list.
@@ -456,7 +461,7 @@ class Atelier(BrickBase):
         Returns:
             A list of resolved Path instances.
         """
-        from common.config_loader import CONFIG_SEARCH_PATH, resolve_bundles_dir
+        from common.config_loader import CONFIG_SEARCH_PATH
         from atelier.subagents import NATIVE_SUBAGENTS_PATH
 
         paths = [

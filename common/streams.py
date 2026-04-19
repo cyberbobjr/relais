@@ -81,6 +81,22 @@ def stream_outgoing(channel: str) -> str:
     return f"relais:messages:outgoing:{channel}"
 
 
+def stream_outgoing_user(channel: str, user_id: str) -> str:
+    """Return the per-user outgoing push stream name.
+
+    Used by the REST adapter to mirror replies into a user-scoped stream
+    that the SSE push endpoint reads via XREAD BLOCK.
+
+    Args:
+        channel: Channel identifier (e.g. ``"rest"``).
+        user_id: Stable user identifier (e.g. ``"usr_admin"``).
+
+    Returns:
+        Stream name such as ``"relais:messages:outgoing:rest:usr_admin"``.
+    """
+    return f"relais:messages:outgoing:{channel}:{user_id}"
+
+
 def stream_streaming(channel: str, corr_id: str) -> str:
     """Return the streaming token stream name for a single request.
 

@@ -433,3 +433,77 @@ def test_bundle_manifest_default_values(tmp_path: Path) -> None:
     assert manifest.version == "1.0.0"
     assert manifest.author == ""
     assert manifest.tools == []
+    assert manifest.setup is None
+
+
+# ---------------------------------------------------------------------------
+# Setup field tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_bundle_manifest_setup_none_by_default(tmp_path: Path) -> None:
+    """setup defaults to None when the field is absent from bundle.yaml."""
+    from common.bundles import load_bundle_manifest
+
+    bundle_dir = tmp_path / "no-setup"
+    bundle_dir.mkdir()
+    (bundle_dir / "bundle.yaml").write_text(
+        yaml.dump({"name": "no-setup", "description": "No setup"})
+    )
+
+    manifest = load_bundle_manifest(bundle_dir)
+
+    assert manifest is not None
+    assert manifest.setup is None
+
+
+@pytest.mark.unit
+def test_bundle_manifest_setup_parsed(tmp_path: Path) -> None:
+    """setup field is parsed from bundle.yaml when present."""
+    from common.bundles import load_bundle_manifest
+
+    bundle_dir = tmp_path / "has-setup"
+    bundle_dir.mkdir()
+    (bundle_dir / "bundle.yaml").write_text(
+        yaml.dump({"name": "has-setup", "description": "Has setup", "setup": "setup.md"})
+    )
+
+    manifest = load_bundle_manifest(bundle_dir)
+
+    assert manifest is not None
+    assert manifest.setup == "setup.md"
+
+
+@pytest.mark.unit
+def test_install_bundle_with_setup_field(tmp_path: Path, bundles_dir: Path) -> None:
+    """install_bundle returns manifest with setup field when declared in bundle.yaml."""
+    from common.bundles import install_bundle
+
+    zip_data = make_bundle_zip(
+        "mail-bundle",
+        manifest_overrides={"setup": "setup.md"},
+        extra_members=[("mail-bundle/setup.md", b"# Setup\nAsk for email credentials.\n")],
+    )
+    zip_path = tmp_path / "mail-bundle.zip"
+    zip_path.write_bytes(zip_data)
+
+    manifest = install_bundle(zip_path, bundles_dir)
+
+    assert manifest.setup == "setup.md"
+    # The setup file must be present in the installed bundle directory
+    assert (bundles_dir / "mail-bundle" / "setup.md").is_file()
+
+
+@pytest.mark.unit
+def test_install_bundle_without_setup_field(tmp_path: Path, bundles_dir: Path) -> None:
+    """install_bundle returns manifest with setup=None when field is absent."""
+    from common.bundles import install_bundle
+
+    zip_data = make_bundle_zip("plain-bundle")
+    zip_path = tmp_path / "plain-bundle.zip"
+    zip_path.write_bytes(zip_data)
+
+    manifest = install_bundle(zip_path, bundles_dir)
+
+    assert manifest.setup is None
