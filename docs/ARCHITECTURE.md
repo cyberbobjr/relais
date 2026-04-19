@@ -469,6 +469,45 @@ uv run python aiguilleur/main.py
 
 ---
 
+## Système de bundles (`common/bundles.py`)
+
+Les bundles sont des archives ZIP distribuant subagents, skills et tools en une seule unité installable.
+
+### Structure d'un bundle
+
+```
+my-bundle.zip
+└── my-bundle/           # dossier racine = nom du bundle
+    ├── bundle.yaml      # manifeste obligatoire (name, description, version, author)
+    ├── subagents/       # optionnel — un répertoire par subagent
+    ├── skills/          # optionnel — un répertoire par skill
+    └── tools/           # optionnel — fichiers .py exportant des BaseTool
+```
+
+### Installation et découverte
+
+- Destination : `~/.relais/bundles/<bundle-name>/`
+- **CLI** : `relais bundle install/uninstall/list`
+- **Slash command** : `/bundle install|uninstall|list`
+- **TUI** : onglet Bundles (Ctrl+B)
+
+Sécurité : protection ZIP bomb (> 50 Mo rejeté) + protection path traversal.
+
+### Intégration dans Atelier
+
+| Composant | Comportement |
+|-----------|--------------|
+| `ToolRegistry` | Scanne `~/.relais/bundles/*/tools/*.py` ; tague chaque outil avec `_bundle_name` |
+| `SubagentRegistry` | Tier 3 (après config utilisateur et natif) : `~/.relais/bundles/*/subagents/` |
+| `ToolPolicy` | Fusionne `~/.relais/bundles/*/skills/*/` dans la résolution des skills |
+| Hot-reload | `watchfiles` surveille `~/.relais/bundles/` ; rechargement atomique |
+
+Les subagents de bundles restent soumis au contrôle d'accès `allowed_subagents` de `portail.yaml`.
+
+Voir `docs/BUNDLES.md` pour la spécification complète du format.
+
+---
+
 ## Outils clients (`tools/`)
 
 ### TUI (`tools/tui/`)
@@ -478,6 +517,8 @@ Client terminal interactif pour le canal REST. Paquet Python indépendant (`rela
 - **`relais_tui/config.py`** — chargement de la configuration depuis `<relais_home>/config/tui/config.yaml` (cascade RELAIS_HOME / `~/.relais`). Historique TUI par défaut dans `~/.relais/storage/tui/history`.
 - **`relais_tui/client.py`** — client REST/SSE asynchrone : `POST /v1/messages` puis lecture du stream SSE.
 - **`relais_tui/sse_parser.py`** — parseur SSE stateful ; `SSEEvent = TokenEvent | DoneEvent | ProgressEvent | ErrorEvent | Keepalive`.
+- **`relais_tui/bundles.py`** — opérations bundle locales (list/install/uninstall) utilisées par l'onglet Bundles.
+- **`relais_tui/screens/bundles_screen.py`** — écran Bundles (DataTable + Install/Uninstall).
 
 La configuration TUI est initialisée par `initialize_user_dir()` depuis `config/tui/config.yaml.default`.
 

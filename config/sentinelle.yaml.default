@@ -4,6 +4,13 @@
 # Ce fichier contient UNIQUEMENT : access_control et groups.
 # Les utilisateurs et rôles sont dans portail.yaml (chargé par le Portail).
 #
+# Commandes slash autorisées par rôle (portail.yaml → roles.<role>.actions) :
+#   admin : ["*"]  — toutes les commandes dont /bundle
+#   user  : []     — aucune commande slash
+#   guest : []     — aucune commande slash
+#
+# /bundle install|uninstall|list est réservé au rôle admin (actions: ["*"]).
+#
 # ── Contrôle d'accès ─────────────────────────────────────────────────────────
 access_control:
   # allowlist : tout refuser sauf les enveloppes avec user_record valide

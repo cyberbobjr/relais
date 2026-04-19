@@ -25,6 +25,7 @@ packages = ["src/relais_tui"]
 dev = [
     "pytest>=9.0",
     "pytest-asyncio>=1.3",
+    "pytest-cov>=7.1.0",
     "textual-dev>=1.0",
 ]
 

@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from commandant.bundle_commands import handle_bundle
 from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
 from common.envelope_actions import ACTION_MEMORY_CLEAR, ACTION_MEMORY_SESSIONS, ACTION_MEMORY_RESUME, ACTION_MESSAGE_OUTGOING
@@ -211,6 +212,11 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         name="resume",
         description="Reprend une session précédente (/resume <id>).",
         handler=handle_resume,
+    ),
+    "bundle": CommandSpec(
+        name="bundle",
+        description="Manages bundles: /bundle install <zip> | uninstall <name> | list",
+        handler=handle_bundle,
     ),
 }
 

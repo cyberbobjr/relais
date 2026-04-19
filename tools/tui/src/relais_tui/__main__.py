@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import logging
+import os
+import sys
 import tomllib
 from dataclasses import replace as _dataclass_replace
 from io import StringIO
@@ -25,11 +27,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import Worker
-from textual.widgets import Footer, Header, Input, LoadingIndicator, Log, Static
+from textual.widgets import Footer, Header, Input, LoadingIndicator, Log, Static, TabbedContent, TabPane
 
 from relais_tui.config import Config, load_config, save_config
 from relais_tui.client import RelaisClient
 from relais_tui.sse_parser import DoneEvent, ErrorEvent, ProgressEvent, TokenEvent
+from relais_tui.screens.bundles_screen import BundlesScreen
 
 _log = logging.getLogger(__name__)
 
@@ -101,6 +104,15 @@ _OFFLINE_BANNER = """\
 _CSS = """
 Screen {
     layout: vertical;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+TabPane {
+    layout: vertical;
+    padding: 0;
 }
 
 Header {
@@ -186,6 +198,7 @@ class RelaisApp(App[None]):
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "clear_chat", "Clear"),
         Binding("escape", "stop_stream", "Stop", show=False),
+        Binding("ctrl+b", "switch_tab('bundles')", "Bundles"),
     ]
 
     # Accumulates streaming tokens for the in-progress assistant reply.
@@ -241,15 +254,19 @@ class RelaisApp(App[None]):
     def compose(self) -> ComposeResult:
         """Build the widget tree."""
         yield Header(show_clock=True)
-        yield Log(id="chat-log", highlight=True)
-        yield Static("", id="streaming", markup=True)
-        yield LoadingIndicator(id="spinner")
-        yield Input(
-            placeholder="Type a message  ·  ESC = stop  ·  Ctrl+L = clear  ·  /exit or Ctrl+Q = quit",
-            id="msg-input",
-        )
-        yield Static("Connecting…", id="status", markup=True)
-        yield Static("", id="offline-overlay", markup=True)
+        with TabbedContent(initial="chat"):
+            with TabPane("Chat", id="chat"):
+                yield Log(id="chat-log", highlight=True)
+                yield Static("", id="streaming", markup=True)
+                yield LoadingIndicator(id="spinner")
+                yield Input(
+                    placeholder="Type a message  ·  ESC = stop  ·  Ctrl+L = clear  ·  /exit or Ctrl+Q = quit",
+                    id="msg-input",
+                )
+                yield Static("Connecting…", id="status", markup=True)
+                yield Static("", id="offline-overlay", markup=True)
+            with TabPane("Bundles", id="bundles"):
+                yield BundlesScreen()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -319,6 +336,14 @@ class RelaisApp(App[None]):
         """
         if self._busy and self._stream_worker is not None:
             self._stream_worker.cancel()
+
+    def action_switch_tab(self, tab_id: str) -> None:
+        """Switch the active TabbedContent tab by id (e.g. Ctrl+B → bundles).
+
+        Args:
+            tab_id: The ``id`` attribute of the target ``TabPane``.
+        """
+        self.query_one(TabbedContent).active = tab_id
 
     # ------------------------------------------------------------------
     # Helpers
@@ -549,11 +574,34 @@ def _bootstrap_relais_home() -> None:
         _os.environ["RELAIS_HOME"] = str((project_root / relais_home).resolve())
 
 
-def main() -> None:
-    """Load config and start the TUI application."""
-    import os
+def _run_bundle_cli() -> None:
+    """Dispatch ``relais bundle ...`` subcommands and exit.
 
+    Called when ``sys.argv[1] == "bundle"`` so the TUI is never launched for
+    CLI-only operations.  Exits with the handler's return code.
+    """
+    import argparse
+
+    from relais_tui.cli.bundle import add_bundle_subparser
+
+    root = argparse.ArgumentParser(prog="relais", description="RELAIS — micro-brick AI assistant CLI.")
+    root_sub = root.add_subparsers(dest="command", metavar="{bundle,...}")
+    root_sub.required = True
+    add_bundle_subparser(root_sub)
+
+    args = root.parse_args()
+    if not hasattr(args, "func"):
+        root.print_help()
+        sys.exit(2)
+    sys.exit(args.func(args))
+
+
+def main() -> None:
+    """Load config and start the TUI application, or dispatch bundle CLI."""
     _bootstrap_relais_home()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "bundle":
+        _run_bundle_cli()
 
     from relais_tui.config import _default_config_path  # noqa: PLC2701
 

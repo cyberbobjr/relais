@@ -18,8 +18,11 @@ import importlib
 import logging
 import pkgutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from langchain_core.tools import BaseTool
+
+from common.config_loader import resolve_bundles_dir
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,7 @@ class ToolRegistry:
             A frozen ``ToolRegistry`` containing all discovered tools.
         """
         import atelier.tools as package
+        from atelier.subagents_resolver import _load_tools_from_module
 
         tools: dict[str, BaseTool] = {}
         for finder, name, _ispkg in pkgutil.iter_modules(package.__path__):
@@ -76,6 +80,35 @@ class ToolRegistry:
                         "ToolRegistry: registered tool %r from %s", obj.name, fqn
                     )
                     tools[obj.name] = obj
+
+        # Scan installed bundles: ~/.relais/bundles/*/tools/*.py
+        bundles_dir: Path = resolve_bundles_dir()
+        if bundles_dir.is_dir():
+            for bundle_dir in sorted(bundles_dir.iterdir()):
+                if not bundle_dir.is_dir():
+                    continue
+                bundle_name = bundle_dir.name
+                bundle_tools_dir = bundle_dir / "tools"
+                if not bundle_tools_dir.is_dir():
+                    continue
+                for py_file in sorted(bundle_tools_dir.glob("*.py")):
+                    loaded = _load_tools_from_module(py_file, f"bundle:{bundle_name}")
+                    for tool_name, tool_obj in loaded.items():
+                        if tool_name in tools:
+                            logger.warning(
+                                "ToolRegistry: bundle tool name conflict — '%s' from "
+                                "bundle '%s' replaces previous registration (last-wins)",
+                                tool_name,
+                                bundle_name,
+                            )
+                        tool_obj._bundle_name = bundle_name  # type: ignore[attr-defined]
+                        tools[tool_name] = tool_obj
+                        logger.debug(
+                            "ToolRegistry: registered bundle tool %r from %s/%s",
+                            tool_name,
+                            bundle_name,
+                            py_file.name,
+                        )
 
         logger.info("ToolRegistry: discovered %d tool(s)", len(tools))
         return cls(_tools=tools)

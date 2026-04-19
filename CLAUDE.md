@@ -406,6 +406,67 @@ Tool token reference for the `tools:` field:
 - `module:<dotted.path>` — import a Python module and collect all `BaseTool` instances from it (e.g. `module:aiguilleur.channels.whatsapp.tools`); only prefixes in `_ALLOWED_MODULE_PREFIXES` (`aiguilleur.channels.`, `atelier.tools.`, `relais_tools.`) are permitted
 - `<name>` — static tool from ToolRegistry (`atelier/tools/*.py` modules)
 
+### Adding a New Bundle
+
+Bundles are ZIP archives that distribute subagents, skills, and tools as a single installable unit.
+
+#### Bundle structure
+
+```
+my-bundle.zip
+└── my-bundle/           # root folder name must match bundle name
+    ├── bundle.yaml      # required manifest
+    ├── subagents/       # optional: one dir per subagent (same layout as user subagents)
+    │   └── my-agent/
+    │       └── subagent.yaml
+    ├── skills/          # optional: one dir per skill (skill files directly inside)
+    │   └── my-skill/
+    │       └── SKILL.md
+    └── tools/           # optional: .py files exporting BaseTool instances
+        └── my_tool.py
+```
+
+**`bundle.yaml` required fields:**
+```yaml
+name: my-bundle        # must match root folder name
+description: "..."
+version: "1.0.0"
+author: "..."
+```
+
+#### Installing a bundle
+
+Three entry points:
+1. **CLI**: `relais bundle install /path/to/my-bundle.zip`
+2. **Slash command**: `/bundle install /path/to/my-bundle.zip` (via chat)
+3. **TUI**: Bundles tab → paste ZIP path → Install button (Ctrl+B to switch tab)
+
+Install destination: `~/.relais/bundles/<bundle-name>/`
+
+#### Uninstalling a bundle
+
+1. **CLI**: `relais bundle uninstall my-bundle`
+2. **Slash command**: `/bundle uninstall my-bundle`
+3. **TUI**: Bundles tab → select bundle → Uninstall button
+
+Uninstall removes the bundle directory; hot-reload picks up the change automatically.
+
+#### Bundle discovery (Atelier hot-reload)
+
+- **ToolRegistry**: scans `~/.relais/bundles/*/tools/*.py` on reload; tags each tool with `tool._bundle_name`
+- **SubagentRegistry**: scans `~/.relais/bundles/*/subagents/` as the 3rd tier (after user config and native)
+- **ToolPolicy**: merges `~/.relais/bundles/*/skills/*/` into skill resolution
+- Hot-reload is triggered by `watchfiles` watching `~/.relais/bundles/`
+
+#### Security constraints
+
+- ZIP bomb protection: rejects archives with > 50 MB uncompressed content
+- Path traversal protection: rejects any ZIP member whose resolved path escapes the target directory
+- Bundle subagents are still role-gated via `allowed_subagents` in `portail.yaml`
+- Bundle tools enter the global ToolRegistry; name conflicts emit a WARNING and the tool from the bundle that sorts lexicographically last (alphabetically) wins
+
+See `docs/BUNDLES.md` for full format specification and `common/bundles.py` for the implementation.
+
 ### Handling Message Errors
 
 - **Validation errors** (Portail): Log and continue (don't block pipeline)

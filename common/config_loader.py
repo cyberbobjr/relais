@@ -112,6 +112,18 @@ def resolve_storage_dir() -> Path:
     return get_relais_home() / "storage"
 
 
+def resolve_bundles_dir() -> Path:
+    """Installed bundles directory — always in user home.
+
+    The directory is NOT auto-created here — it is initialised by
+    ``initialize_user_dir`` on first run.
+
+    Returns:
+        Absolute path to ``$RELAIS_HOME/bundles/``.
+    """
+    return get_relais_home() / "bundles"
+
+
 def get_log_level() -> str:
     """Return the configured log level name from ``config.yaml``.
 

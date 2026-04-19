@@ -456,7 +456,7 @@ class Atelier(BrickBase):
         Returns:
             A list of resolved Path instances.
         """
-        from common.config_loader import CONFIG_SEARCH_PATH
+        from common.config_loader import CONFIG_SEARCH_PATH, resolve_bundles_dir
         from atelier.subagents import NATIVE_SUBAGENTS_PATH
 
         paths = [
@@ -472,6 +472,11 @@ class Atelier(BrickBase):
         # Also watch native subagents bundled in the source tree
         if NATIVE_SUBAGENTS_PATH.is_dir():
             paths.append(NATIVE_SUBAGENTS_PATH)
+        # Watch bundles parent so a first-ever install (dir creation) is also detected
+        bundles_dir = resolve_bundles_dir()
+        watch_target = bundles_dir if bundles_dir.is_dir() else bundles_dir.parent
+        if watch_target.is_dir():
+            paths.append(watch_target)
         return paths
 
     def _start_file_watcher(self, shutdown_event: asyncio.Event | None = None) -> "asyncio.Task | None":
