@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-17
+**Dernière mise à jour :** 2026-04-19
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -139,9 +139,10 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - **REST** (`aiguilleur/channels/rest/adapter.py`) — adaptateur HTTP/JSON et SSE pour les clients programmatiques (CLI, CI, TUI). Expose:
     - `POST /v1/messages` — Envoyer un message et recevoir la réponse LLM (JSON ou SSE streaming)
     - `GET /v1/history?session_id=...&limit=...` — Récupérer l'historique d'une session (ownership enforcement via user_id)
+    - `GET /v1/events` — Persistent SSE push stream: fan-out outgoing messages to concurrent subscribers (same user ID, different clients). Powered by `PushRegistry` (per-user XREAD reader tasks) and `relais:messages:outgoing:rest:{user_id}` per-user streams.
     - `GET /docs/sse` — Playground SSE interactif
     
-    Authentification Bearer via clés API dans `portail.yaml`. Les clés API sont résolues via `UserRegistry.resolve_rest_api_key()` (hachage HMAC-SHA256, jamais stockées en clair). L'adaptateur filtre les `ACTION_MESSAGE_PROGRESS` entrants pour ne résoudre que la réponse finale.
+    Authentification Bearer via clés API dans `portail.yaml`. Les clés API sont résolues via `UserRegistry.resolve_rest_api_key()` (hachage HMAC-SHA256, jamais stockées en clair). L'adaptateur filtre les `ACTION_MESSAGE_PROGRESS` entrants pour ne résoudre que la réponse finale. L'adaptateur mirroise aussi les enveloppes sortantes vers les streams `relais:messages:outgoing:rest:{user_id}` de sorte que les clients SSE abonnés puissent les lire indépendamment.
 - Chaque adaptateur estampille `context.aiguilleur["channel_profile"]` depuis `ChannelConfig.profile` (aiguilleur.yaml).
 - Chaque adaptateur estampille `context.aiguilleur["channel_prompt_path"]` depuis `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` si non configuré — aucun overlay de canal n'est chargé.
 - Chaque adaptateur estampille `context.aiguilleur["streaming"]` (`bool`) depuis `ChannelConfig.streaming` (lu par Atelier par message, pas au démarrage).

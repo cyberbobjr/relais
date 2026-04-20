@@ -20,6 +20,7 @@ bundle.yaml format::
     version: "1.0.0"          # optional, default "1.0.0"
     author: "Name"            # optional, default ""
     tools: []                 # optional, tool names for conflict detection
+    setup: setup.md           # optional, relative path to a Markdown setup guide
 
 Security guarantees
 -------------------
@@ -75,6 +76,11 @@ class BundleManifest:
         version: Semantic version string.  Defaults to ``"1.0.0"``.
         author: Bundle author.  Defaults to ``""``.
         tools: Tool names exported by this bundle (used for conflict detection).
+        setup: Relative path to a Markdown file inside the bundle containing
+            post-install setup instructions (e.g. ``"setup.md"``).  When
+            present, Commandant reads the file after installation and forwards
+            its content to Atelier so the agent can guide the user through
+            configuration.  ``None`` means no setup step is required.
 
     Raises:
         BundleValidationError: If ``name`` fails the regex or ``description``
@@ -86,6 +92,7 @@ class BundleManifest:
     version: str = "1.0.0"
     author: str = ""
     tools: list[str] = field(default_factory=list)
+    setup: str | None = None
 
     def __post_init__(self) -> None:
         """Validate name and description after construction."""
@@ -372,6 +379,8 @@ def _parse_manifest(raw_yaml: str, expected_root: str | None = None) -> BundleMa
     version = str(data.get("version", "1.0.0"))
     author = str(data.get("author", ""))
     tools = list(data.get("tools") or [])
+    setup_raw = data.get("setup")
+    setup = str(setup_raw).strip() if setup_raw else None
 
     # BundleManifest.__post_init__ validates the name regex
     manifest = BundleManifest(
@@ -380,6 +389,7 @@ def _parse_manifest(raw_yaml: str, expected_root: str | None = None) -> BundleMa
         version=version,
         author=author,
         tools=tools,
+        setup=setup,
     )
 
     # Step 7 — root dir / name mismatch

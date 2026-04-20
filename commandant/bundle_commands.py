@@ -15,8 +15,8 @@ from common.bundle_errors import BundleError
 from common.bundles import install_bundle, list_bundles, uninstall_bundle
 from common.config_loader import resolve_bundles_dir
 from common.envelope import Envelope
-from common.envelope_actions import ACTION_MESSAGE_OUTGOING
-from common.streams import stream_outgoing
+from common.envelope_actions import ACTION_MESSAGE_OUTGOING, ACTION_MESSAGE_TASK
+from common.streams import STREAM_TASKS, stream_outgoing
 
 logger = logging.getLogger("commandant.bundle_commands")
 
@@ -44,6 +44,55 @@ async def _send_reply(envelope: Envelope, redis_conn: Any, text: str) -> None:
     )
 
 
+async def _trigger_bundle_setup(
+    envelope: Envelope,
+    redis_conn: Any,
+    manifest: Any,
+    bundles_dir: Path,
+) -> None:
+    """Read the bundle's setup Markdown and forward it to Atelier as a task.
+
+    If the setup file is missing, a warning is logged and a plain "installed"
+    reply is sent instead — the install itself is never rolled back.
+
+    Args:
+        envelope: The originating /bundle install envelope.
+        redis_conn: Active async Redis connection.
+        manifest: Installed bundle manifest (must have a non-None ``setup``).
+        bundles_dir: Directory where bundles are installed.
+    """
+    setup_path = bundles_dir / manifest.name / manifest.setup  # type: ignore[operator]
+    if not setup_path.is_file():
+        logger.warning(
+            "Bundle %r declares setup=%r but file not found at %s — skipping setup",
+            manifest.name,
+            manifest.setup,
+            setup_path,
+        )
+        await _send_reply(
+            envelope,
+            redis_conn,
+            f"Bundle '{manifest.name}' v{manifest.version} installed successfully.\n"
+            f"(Setup file '{manifest.setup}' not found — configure manually.)",
+        )
+        return
+
+    setup_instructions = setup_path.read_text(encoding="utf-8").strip()
+    task_content = (
+        f"The bundle '{manifest.name}' v{manifest.version} was just installed. "
+        f"Follow the setup instructions below to complete its configuration:\n\n"
+        f"{setup_instructions}"
+    )
+    task_envelope = Envelope.from_parent(envelope, task_content)
+    task_envelope.action = ACTION_MESSAGE_TASK
+    await redis_conn.xadd(STREAM_TASKS, {"payload": task_envelope.to_json()})
+    logger.info(
+        "Bundle %r setup task forwarded to Atelier (setup file: %s)",
+        manifest.name,
+        manifest.setup,
+    )
+
+
 async def handle_bundle_install(envelope: Envelope, redis_conn: Any, args: list[str]) -> None:
     """Install a bundle from a ZIP path.
 
@@ -67,12 +116,16 @@ async def handle_bundle_install(envelope: Envelope, redis_conn: Any, args: list[
     bundles_dir = resolve_bundles_dir()
     try:
         manifest = install_bundle(zip_path, bundles_dir)
-        await _send_reply(
-            envelope,
-            redis_conn,
-            f"Bundle '{manifest.name}' v{manifest.version} installed successfully.",
-        )
         logger.info("Bundle %r installed via /bundle install", manifest.name)
+
+        if manifest.setup:
+            await _trigger_bundle_setup(envelope, redis_conn, manifest, bundles_dir)
+        else:
+            await _send_reply(
+                envelope,
+                redis_conn,
+                f"Bundle '{manifest.name}' v{manifest.version} installed successfully.",
+            )
     except BundleError as exc:
         await _send_reply(envelope, redis_conn, f"Error: {exc}")
         logger.warning("Bundle install failed: %s", exc)
@@ -152,11 +205,7 @@ async def handle_bundle(envelope: Envelope, redis_conn: Any) -> None:
         envelope: The envelope whose ``content`` starts with "/bundle".
         redis_conn: Active async Redis connection.
     """
-    # content is something like "/bundle install /tmp/foo.zip"
-    # split into parts, first element is "/bundle"
     parts = envelope.content.strip().split()
-
-    # parts[0] == "/bundle", parts[1] would be the subcommand
     if len(parts) < 2:
         await _send_reply(envelope, redis_conn, _USAGE)
         return

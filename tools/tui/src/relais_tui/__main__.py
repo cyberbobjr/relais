@@ -10,24 +10,26 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from typing import TYPE_CHECKING, cast
 import importlib.metadata
 import logging
 import os
 import sys
 import tomllib
 from dataclasses import replace as _dataclass_replace
-from io import StringIO
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
-from rich.console import Console
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.events import Key
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.worker import Worker
-from textual.widgets import Footer, Header, Input, LoadingIndicator, Log, Static, TabbedContent, TabPane
+from textual.widgets import Footer, Header, Input, LoadingIndicator, RichLog, Static, TabbedContent, TabPane
 
 from relais_tui.config import Config, load_config, save_config
 from relais_tui.client import RelaisClient
@@ -185,6 +187,115 @@ Header {
 """
 
 
+_HELP_TEXT = """\
+[bold cyan]RELAIS TUI — Keyboard Shortcuts[/bold cyan]
+
+[bold]Input[/bold]
+  [bold]Enter[/bold]        Send message
+  [bold]↑ / ↓[/bold]       Navigate command history
+  [bold]ESC[/bold]          Stop streaming
+
+[bold]Application[/bold]
+  [bold]Ctrl+L[/bold]       Clear chat
+  [bold]Ctrl+T[/bold]       Toggle Bundles tab
+  [bold]Ctrl+Q[/bold]       Quit
+
+[bold]Commands[/bold]
+  [bold]/exit[/bold]        Quit the application
+  [bold]/clear[/bold]       Clear server-side conversation history
+
+Press [bold]F1[/bold] or [bold]ESC[/bold] to close.
+"""
+
+_HELP_CSS = """
+HelpScreen {
+    align: center middle;
+}
+#help-box {
+    width: 62;
+    height: auto;
+    padding: 1 2;
+    background: #16213e;
+    border: double #50fa7b;
+    color: #f8f8f2;
+}
+"""
+
+
+class HelpScreen(ModalScreen[None]):
+    """Modal overlay showing keyboard shortcuts."""
+
+    CSS = _HELP_CSS
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("f1", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static(_HELP_TEXT, id="help-box", markup=True)
+
+    def action_dismiss(self) -> None:
+        """Close the help overlay."""
+        self.dismiss()
+
+
+class HistoryInput(Input):
+    """Input widget with Up/Down arrow command-history navigation."""
+
+    _MAX_HISTORY = 100
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._history: deque[str] = deque(maxlen=self._MAX_HISTORY)
+        self._history_pos: int = -1
+        self._draft: str = ""
+
+    def add_to_history(self, value: str) -> None:
+        """Append *value* to history and reset the navigation cursor.
+
+        Args:
+            value: The submitted command string to record.
+        """
+        if value and (not self._history or self._history[-1] != value):
+            self._history.append(value)
+        self._history_pos = -1
+        self._draft = ""
+
+    async def _on_key(self, event: Key) -> None:
+        """Intercept Up/Down to navigate history; delegate everything else.
+
+        Args:
+            event: The key event from Textual.
+        """
+        if event.key == "up":
+            if not self._history:
+                return
+            if self._history_pos == -1:
+                self._draft = self.value
+                self._history_pos = len(self._history) - 1
+            elif self._history_pos > 0:
+                self._history_pos -= 1
+            self.value = self._history[self._history_pos]
+            self.cursor_position = len(self.value)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "down":
+            if self._history_pos == -1:
+                return
+            if self._history_pos < len(self._history) - 1:
+                self._history_pos += 1
+                self.value = self._history[self._history_pos]
+            else:
+                self._history_pos = -1
+                self.value = self._draft
+            self.cursor_position = len(self.value)
+            event.prevent_default()
+            event.stop()
+        else:
+            await super()._on_key(event)
+
+
 class RelaisApp(App[None]):
     """RELAIS terminal chat client.
 
@@ -198,7 +309,8 @@ class RelaisApp(App[None]):
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "clear_chat", "Clear"),
         Binding("escape", "stop_stream", "Stop", show=False),
-        Binding("ctrl+b", "switch_tab('bundles')", "Bundles"),
+        Binding("ctrl+t", "toggle_bundles", "Bundles"),
+        Binding("f1", "help", "Help"),
     ]
 
     # Accumulates streaming tokens for the in-progress assistant reply.
@@ -256,11 +368,11 @@ class RelaisApp(App[None]):
         yield Header(show_clock=True)
         with TabbedContent(initial="chat"):
             with TabPane("Chat", id="chat"):
-                yield Log(id="chat-log", highlight=True)
+                yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True)
                 yield Static("", id="streaming", markup=True)
                 yield LoadingIndicator(id="spinner")
-                yield Input(
-                    placeholder="Type a message  ·  ESC = stop  ·  Ctrl+L = clear  ·  /exit or Ctrl+Q = quit",
+                yield HistoryInput(
+                    placeholder="Type a message  ·  ↑↓ = history  ·  ESC = stop  ·  F1 = help  ·  Ctrl+Q = quit",
                     id="msg-input",
                 )
                 yield Static("Connecting…", id="status", markup=True)
@@ -274,12 +386,12 @@ class RelaisApp(App[None]):
 
     async def on_mount(self) -> None:
         """Run after the DOM is ready: show splash, health-check, focus input."""
-        log = self.query_one("#chat-log", Log)
-        log.write_line(self._render_markup(_build_splash(self._config_path, self._log_path)))
+        log = self.query_one("#chat-log", RichLog)
+        log.write(_build_splash(self._config_path, self._log_path))
         self._healthcheck()
         if self._session_id:
             self.run_worker(self._load_history(), exclusive=False)
-        self.query_one("#msg-input", Input).focus()
+        self.query_one("#msg-input", HistoryInput).focus()
 
     async def on_unmount(self) -> None:
         """Close the HTTP client when the application exits."""
@@ -307,6 +419,7 @@ class RelaisApp(App[None]):
         content = event.value.strip()
         if not content or self._busy:
             return
+        cast("HistoryInput", event.input).add_to_history(content)
         event.input.clear()
         if content.lower() in ("/exit", "/quit"):
             self.exit()
@@ -322,7 +435,7 @@ class RelaisApp(App[None]):
         """Clear the chat log and generate a new session_id."""
         self._session_id = str(uuid4())
         self._save_session_id()
-        self.query_one("#chat-log", Log).clear()
+        self.query_one("#chat-log", RichLog).clear()
 
     def action_stop_stream(self) -> None:
         """Cancel the in-progress stream (ESC key).
@@ -337,36 +450,24 @@ class RelaisApp(App[None]):
         if self._busy and self._stream_worker is not None:
             self._stream_worker.cancel()
 
-    def action_switch_tab(self, tab_id: str) -> None:
-        """Switch the active TabbedContent tab by id (e.g. Ctrl+B → bundles).
+    def action_help(self) -> None:
+        """Display the keyboard shortcuts help overlay."""
+        self.push_screen(HelpScreen())
 
-        Args:
-            tab_id: The ``id`` attribute of the target ``TabPane``.
-        """
-        self.query_one(TabbedContent).active = tab_id
+    def action_toggle_bundles(self) -> None:
+        """Toggle between Chat and Bundles tabs."""
+        tabs = self.query_one(TabbedContent)
+        if tabs.active == "bundles":
+            tabs.active = "chat"
+            self.query_one("#msg-input", HistoryInput).focus()
+        else:
+            self.set_focus(None)
+            tabs.active = "bundles"
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _render_markup(self, text: str) -> str:
-        """Convert Rich markup string to an ANSI-escaped plain string.
-
-        The ``Log`` widget does not understand Rich markup natively, so we
-        pre-render it through a Rich ``Console`` that writes ANSI escape
-        codes to a ``StringIO`` buffer.
-
-        Args:
-            text: A string that may contain Rich markup tags such as
-                ``[bold]``, ``[green]``, ``[dim]``, etc.
-
-        Returns:
-            The rendered string with ANSI escape codes (no raw markup tags).
-        """
-        buf = StringIO()
-        console = Console(force_terminal=True, file=buf, width=120)
-        console.print(text, end="")
-        return buf.getvalue()
 
     def _save_session_id(self) -> None:
         """Persist the current session ID back to the config file on disk.
@@ -397,26 +498,21 @@ class RelaisApp(App[None]):
         turns = await self._client.fetch_history(self._session_id, limit=20)
         if not turns:
             return
-        log = self.query_one("#chat-log", Log)
+        log = self.query_one("#chat-log", RichLog)
         total = len(turns)
         displayed = min(total, 20)
         if total > displayed:
-            log.write_line(
-                self._render_markup(f"[dim]... {total - displayed} turns précédents[/dim]")
-            )
-        log.write_line(self._render_markup("[dim]--- Historique ---[/dim]"))
+            log.write(f"[dim]... {total - displayed} turns précédents[/dim]")
+        log.write("[dim]--- Historique ---[/dim]")
         for turn in turns[-displayed:]:
             if turn.get("user_content"):
-                log.write_line(
-                    self._render_markup(f"[bold]Vous :[/bold] {turn['user_content']}")
-                )
+                log.write(f"[dim]{'─' * 60}[/dim]")
+                log.write(f"[bold]▶ Vous :[/bold] {turn['user_content']}")
+                log.write("")
             if turn.get("assistant_content"):
-                log.write_line(
-                    self._render_markup(
-                        f"[green]Assistant :[/green] {turn['assistant_content']}"
-                    )
-                )
-        log.write_line(self._render_markup("[dim]--- Fin historique ---[/dim]"))
+                log.write(f"[green]◀ Assistant :[/green] {turn['assistant_content']}")
+                log.write("")
+        log.write("[dim]--- Fin historique ---[/dim]")
 
     # ------------------------------------------------------------------
     # Workers
@@ -437,7 +533,7 @@ class RelaisApp(App[None]):
             overlay.update(_OFFLINE_BANNER.format(url=self._config.api_url))
             overlay.add_class("visible")
             # Disable input while offline
-            self.query_one("#msg-input", Input).disabled = True
+            self.query_one("#msg-input", HistoryInput).disabled = True
 
     @work(exclusive=True)
     async def _send(self, content: str) -> None:
@@ -448,12 +544,14 @@ class RelaisApp(App[None]):
         Args:
             content: The user message text.
         """
-        log = self.query_one("#chat-log", Log)
+        log = self.query_one("#chat-log", RichLog)
         status = self.query_one("#status", Static)
 
         _log.debug("_send: entered, content_len=%d, session_id=%s", len(content), self._session_id)
         user_color = self._config.theme.user_text
-        log.write_line(self._render_markup(f"[bold {user_color}]You:[/bold {user_color}] {content}"))
+        log.write(f"[dim]{'─' * 60}[/dim]")
+        log.write(f"[bold {user_color}]▶ You:[/bold {user_color}] {content}")
+        log.write("")
 
         buf = ""
         self._buf = ""
@@ -486,8 +584,6 @@ class RelaisApp(App[None]):
                     if new_id and new_id != self._session_id:
                         self._session_id = new_id
                         self._save_session_id()
-                    else:
-                        self._session_id = new_id
                     # Non-streaming fallback: server returned full content at once
                     if not buf and ev.content:
                         buf = ev.content
@@ -500,7 +596,8 @@ class RelaisApp(App[None]):
                     self._buf = ""
                     if buf:
                         accent = self._config.theme.accent
-                        log.write_line(self._render_markup(f"[bold {accent}]RELAIS:[/bold {accent}] {buf}"))
+                        log.write(f"[bold {accent}]◀ RELAIS:[/bold {accent}] {buf}")
+                        log.write("")
                     session_short = (
                         (self._session_id[:8] + "…") if self._session_id else "–"
                     )
@@ -514,25 +611,25 @@ class RelaisApp(App[None]):
                 elif isinstance(ev, ErrorEvent):
                     spinner.remove_class("active")
                     self._buf = ""
-                    log.write_line(self._render_markup(f"[bold red]Error:[/bold red] {ev.error}"))
+                    log.write(f"[bold red]Error:[/bold red] {ev.error}")
                     status.update(f"[red]Error[/red] · {ev.error[:80]}")
 
         except asyncio.CancelledError:
             self._buf = ""
-            log.write_line(self._render_markup("[dim]⏹ Stream interrompu.[/dim]"))
+            log.write("[dim]⏹ Stream interrompu.[/dim]")
             raise  # must re-raise so Textual marks the worker as cancelled
 
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError, OSError) as exc:
             self._buf = ""
             _log.exception("Stream request failed: %s", exc)
             error_label = type(exc).__name__
-            log.write_line(self._render_markup(f"[bold red]Connection error:[/bold red] {error_label}"))
+            log.write(f"[bold red]Connection error:[/bold red] {error_label}")
             status.update(f"[red]Connection error[/red] · {error_label}")
 
         except Exception as exc:  # noqa: BLE001
             self._buf = ""
             _log.exception("Unexpected error in _send: %s", exc)
-            log.write_line(self._render_markup(f"[bold red]Error:[/bold red] {exc}"))
+            log.write(f"[bold red]Error:[/bold red] {exc}")
             status.update(f"[red]Error[/red] · {type(exc).__name__}")
 
         finally:
@@ -540,7 +637,7 @@ class RelaisApp(App[None]):
             self._buf = ""  # safety reset — already cleared per-branch but ensures cleanup on unexpected exit
             self._stream_worker = None  # clear reference before opening the gate
             self._busy = False
-            self.query_one("#msg-input", Input).focus()
+            self.query_one("#msg-input", HistoryInput).focus()
 
 
 # ---------------------------------------------------------------------------
@@ -622,9 +719,10 @@ def main() -> None:
     )
     logging.root.setLevel(logging.DEBUG)
     logging.root.addHandler(_handler)
+    _log.info("RELAIS TUI starting — log=%s RELAIS_HOME=%s", log_path, relais_home)
 
     config = load_config(config_path)
-    _log.info("RELAIS TUI starting — api_url=%s config=%s logs=%s", config.api_url, config_path, log_path)
+    _log.info("config loaded — api_url=%s config=%s", config.api_url, config_path)
 
     RelaisApp(config, config_path, log_path).run()
 

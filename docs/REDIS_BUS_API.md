@@ -255,6 +255,43 @@ XADD relais:messages:outgoing:discord * payload <Envelope JSON>
 
 ---
 
+### `relais:messages:outgoing:rest:{user_id}`
+
+**Direction**: REST adapter (push mirror) → PushRegistry (plain XREAD)
+**Consumer group**: none (plain `XREAD` starting at `$`, no XACK needed)
+**Max entries**: ~100 (APPROX trimming via `MAXLEN ~100`)
+
+Push mirror stream that allows the REST adapter to fan out outgoing messages to persistent SSE
+connections. Each `relais:messages:outgoing:rest:{user_id}` stream is dedicated to one user ID.
+
+**Producer**: `_handle_outgoing_message` in `aiguilleur/channels/rest/adapter.py`
+**Consumer**: `PushRegistry._reader_loop` in `aiguilleur/channels/rest/push_registry.py`
+
+The adapter mirrors every envelope destined for a REST user into this stream so that one or more
+concurrent SSE subscribers (e.g. multiple browser tabs or TUI instances authenticated with the
+same API key) can each read the same messages independently.  Because each SSE connection tracks
+its own read cursor (`XREAD COUNT … BLOCK … STREAMS … <last_id>`), no consumer group is
+needed and acknowledgement is not required.
+
+```
+XADD relais:messages:outgoing:rest:usr_alice MAXLEN ~ 100 * payload <Envelope JSON>
+```
+
+**Field layout** (identical to `relais:messages:outgoing:{channel}`):
+
+| Field     | Type   | Description              |
+|-----------|--------|--------------------------|
+| `payload` | string | JSON-serialised Envelope |
+
+**Lifecycle**:
+- Stream is created on the first outgoing message for the user and trimmed automatically.
+- `PushRegistry` starts reading from `$` (only new entries after subscription) and forwards
+  each entry as a `data: <payload>` SSE frame to the connected client.
+- Entries are **not** acknowledged; old entries expire naturally once the approximate cap is
+  reached (≈100 entries per user stream).
+
+---
+
 ### `relais:messages:streaming:{channel}:{correlation_id}`
 
 **Direction**: Atelier (StreamPublisher) → Aiguilleur (streaming relay)

@@ -8,13 +8,14 @@ Bundles are ZIP packages that extend a RELAIS installation with new capabilities
    - [Directory Layout](#directory-layout)
    - [bundle.yaml Reference](#bundleyaml-reference)
 2. [What Each Component Does](#what-each-component-does)
-3. [Installing a Bundle](#installing-a-bundle)
-4. [Uninstalling a Bundle](#uninstalling-a-bundle)
-5. [Listing Installed Bundles](#listing-installed-bundles)
-6. [Role-Gating for Subagents](#role-gating-for-subagents)
-7. [Creating a Bundle](#creating-a-bundle)
-8. [Security](#security)
-9. [Conflict Resolution](#conflict-resolution)
+3. [Post-Install Setup](#post-install-setup)
+4. [Installing a Bundle](#installing-a-bundle)
+5. [Uninstalling a Bundle](#uninstalling-a-bundle)
+6. [Listing Installed Bundles](#listing-installed-bundles)
+7. [Role-Gating for Subagents](#role-gating-for-subagents)
+8. [Creating a Bundle](#creating-a-bundle)
+9. [Security](#security)
+10. [Conflict Resolution](#conflict-resolution)
 
 ---
 
@@ -51,6 +52,7 @@ description: |            # required
 version: "1.0.0"          # optional — semver string for display purposes
 author: "Name <email>"    # optional
 tools: []                 # optional — declared tool names (used for conflict detection)
+setup: setup.md           # optional — path to a Markdown setup guide (see Post-Install Setup)
 ```
 
 | Field | Required | Description |
@@ -60,6 +62,7 @@ tools: []                 # optional — declared tool names (used for conflict 
 | `version` | No | Version string. Used for display; no version enforcement between installs. |
 | `author` | No | Author name and contact. |
 | `tools` | No | Explicit list of tool names exported by `tools/`. Used at install time to detect conflicts with already-installed bundles. |
+| `setup` | No | Relative path (inside the bundle) to a Markdown file containing post-install setup instructions. When present, RELAIS automatically forwards the instructions to the assistant after installation. See [Post-Install Setup](#post-install-setup). |
 
 ---
 
@@ -90,6 +93,47 @@ Subagent packs are loaded by `SubagentRegistry`. Installing a bundle does not au
 | `tools/` | Global — all agents | ToolPolicy (per-profile) |
 | `skills/` | Global — all agents | None beyond agent capability |
 | `subagents/` | Available to orchestrator | `allowed_subagents` in portail.yaml |
+
+---
+
+## Post-Install Setup
+
+Some bundles require configuration steps before they can be used — for example, providing credentials, creating a config file, or enabling a system service. The `setup` field in `bundle.yaml` points to a Markdown file inside the bundle that describes those steps.
+
+### How it works
+
+1. After a successful install, Commandant reads the file at the path declared in `setup`.
+2. The file content is forwarded to Atelier as a task with the preamble:
+   > *"The bundle '…' was just installed. Follow the setup instructions below to complete its configuration:"*
+3. The assistant guides the user through the steps conversationally, using its available tools to create files, run commands, and update configuration.
+
+### Writing a setup file
+
+The setup file is plain Markdown. Write it as a numbered checklist of actions the assistant should perform or ask about. Example (`setup.md` for a mail bundle):
+
+```markdown
+# Himalaya mail bundle — setup
+
+Guide the user through the following steps:
+
+1. Ask which email provider to use (Gmail, Outlook, or custom IMAP/SMTP).
+2. Collect the user's email address and app password — store them securely, never log them.
+3. Write the Himalaya config file to `~/.config/himalaya/config.toml` using the collected values.
+4. Run `himalaya account list` to verify the connection. If it fails, show the error and ask the user to correct the credentials.
+5. Inform the user that the `himalaya-mail` subagent is now ready and requires the `himalaya-*` pattern in their role's `allowed_subagents` to be used.
+```
+
+### What happens if the setup file is missing
+
+If `setup` is declared in `bundle.yaml` but the file does not exist at the declared path, the install still succeeds and the user receives a warning message explaining that setup must be completed manually.
+
+### Re-running setup
+
+There is no automatic re-run mechanism. To repeat setup, type a message such as:
+```
+/bundle install ./my-bundle.zip
+```
+Re-installing the bundle triggers the setup flow again.
 
 ---
 
