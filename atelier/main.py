@@ -211,6 +211,7 @@ import json
 import logging
 import time
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -784,6 +785,13 @@ class Atelier(BrickBase):
                         force_subagent_name, corr,
                     )
 
+            # 6. Execute
+            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
+            streaming = aig_ctx.get("streaming", False)
+            # When streaming to the client, tokens must be emitted token-by-token
+            # rather than accumulated; override final_only so emit_text() flushes
+            # each chunk immediately instead of batching the full reply.
+            display_config = replace(self._display_config, final_only=False) if streaming else self._display_config
             agent_executor = AgentExecutor(
                 profile=profile,
                 soul_prompt=soul_prompt,
@@ -793,18 +801,14 @@ class Atelier(BrickBase):
                 checkpointer=self._checkpointer,
                 subagents=subagents,
                 delegation_prompt=delegation_prompt,
-                display_config=self._display_config,
+                display_config=display_config,
             )
-
-            # 6. Execute
-            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
-            streaming = aig_ctx.get("streaming", False)
             stream_pub = StreamPublisher(
                 redis_conn,
                 channel=envelope.channel,
                 correlation_id=corr,
                 source_envelope=envelope,
-                display_config=self._display_config,
+                display_config=display_config,
             )
             if streaming:
                 await redis_conn.publish(

@@ -4,7 +4,7 @@ import { createSignal } from "solid-js";
 import { App } from "./app.tsx";
 import { loadConfig, saveConfig, withSessionId } from "./lib/config.ts";
 import { RelaisClient } from "./lib/client.ts";
-import { loadHistory, setHistoryLoading, setErrorBanner } from "./lib/store.ts";
+import { loadHistory, setHistoryLoading, setErrorBanner, setSessionId as setStoreSessionId } from "./lib/store.ts";
 import { initTheme } from "./lib/theme.ts";
 import { logger } from "./lib/logger.ts";
 
@@ -29,8 +29,12 @@ const client = new RelaisClient(config);
 
 const [sessionId, setSessionId] = createSignal(config.lastSessionId);
 
+// Seed the store with the persisted session so the first request reuses it
+if (config.lastSessionId) setStoreSessionId(config.lastSessionId);
+
 function handleSessionId(id: string) {
   setSessionId(id);
+  setStoreSessionId(id);
   saveConfig(withSessionId(config, id));
 }
 
