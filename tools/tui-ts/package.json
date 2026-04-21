@@ -1,0 +1,28 @@
+{
+  "name": "tui-ts",
+  "version": "0.1.0",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "scripts": {
+    "start": "bun run src/main.tsx",
+    "dev": "bun --hot run src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "poc:binary": "bun run src/poc/poc1_binary.tsx",
+    "poc:scroll": "bun run src/poc/poc2_scroll.tsx",
+    "poc:sse": "bun run src/poc/poc3_sse.ts",
+    "build": "bun build src/main.tsx --compile --outfile dist/relais-ts"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.1.102",
+    "@opentui/solid": "^0.1.102",
+    "solid-js": "^1.9.12",
+    "yaml": "^2.8.3"
+  }
+}
