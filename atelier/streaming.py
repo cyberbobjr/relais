@@ -8,7 +8,7 @@ Also provides content normalisation utilities and sentinel constants.
 from __future__ import annotations
 
 import json as _json
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, NamedTuple
 
 # Number of buffered characters that triggers an automatic flush to the
 # stream callback.  Keep at 10 — changing this value affects all
@@ -246,3 +246,52 @@ class TaskArgsTracker:
             The registered name, or *ns_id* if no mapping exists.
         """
         return self.ns_to_name.get(ns_id, ns_id)
+
+
+class ChunkPayload(NamedTuple):
+    """Parsed and validated DeepAgents astream v2 chunk.
+
+    Attributes:
+        chunk_type: The ``"type"`` discriminant from the raw dict (``"updates"``
+            or ``"messages"``).
+        ns: The ``"ns"`` list from the raw dict (empty = root agent, non-empty =
+            subagent namespace stack).
+        data: The ``"data"`` payload — dict for ``"updates"``, (token, meta)
+            tuple for ``"messages"``.
+        source: Human-readable label derived from *ns*: ``"agent"`` when *ns*
+            is empty, ``"subagent:{ns[0]}"`` otherwise.
+    """
+
+    chunk_type: str
+    ns: list[str]
+    data: Any
+
+    @property
+    def source(self) -> str:
+        """Human-readable source label for logging."""
+        return f"subagent:{self.ns[0]}" if self.ns else "agent"
+
+
+def decode_chunk(raw: object) -> ChunkPayload | None:
+    """Validate and decode a raw DeepAgents astream v2 chunk dict.
+
+    Returns ``None`` for any input that does not conform to the expected
+    ``{"type": ..., "ns": ..., "data": ...}`` shape so that callers can skip
+    unknown shapes with a simple ``if payload is None: continue`` guard.
+
+    Args:
+        raw: The raw object received from ``agent.astream()``.
+
+    Returns:
+        A ``ChunkPayload`` named-tuple if *raw* is a valid chunk dict,
+        otherwise ``None``.
+    """
+    if not isinstance(raw, dict):
+        return None
+    if not ("type" in raw and "ns" in raw and "data" in raw):
+        return None
+    return ChunkPayload(
+        chunk_type=raw["type"],
+        ns=raw["ns"],
+        data=raw["data"],
+    )
