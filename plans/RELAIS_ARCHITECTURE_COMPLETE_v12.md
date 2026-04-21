@@ -1385,11 +1385,11 @@ retention:
 
 **Taxonomie :** BrickBase long-running — deux boucles consommateurs Redis ; `autostart=true`, `autorestart=true`.
 
-**Rôle :** Améliore les skills existants via S3 (changelog + consolidation périodique) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (auto-creation pipeline). Publie des notifications utilisateur quand un skill est créé ou consolidé.
+**Rôle :** Améliore les skills existants via édition directe (`SkillEditor`) **et** crée automatiquement de nouveaux skills à partir des patterns récurrents dans les sessions (auto-creation pipeline). Publie des notifications utilisateur quand un skill est créé ou modifié.
 
-**Pipeline changelog + consolidation (S3) :**
+**Pipeline édition directe :**
 
-Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. Phase 1 : `ChangelogWriter` (LLM rapide, profil `annotation_profile`) extrait 1-3 observations concrètes et les écrit dans un `CHANGELOG.md` séparé — le SKILL.md n'est jamais touché. Déclenché par erreurs d'outils ou par seuil d'appels cumulés (`annotation_call_threshold`). Phase 2 : quand le changelog dépasse `consolidation_line_threshold` lignes (défaut 80), `SkillConsolidator` (LLM précis, profil `consolidation_profile`) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail), et vide le changelog. Cooldown Redis par skill empêche les consolidations trop fréquentes.
+Consomme `relais:skill:trace` (publié par Atelier après chaque tour). `SkillTraceStore` (SQLite) accumule une ligne par tour. `SkillEditor` (LLM précis, profil `edit_profile`, défaut `"precise"`) reçoit le SKILL.md courant + la trace de conversation scopée au skill cible, appelle le LLM une seule fois avec `with_structured_output`, et réécrit le SKILL.md directement si `changed=True`. Déclenché par erreurs d'outils (`tool_error_count >= edit_min_tool_errors`), tour avorté (DLQ, `tool_error_count == -1`), succès après échec, ou seuil d'appels cumulés (`edit_call_threshold`). Cooldown Redis par skill (`edit_cooldown_seconds`) empêche les éditions trop fréquentes. Pour les skills provenant d'un bundle, `skill_paths` dans la trace indique le chemin absolu du répertoire.
 
 **Pipeline auto-création (session archives) :**
 
@@ -1401,8 +1401,7 @@ Consomme `relais:memory:request` via groupe dédié `forgeron_archive_group` (in
 |--------|------|
 | `Forgeron` | BrickBase — deux boucles : `relais:skill:trace` + `relais:memory:request` |
 | `SkillTraceStore` | SQLite — accumule les traces par skill (tool_call_count, tool_error_count) |
-| `ChangelogWriter` | Phase 1 : LLM rapide — écrit observations dans CHANGELOG.md (import paresseux) |
-| `SkillConsolidator` | Phase 2 : LLM précis — réécrit SKILL.md depuis changelog (import paresseux) |
+| `SkillEditor` | LLM précis — réécrit SKILL.md directement depuis trace scopée (import paresseux) |
 | `SessionStore` | SQLite — patterns d'intention par session (pipeline auto-création) |
 | `IntentLabeler` | Haiku LLM — extrait label snake_case depuis session (import paresseux) |
 | `SkillCreator` | LLM précis — génère SKILL.md depuis exemples (import paresseux) |
@@ -1420,14 +1419,13 @@ Produits :
   relais:logs                — logs opérationnels
 
 Redis keys (cooldowns) :
-  relais:skill:annotation_cooldown:{skill_name}     — Phase 1 cooldown
-  relais:skill:consolidation_cooldown:{skill_name}  — Phase 2 cooldown
+  relais:skill:edit_cooldown:{skill_name}           — cooldown édition directe
   relais:skill:creation_cooldown:{intent_label}     — auto-creation cooldown
 
 XACK : ack_mode="always" sur les deux streams (consumer advisory — perte acceptable).
 ```
 
-**Note :** L'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
+**Note :** L'amélioration des skills a évolué vers une édition directe (`SkillEditor`) en remplacement de l'approche 2-phases (changelog + consolidation périodique). Atelier publie les traces sur `relais:skill:trace` ; Forgeron décide du déclenchement et réécrit le SKILL.md en un seul appel LLM.
 
 ---
 

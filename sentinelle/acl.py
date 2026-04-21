@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from common.config_loader import resolve_config_path
+from common.config_loader import get_relais_home, resolve_config_path
 from common.user_record import UserRecord
 
 logger = logging.getLogger("sentinelle.acl")
@@ -254,7 +254,7 @@ class ACLManager:
                 "ACL: sentinelle.yaml not found in any config search path — "
                 "running in PERMISSIVE mode (all requests allowed). "
                 "Create %s/config/sentinelle.yaml to enable ACL enforcement.",
-                "~/.relais",
+                get_relais_home(),
             )
             self._permissive = True
             return

@@ -100,7 +100,7 @@ roles:
     actions: ["*"]
     skills_dirs: ["*"]
     allowed_mcp_tools: ["*"]
-    allowed_subagents: ["*"]
+    allowed_subagents: ["*", "horloger-manager"]
     prompt_path: null
   user:
     actions: []

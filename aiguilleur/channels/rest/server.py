@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 from aiohttp import web
 
 from common.contexts import CTX_AIGUILLEUR
-from common.envelope import Envelope
+from common.envelope import Envelope, MediaRef
 from common.envelope_actions import ACTION_MESSAGE_INCOMING
 from common.streams import (
     STREAM_INCOMING,
@@ -548,6 +548,16 @@ def create_app(
         else:
             session_id = str(uuid.uuid4())
         media_refs_raw: list = body.get("media_refs") or []
+        media_refs: list[MediaRef] = []
+        for m in media_refs_raw:
+            if isinstance(m, dict):
+                media_refs.append(MediaRef(
+                    media_id=m.get("media_id") or str(uuid.uuid4()),
+                    path=m.get("path", ""),
+                    mime_type=m.get("mime_type", "image/png"),
+                    size_bytes=m.get("size_bytes", 0),
+                    data_base64=m.get("data_base64"),
+                ))
 
         correlation_id = str(uuid.uuid4())
         user_record = request["user_record"]
@@ -577,6 +587,7 @@ def create_app(
             session_id=session_id,
             correlation_id=correlation_id,
             action=ACTION_MESSAGE_INCOMING,
+            media_refs=media_refs,
             context={
                 CTX_AIGUILLEUR: {
                     "content_type": "text",

@@ -520,6 +520,7 @@ class BrickBase(abc.ABC):
         )
 
         shutdown_event = shutdown.stop_event
+        self._shutdown_event = shutdown_event
 
         async with AsyncExitStack() as stack:
             await self._extra_lifespan(stack)
@@ -540,6 +541,12 @@ class BrickBase(abc.ABC):
             try:
                 if stream_tasks:
                     await asyncio.gather(*stream_tasks)
+                else:
+                    # Producer-only brick: no consumer loops to drive the lifetime.
+                    # Block here until the shutdown signal is received so the
+                    # on_startup hook's background tasks (e.g. tick loops) keep
+                    # running until the process is asked to stop.
+                    await shutdown_event.wait()
             except asyncio.CancelledError:
                 self._logger.info("%s shutting down...", brick_name)
             finally:

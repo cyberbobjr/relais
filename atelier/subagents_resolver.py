@@ -298,9 +298,14 @@ def _resolve_skill_tokens(
                     "skill '%s' — dropping (not found in pack's skills/ dir)",
                     spec_name, skill_name,
                 )
-            elif path not in seen:
-                seen.add(path)
-                resolved.append(path)
+            else:
+                # SkillsMiddleware expects the *parent* directory that contains
+                # skill subdirectories (source_path/skill-name/SKILL.md), but
+                # local_skills stores individual skill dirs. Return the parent.
+                source_dir = str(Path(path).parent)
+                if source_dir not in seen:
+                    seen.add(source_dir)
+                    resolved.append(source_dir)
         else:
             logger.warning(
                 "SubagentRegistry: subagent '%s' — unknown skill token form '%s' — dropping",

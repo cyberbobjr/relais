@@ -1,8 +1,10 @@
 # RELAIS TUI Client — Implementation Plan
 
-**Status**: Approved, ready for implementation
+**Status**: Implemented (diverged from plan — see notes below)
 **Date**: 2026-04-14
-**Branch**: feat/whatsapp-adapter (or new branch feat/tui)
+**Branch**: feature/horloger-many-fixes
+
+> **Implementation notes**: Core modules shipped. Framework changed from **Textual** to **prompt_toolkit** (simpler, no CSS/widget class overhead). Widget hierarchy replaced by `ChatState` + `MdStreamRenderer`. Attachment/paste handling added (`attachments.py`, `paste_handler.py`). A TypeScript/Bun alternative (`tools/tui-ts/`) was also added alongside. File tree and dependency section below reflect the original plan; the actual implementation is documented in `docs/ARCHITECTURE.md`.
 
 ## Overview
 

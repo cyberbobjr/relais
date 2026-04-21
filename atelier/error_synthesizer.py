@@ -25,7 +25,10 @@ _SYSTEM_PROMPT = (
     "2. Honestly explains that you ran into a technical problem.\n"
     "3. Suggests a concrete next step when possible (e.g. check the configuration, "
     "   try again later, or contact support).\n"
-    "Reply only with the message to show the user — no meta-commentary."
+    "Reply only with the message to show the user — no meta-commentary.\n"
+    "IMPORTANT: do NOT reveal file paths, stack traces, internal tool names, or "
+    "technical identifiers verbatim — summarise the affected functionality area "
+    "in plain language (e.g. 'the scheduling tool', 'the memory lookup')."
 )
 
 _FALLBACK_MESSAGE = (
@@ -33,6 +36,52 @@ _FALLBACK_MESSAGE = (
     "request and was unable to complete it. Please try again, or contact support "
     "if the issue persists."
 )
+
+# Substrings that indicate a tool message contains a logical error.
+_TOOL_ERROR_MARKERS: tuple[str, ...] = (
+    "[Command failed with exit code",
+    "Error:",
+    "error:",
+    "Exception:",
+    "Traceback (most recent call last)",
+    '{"error"',
+    "failed:",
+    "Failed:",
+)
+
+_MAX_TOOL_ERROR_ENTRIES = 5
+_MAX_TOOL_ERROR_PREVIEW = 300
+_MAX_MESSAGES_SCAN = 20
+
+
+def extract_tool_errors(messages_raw: list[dict]) -> list[dict]:
+    """Extract tool messages that appear to contain logical errors.
+
+    Scans the last ``_MAX_MESSAGES_SCAN`` messages for ``role='tool'`` entries
+    whose content matches any of ``_TOOL_ERROR_MARKERS``.  Returns at most
+    ``_MAX_TOOL_ERROR_ENTRIES`` results, each with ``tool_name`` and a
+    truncated ``content_preview``.
+
+    Args:
+        messages_raw: Serialised LangChain message dicts (as produced by
+            ``serialize_messages()``).
+
+    Returns:
+        List of ``{"tool_name": str, "content_preview": str}`` dicts for
+        messages that appear to be errors.  Empty list if none found.
+    """
+    errors: list[dict] = []
+    for msg in messages_raw[-_MAX_MESSAGES_SCAN:]:
+        if msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content", ""))
+        tool_name = str(msg.get("name") or "unknown")
+        if any(marker in content for marker in _TOOL_ERROR_MARKERS):
+            errors.append({
+                "tool_name": tool_name,
+                "content_preview": content[:_MAX_TOOL_ERROR_PREVIEW],
+            })
+    return errors[:_MAX_TOOL_ERROR_ENTRIES]
 
 
 class ErrorSynthesizer:
@@ -50,6 +99,10 @@ class ErrorSynthesizer:
     ) -> str:
         """Generate an error explanation for the user.
 
+        Injects the exception string and a summary of failing tools into the
+        system prompt so the LLM can produce a precise, user-friendly message
+        rather than a generic fallback.
+
         Args:
             messages_raw: Partial conversation history from the failed turn
                 (serialised LangChain message dicts).
@@ -60,17 +113,31 @@ class ErrorSynthesizer:
             A non-empty string suitable for sending to the user.
         """
         try:
-            llm = init_chat_model(profile.model, temperature=0)
-            prompt: list[Any] = [SystemMessage(content=_SYSTEM_PROMPT)]
+            tool_errors = extract_tool_errors(messages_raw)
 
-            # Reconstruct conversation context from the partial history.
+            context_parts = [f"Final exception: {error[:500]}"]
+            if tool_errors:
+                tool_lines = ["Failing tools:"]
+                for entry in tool_errors:
+                    tool_lines.append(f"  - {entry['tool_name']}: {entry['content_preview']}")
+                context_parts.append("\n".join(tool_lines))
+
+            technical_context = "\n".join(context_parts)
+            enriched_system = (
+                _SYSTEM_PROMPT
+                + "\n\nTechnical context (use this to understand what failed, "
+                "but summarise for the user — do not quote verbatim):\n"
+                + technical_context
+            )
+
+            llm = init_chat_model(profile.model, temperature=0)
+            prompt: list[Any] = [SystemMessage(content=enriched_system)]
+
             for msg in messages_raw:
                 role = msg.get("type") or msg.get("role", "")
                 content = msg.get("content", "")
                 if role in ("human", "user"):
                     prompt.append(HumanMessage(content=str(content)))
-                # We intentionally skip AI/tool messages — they are context
-                # for the synthesizer's system prompt, not part of the prompt chain.
 
             response = await llm.ainvoke(prompt)
             text = getattr(response, "content", "") or ""

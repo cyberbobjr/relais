@@ -15,6 +15,7 @@ from typing import Any, Callable, Awaitable, cast
 
 from deepagents.backends import BackendProtocol, CompositeBackend, LocalShellBackend
 from deepagents import SubAgent
+from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 from langchain_core.runnables import RunnableConfig
 from langchain.chat_models import BaseChatModel, init_chat_model
@@ -22,7 +23,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from deepagents import create_deep_agent
-from common.config_loader import get_relais_home
+from common.config_loader import get_relais_home, get_relais_project_dir
 from common.profile_loader import ProfileConfig
 from atelier.display_config import DisplayConfig
 from atelier.message_serializer import serialize_messages
@@ -35,9 +36,12 @@ __all__ = [
     "AgentExecutionError",
     "ExhaustedRetriesError",
     "ToolErrorGuard",
+    "build_project_context_prompt",
+    "format_diagnostic_trace",
 ]
 from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, AiguilleurCtx, PortailCtx
 from common.envelope import Envelope
+from atelier.error_synthesizer import extract_tool_errors
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,7 @@ Long-term memory:
 - Always use paths like `/memories/...` to create, read, update, or organize persistent memories.
 - Do not write long-term information outside `/memories/`.
 - Before answering any question about the user or long-term memory, first check `/memories/` for relevant user and long-term information.
+- CRITICAL: `/memories/` is a virtual filesystem. NEVER use the `execute` tool to run shell commands (mkdir, touch, ls, cat, etc.) on `/memories/` paths — they will fail because `/memories/` does not exist on disk. Always use the dedicated file tools (write_file, read_file, list_files, edit_file) for all operations under `/memories/`.
 """.strip()
 
 SELF_DIAGNOSIS_PROMPT = """
@@ -87,6 +92,41 @@ If you encounter repeated tool errors (3+ in a row for the same tool, or 5+ tota
 4. Form a hypothesis about what is wrong (wrong syntax, wrong config key, wrong flag position, etc.).
 5. Try ONE corrected approach based on your diagnosis.
 Never blindly retry a failing command with minor variations — diagnose first.
+""".strip()
+
+DIAGNOSTIC_MARKER = "[DIAGNOSTIC — internal]"
+
+
+def build_project_context_prompt(relais_home: str, project_dir: str) -> str:
+    """Build the project environment context block injected into every agent.
+
+    Provides concrete filesystem anchors so agents never need to search from
+    the root (``find /``, ``ls /``).  Always use these paths as starting
+    points when looking for source files, skills, or configuration.
+
+    Args:
+        relais_home: Absolute path to the RELAIS data/config directory.
+        project_dir: Absolute path to the RELAIS Python source root.
+
+    Returns:
+        A formatted string ready to append to a system prompt.
+    """
+    return (
+        "Project environment (use these paths — never search from /):\n"
+        f"- RELAIS_HOME (data / config / skills): {relais_home}\n"
+        f"- RELAIS_PROJECT_DIR (Python source code): {project_dir}\n"
+        "When looking for Python source files, skills, or configuration, "
+        "start from RELAIS_PROJECT_DIR or RELAIS_HOME. "
+        "Never run `find /` or explore from the filesystem root."
+    ).strip()
+
+DIAGNOSTIC_AWARENESS_PROMPT = f"""
+Diagnostic awareness:
+If the user asks what went wrong in a previous turn (e.g. "what error did you encounter?",
+"why did you fail?", "what happened?"), look for a {DIAGNOSTIC_MARKER} message in the
+conversation history. That message contains a technical summary of the failure — use it to
+give the user a clear, honest explanation in plain language.
+Do NOT repeat the diagnostic verbatim; summarise it for the user.
 """.strip()
 
 
@@ -214,6 +254,45 @@ def _normalise_content(raw: object) -> str:
     return str(raw)
 
 
+_DIAGNOSTIC_MAX_CHARS = 2000
+
+
+def format_diagnostic_trace(
+    error: str,
+    messages_raw: list[dict],
+    *,
+    tool_call_count: int = 0,
+    tool_error_count: int = 0,
+    max_chars: int = _DIAGNOSTIC_MAX_CHARS,
+) -> str:
+    """Build a technical diagnostic summary for injection into the checkpointer.
+
+    Combines the exception string, tool counters, and failing tool message
+    previews into a single text block capped at *max_chars* characters.
+
+    Args:
+        error: String representation of the AgentExecutionError.
+        messages_raw: Serialised LangChain message dicts from the failed turn.
+        tool_call_count: Total tool calls made during the turn.
+        tool_error_count: Number of tool calls that returned errors.
+        max_chars: Maximum character length of the returned string.
+
+    Returns:
+        A plain-text diagnostic summary prefixed with ``DIAGNOSTIC_MARKER``.
+    """
+    tool_errors = extract_tool_errors(messages_raw)
+    lines: list[str] = [
+        DIAGNOSTIC_MARKER,
+        f"Exception: {error[:500]}",
+        f"Tool calls: {tool_call_count} total, {tool_error_count} errors",
+    ]
+    if tool_errors:
+        lines.append("Failing tools:")
+        for entry in tool_errors:
+            lines.append(f"  - {entry['tool_name']}: {entry['content_preview']}")
+    return "\n".join(lines)[:max_chars]
+
+
 class AgentExecutor:
     """Execute LLM requests via a DeepAgents compiled state graph.
 
@@ -268,11 +347,14 @@ class AgentExecutor:
     ) -> None:
         self._profile = profile
         self._display = display_config or DisplayConfig()
+        _relais_home = str(get_relais_home())
+        _project_dir = str(get_relais_project_dir())
+        _shell_env = {"RELAIS_HOME": _relais_home}
         memories_backend: BackendProtocol = backend or LocalShellBackend(
-            root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True
+            root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env
         )
         composite_backend = CompositeBackend(
-            default=LocalShellBackend(root_dir=str(get_relais_home()), virtual_mode=False, inherit_env=True),
+            default=LocalShellBackend(root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env),
             routes={
                 "/memories/": memories_backend,
             },
@@ -282,11 +364,14 @@ class AgentExecutor:
             SubAgent(**spec) for spec in (subagents or [])
         ]
         resolved_skills = skills or []
+        _project_context = build_project_context_prompt(_relais_home, _project_dir)
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
             system_prompt=_enrich_system_prompt(
-                soul_prompt, delegation_prompt=delegation_prompt,
+                soul_prompt,
+                delegation_prompt=delegation_prompt,
+                project_context=_project_context,
             ),
             skills=resolved_skills,
             backend=composite_backend,
@@ -399,7 +484,17 @@ class AgentExecutor:
         """
         exec_context = _build_execution_context(envelope)
         user_content = f"{exec_context}\n\n{envelope.content}" if exec_context else envelope.content
-        messages = [{"role": "user", "content": user_content}]
+        inline_images = [r for r in envelope.media_refs if r.data_base64]
+        if inline_images:
+            content_parts: list[dict[str, Any]] = [{"type": "text", "text": user_content}]
+            for ref in inline_images:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{ref.mime_type};base64,{ref.data_base64}"},
+                })
+            messages: list[dict[str, Any]] = [{"role": "user", "content": content_parts}]
+        else:
+            messages = [{"role": "user", "content": user_content}]
         logger.info(
             "agent.execute start — correlation_id=%s sender=%s",
             envelope.correlation_id,
@@ -445,9 +540,61 @@ class AgentExecutor:
             tool_error_count=tool_error_count,
         )
 
+    async def inject_diagnostic_message(
+        self,
+        envelope: Envelope,
+        diagnostic_text: str,
+    ) -> bool:
+        """Append a hidden diagnostic message to the thread's LangGraph checkpoint.
+
+        Called after an ``AgentExecutionError`` so that follow-up questions
+        (e.g. "what went wrong?") can be answered precisely.  The message is
+        an ``AIMessage`` whose content starts with ``[DIAGNOSTIC — internal]``;
+        the system prompt instructs the agent to surface it in plain language
+        when the user asks about prior failures.
+
+        Args:
+            envelope: The envelope from the failed turn; its ``portail`` context
+                and ``session_id`` determine the LangGraph thread_id.
+            diagnostic_text: Pre-formatted text from ``format_diagnostic_trace()``.
+
+        Returns:
+            ``True`` if the injection succeeded, ``False`` otherwise (empty
+            state, empty text, or any exception — all handled non-fatally).
+        """
+        if not diagnostic_text.strip():
+            return False
+        try:
+            portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
+            user_id = portail_ctx.get("user_id", envelope.sender_id)
+            config = RunnableConfig(
+                configurable={"thread_id": f"{user_id}:{envelope.session_id}"}
+            )
+            state = await self._agent.aget_state(config)
+            if not state or not state.values.get("messages"):
+                logger.debug(
+                    "inject_diagnostic: empty state, skipping — corr=%s",
+                    envelope.correlation_id,
+                )
+                return False
+            await self._agent.aupdate_state(config, {"messages": [AIMessage(content=diagnostic_text)]})
+            logger.info(
+                "inject_diagnostic: injected %d chars — corr=%s",
+                len(diagnostic_text),
+                envelope.correlation_id,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "inject_diagnostic: failed — corr=%s error=%s",
+                envelope.correlation_id,
+                exc,
+            )
+            return False
+
     async def _stream(
         self,
-        input_data: dict[str, list[dict[str, str]]],
+        input_data: dict[str, list[dict[str, Any]]],
         stream_callback: Callable[[str], Awaitable[None]] | None,
         progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
         config: RunnableConfig | None = None,
@@ -496,6 +643,14 @@ class AgentExecutor:
         # after the loop ends), which prevents intermediate pre-tool narration
         # from leaking to the user.
         current_section: str = ""
+        # Subagent name tracking: maps DeepAgents namespace ID → declared subagent name.
+        # Populated by accumulating `task` tool call args and parsing `name` (or `subagent_type`).
+        ns_to_name: dict[str, str] = {}
+        # Buffer for accumulating `task` tool call arg tokens (streamed token-by-token).
+        task_args_buf: str = ""
+        # Set to True once we log the subagent name for the current task call,
+        # to avoid duplicate log lines as more arg tokens arrive.
+        task_name_logged: bool = False
 
         guard = ToolErrorGuard(max_consecutive=5, max_total=8)
 
@@ -532,9 +687,22 @@ class AgentExecutor:
                         if node_name in ("model", "tools"):
                             logger.debug("[%s] step: %s", source, node_name)
                         if node_name == "model" and ns:
-                            # Subagent (non-root namespace) is starting an LLM call
+                            # Subagent (non-root namespace) is starting an LLM call.
+                            # Try to resolve declared name from accumulated task args.
+                            ns_id = ns[0]
+                            if ns_id not in ns_to_name and task_args_buf:
+                                try:
+                                    import json as _json
+                                    _parsed = _json.loads(task_args_buf)
+                                    _subagent_type = _parsed.get("name", "") or _parsed.get("subagent_type", "")
+                                    if _subagent_type:
+                                        ns_to_name[ns_id] = _subagent_type
+                                except Exception:
+                                    pass
+                            subagent_label = ns_to_name.get(ns_id, ns_id)
+                            logger.info("[SUBAGENT] launched — name=%s", subagent_label)
                             if progress_callback is not None:
-                                await progress_callback("subagent_start", source)
+                                await progress_callback("subagent_start", subagent_label)
 
                 # ── Message events ───────────────────────────────────────────
                 elif chunk_type == "messages":
@@ -558,6 +726,9 @@ class AgentExecutor:
                         for tc in tool_call_chunks:
                             if tc.get("name"):
                                 pending_tool_name = tc["name"]
+                                if pending_tool_name == "task":
+                                    task_args_buf = ""  # reset accumulator for new task call
+                                    task_name_logged = False
                                 logger.info("[%s] tool_call: %s", source, pending_tool_name)
                                 if progress_callback is not None:
                                     await progress_callback("tool_call", pending_tool_name)
@@ -572,7 +743,20 @@ class AgentExecutor:
                                 if synthetic_fallback:
                                     break
                             if tc.get("args"):
-                                args_preview = str(tc["args"])[:200]
+                                args_fragment = str(tc["args"])
+                                if pending_tool_name == "task":
+                                    task_args_buf += args_fragment
+                                    if not task_name_logged:
+                                        try:
+                                            import json as _json
+                                            _parsed = _json.loads(task_args_buf)
+                                            _name = _parsed.get("name", "") or _parsed.get("subagent_type", "")
+                                            if _name:
+                                                logger.info("[agent] subagent_delegate — name=%s", _name)
+                                                task_name_logged = True
+                                        except Exception:
+                                            pass
+                                args_preview = args_fragment[:200]
                                 logger.info(
                                     "[%s] tool_call_args [%s]: %s",
                                     source,
@@ -738,12 +922,17 @@ def _build_execution_context(envelope: Envelope) -> str:
     return "\n".join(lines)
 
 
-def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> str:
+def _enrich_system_prompt(
+    soul_prompt: str,
+    *,
+    delegation_prompt: str = "",
+    project_context: str = "",
+) -> str:
     """Append operational rules to the assembled system prompt.
 
     Appends long-term memory instructions, self-diagnosis instructions
-    for tool error recovery, and the delegation prompt (assembled by
-    ``SubagentRegistry``) when non-empty.
+    for tool error recovery, project environment anchors, and the delegation
+    prompt (assembled by ``SubagentRegistry``) when non-empty.
 
     The self-diagnosis instructions tell the agent to stop and re-read
     the relevant SKILL.md troubleshooting section when encountering
@@ -753,6 +942,8 @@ def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> s
         soul_prompt: The base system prompt assembled by SoulAssembler.
         delegation_prompt: Pre-assembled delegation prompt from the
             subagent registry.  Empty string means no subagents.
+        project_context: Pre-built project environment block (RELAIS_HOME,
+            RELAIS_PROJECT_DIR).  Empty string skips injection.
 
     Returns:
         The enriched system prompt string.
@@ -762,6 +953,10 @@ def _enrich_system_prompt(soul_prompt: str, *, delegation_prompt: str = "") -> s
         parts.append(LONG_TERM_MEMORY_PROMPT)
     if SELF_DIAGNOSIS_PROMPT not in soul_prompt:
         parts.append(SELF_DIAGNOSIS_PROMPT)
+    if DIAGNOSTIC_AWARENESS_PROMPT not in soul_prompt:
+        parts.append(DIAGNOSTIC_AWARENESS_PROMPT)
+    if project_context and project_context not in soul_prompt:
+        parts.append(project_context)
     if delegation_prompt:
         parts.append(delegation_prompt)
     return "\n\n".join(parts)

@@ -15,7 +15,8 @@ Active bricks in the repo:
 - `commandant`: slash commands outside the LLM
 - `souvenir`: Redis short-term memory + SQLite archiving
 - `archiviste`: logs and partial pipeline observation
-- `forgeron`: autonomous skill improvement (changelog + periodic consolidation) and automatic skill creation from archives
+- `forgeron`: autonomous skill improvement (direct SkillEditor rewrite) and automatic skill creation from archives
+- `horloger`: CRON scheduler — fires scheduled prompts as virtual user messages through the full pipeline
 
 Channel adapters actually shipped:
 
@@ -27,7 +28,8 @@ The channel configuration also covers `telegram` and `slack`, but their presence
 
 Tools shipped in the repo:
 
-- `tools/tui/`: standalone terminal client (Textual) for RELAIS, installable independently (`uv pip install -e tools/tui`). Connects exclusively via the REST SSE API — no dependency on RELAIS internals. See [plans/TUI.md](plans/TUI.md).
+- `tools/tui/`: standalone terminal client (prompt_toolkit) for RELAIS, installable independently (`uv pip install -e tools/tui`). Connects exclusively via the REST SSE API — no dependency on RELAIS internals. See [plans/TUI.md](plans/TUI.md).
+- `tools/tui-ts/`: TypeScript terminal client (Bun + SolidJS + @opentui/core) — alternative TUI with native SSE streaming. Run with `bun run src/main.tsx`.
 
 ---
 
@@ -126,6 +128,7 @@ flowchart TD
 | Stream | Producer | Consumer |
 |--------|----------|----------|
 | `relais:messages:incoming` | Aiguilleur | Portail |
+| `relais:messages:incoming:horloger` | Horloger | Portail |
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |
@@ -144,27 +147,25 @@ flowchart TD
 - `Portail` consumes `relais:messages:incoming`, resolves the user via `UserRegistry`, writes `context["portail"]["user_record"]`, `context["portail"]["user_id"]` and `context["portail"]["llm_profile"]` (from `channel_profile` or `"default"`), then publishes to `relais:security`.
 - `Sentinelle` consumes `relais:security`, applies ACLs, routes normal messages to `relais:tasks` and slash commands to `relais:commands`. Unknown or unauthorized commands generate a direct inline response on `relais:messages:outgoing:{channel}`.
 - `Commandant` consumes `relais:commands`. `/help` responds with the list of available commands. `/clear` publishes a `clear` request to `relais:memory:request`. `/sessions` lists the user's recent sessions. `/resume <session_id>` resumes a previous session by loading its full history.
-- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), optionally publishes streaming to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, then the final response to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD) and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
+- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), optionally publishes streaming to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, then the final response to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD), `horloger-manager` (CRUD of Horloger job YAML files, accessible via `/horloger` or `/schedule`), and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
 - `Souvenir` consumes `relais:memory:request` (actions: `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`). The `archive` action is published by Atelier with the full turn content and `messages_raw` for archiving in SQLite. The `sessions` and `resume` actions return data to the user via `relais:messages:outgoing:{channel}` (with ownership enforcement). File actions are triggered by agents via `SouvenirBackend`. Short-term history is managed by the Atelier LangGraph checkpointer (keyed by `user_id:session_id`).
 - `Archiviste` observes `relais:logs`, `relais:events:*` and a partial list of pipeline streams. It does not literally observe all streams.
 - `Forgeron` has three autonomous pipelines:
 
-  **Pipeline 1 — Improving existing skills** (changelog + consolidation)
+  **Pipeline 1 — Improving existing skills** (direct edit)
 
-  Consumes `relais:skill:trace` (`forgeron_group`). For each trace, Forgeron evaluates four trigger conditions per skill. Analysis fires as soon as **at least one** is true (and `annotation_mode` is enabled):
+  Consumes `relais:skill:trace` (`forgeron_group`). For each trace, Forgeron evaluates four trigger conditions per skill. Analysis fires as soon as **at least one** is true (and `edit_mode` is enabled):
 
   | Condition | Threshold | What is captured |
   |-----------|-----------|-----------------|
-  | **Tool errors** | `tool_error_count >= 1` | Turns where the agent failed |
+  | **Tool errors** | `tool_error_count >= edit_min_tool_errors` (default 1) | Turns where the agent failed |
   | **Aborted turn (DLQ)** | `tool_error_count == -1` | Turns aborted by `ToolErrorGuard` — `messages_raw` contains the partial conversation |
   | **Success after failure** | Current turn 0 errors, previous turn (same skill) had errors | The "correction turn" — where the agent found the right approach |
-  | **Usage threshold** | `annotation_call_threshold` cumulative calls (default 5) | Normal usage patterns, even without errors |
+  | **Usage threshold** | `edit_call_threshold` cumulative calls (default 10) | Normal usage patterns, even without errors |
 
-  A **Redis cooldown** per skill (`annotation_cooldown_seconds`, default 300 s) prevents annotation spam.
+  A **Redis cooldown** per skill (`edit_cooldown_seconds`, default 300 s) prevents edit spam.
 
-  Improvement happens in two phases:
-  - **Phase 1 — Changelog**: `ChangelogWriter` (fast LLM) extracts 1–3 observations from the current SKILL.md + the conversation, and appends them to `CHANGELOG.md`. The SKILL.md is **never modified** in Phase 1.
-  - **Phase 2 — Consolidation**: when `CHANGELOG.md` exceeds `consolidation_line_threshold` lines (default 80) and the consolidation cooldown has expired (default 30 min), `SkillConsolidator` (precise LLM) rewrites SKILL.md by absorbing the observations, produces a `CHANGELOG_DIGEST.md` (audit trail), and clears the changelog. Optional user notification.
+  `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (`scope_messages_to_skill`), calls the LLM once (`edit_profile`, default `precise`) with `with_structured_output`, and rewrites SKILL.md directly if `changed=True`. For bundle skills, `skill_paths` in the trace context provides the absolute directory path.
 
   **Pipeline 2 — Automatic skill creation**
 

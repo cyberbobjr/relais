@@ -63,6 +63,7 @@ Aiguilleur
 | Stream | Producteur | Consommateur |
 |--------|------------|--------------|
 | `relais:messages:incoming` | Aiguilleur | Portail |
+| `relais:messages:incoming:horloger` | Horloger | Portail |
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |
@@ -213,6 +214,27 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Les actions de fichiers (`file_*`) servent les requêtes d'agents via `SouvenirBackend`, répondent sur `relais:memory:response`.
 - Handlers: `ArchiveHandler`, `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`, `SessionsHandler`, `ResumeHandler`, `HistoryReadHandler` — pas d'appels LLM dans Souvenir.
 
+### Horloger
+
+- **Producteur uniquement** : `stream_specs()` retourne `[]` ; BrickBase attend sur `shutdown_event` pendant que la `_tick_loop` tourne en tâche de fond.
+- Lit les specs de jobs YAML dans `$RELAIS_HOME/config/horloger/jobs/*.yaml` (un fichier par job) ; rechargement automatique via watchfiles.
+- À chaque tick (`tick_interval_seconds`, défaut 30s) :
+  1. `JobRegistry.reload()` + `Scheduler.sync_jobs()` — rechargement des jobs et purge de l'historique des jobs supprimés.
+  2. `Scheduler.get_due_jobs()` — classifie les jobs en `to_trigger` / `to_skip` selon quatre gardes : guard futur, guard catch-up, guard désactivé, guard double-fire.
+  3. Publie une envelope de déclenchement sur `relais:messages:incoming:horloger` pour chaque job à déclencher.
+  4. Enregistre chaque outcome dans `storage/horloger.db` (SQLite via SQLModel + aiosqlite) : statuts `triggered`, `publish_failed`, `skipped_catchup`, `skipped_disabled`, `skipped_double_fire`.
+- **Patron canal virtuel** : l'envelope traverse le pipeline complet (Portail → Sentinelle → Atelier) comme un vrai message utilisateur.
+  - `sender_id = f"horloger:{job.owner_id}"` pour que la Sentinelle applique le bon ACL.
+  - `context["portail"]` pré-estampillé (`user_id`, `llm_profile`) pour éviter la lookup UserRegistry (`"horloger"` n'est pas un canal réel dans `portail.yaml`).
+  - `context["aiguilleur"]["reply_to"] = job.channel` pour que Sentinelle route la réponse vers le bon canal de sortie.
+- Guard anti-tempête : les jobs dont le dernier temps planifié est antérieur à `catch_up_window_seconds` (défaut 120s) sont ignorés, non re-déclenchés, après un redémarrage.
+- **Sous-agent `horloger-manager`** (natif) : gère le CRUD des fichiers YAML de jobs via les commandes `/horloger` ou `/schedule`.
+
+| Stream | Direction |
+|--------|-----------|
+| `relais:messages:incoming:horloger` | Produit par Horloger, consommé par `portail_group` |
+| `relais:logs` | Produit par Horloger (BrickBase) |
+
 ### Archiviste
 
 - Observe `relais:logs`, `relais:events:system`, `relais:events:messages`.
@@ -223,31 +245,20 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 
 Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipelines indépendants :
 
-#### Pipeline changelog + consolidation (S3) — Amélioration progressive des skills
+#### Pipeline édition directe — Amélioration progressive des skills
 
 - Consomme `relais:skill:trace` (groupe `forgeron_group`, `ack_mode="always"` — les traces sont advisory).
-- Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`).
+- Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`), et `skill_paths` (dict `{skill_name: chemin_absolu}` pour les skills bundle).
 - Forgeron accumule une ligne par trace par skill dans SQLite (`SkillTraceStore`).
 
-**Phase 1 — Changelog (chaque trigger, LLM fast)** :
-- `ChangelogWriter` (profil `annotation_profile`, LLM rapide) extrait 1-3 observations concrètes et les écrit dans un `CHANGELOG.md` séparé du SKILL.md.
-- Déclenché par quatre conditions (dès qu'au moins une est vraie) : erreurs d'outils (`tool_error_count >= annotation_min_tool_errors`), tours avortés (`tool_error_count == -1`, sentinelle DLQ), **success after failure** (le tour courant a 0 erreurs mais le tour précédent du même skill en avait — c'est le "tour de correction" où l'agent a trouvé la bonne approche), ou seuil d'appels cumulés (`annotation_call_threshold`, défaut 5).
-- Rate-limité par cooldown Redis `relais:skill:annotation_cooldown:{skill_name}` (TTL `annotation_cooldown_seconds`).
-- Le SKILL.md n'est **jamais touché** en Phase 1.
+**Édition directe (`SkillEditor`, LLM precise)** :
+- `SkillEditor` reçoit le SKILL.md courant + la trace de conversation scopée au skill cible (via `scope_messages_to_skill`). Il appelle le LLM une seule fois avec `with_structured_output` pour produire un SKILL.md réécrit et un flag `changed`.
+- Le SKILL.md est écrit uniquement si `changed=True` et que le contenu diffère du fichier existant.
+- Déclenché par quatre conditions (dès qu'au moins une est vraie) : erreurs d'outils (`tool_error_count >= edit_min_tool_errors`), tours avortés (`tool_error_count == -1`, sentinelle DLQ), **success after failure** (le tour courant a 0 erreurs mais le tour précédent du même skill en avait — c'est le "tour de correction" où l'agent a trouvé la bonne approche), ou seuil d'appels cumulés (`edit_call_threshold`, défaut 10).
+- Rate-limité par cooldown Redis `relais:skill:edit_cooldown:{skill_name}` (TTL `edit_cooldown_seconds`).
+- Pour les skills provenant d'un bundle, `skill_paths` indique le chemin absolu du répertoire ; `SkillEditor` utilise ce chemin en priorité sur la résolution standard.
 
-**Phase 2 — Consolidation (périodique, LLM precise)** :
-- Déclenchée juste après une écriture Phase 1 si le CHANGELOG.md dépasse `consolidation_line_threshold` lignes (défaut 80) et que le cooldown `relais:skill:consolidation_cooldown:{skill_name}` est expiré.
-- `SkillConsolidator` (profil `consolidation_profile`, LLM precise) relit SKILL.md + CHANGELOG.md, réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail), et vide le changelog.
-- Toutes les écritures sont atomiques (`.tmp` + `Path.replace()`).
-- Le cooldown de consolidation est posé après succès (`consolidation_cooldown_seconds`, défaut 30 min).
-- Si `notify_user_on_consolidation` est activé, une notification est publiée sur `relais:messages:outgoing_pending`.
-
-**Fichiers par skill** :
-| Fichier | Rôle |
-|---------|------|
-| `SKILL.md` | Instructions du skill — réécrit uniquement lors de la consolidation |
-| `CHANGELOG.md` | Mémoire de travail — observations accumulées entre deux consolidations |
-| `CHANGELOG_DIGEST.md` | Audit trail — résumé de chaque consolidation passée |
+**Profil LLM** : `edit_profile` (défaut `"precise"`) — un seul appel LLM par trigger (ni phase rapide ni consolidation périodique).
 
 #### Pipeline auto-création — Création automatique de skills depuis les archives de sessions
 
@@ -298,7 +309,8 @@ La résolution suit :
 | `config/atelier/profiles.yaml` | profils LLM |
 | `config/atelier/mcp_servers.yaml` | serveurs MCP |
 | `config/aiguilleur.yaml` | canaux Aiguilleur ; copié par `initialize_user_dir()` ; fallback Discord-only si supprimé manuellement |
-| `config/forgeron.yaml` | profils LLM (`annotation_profile`, `consolidation_profile`), seuils (`consolidation_line_threshold`, `annotation_call_threshold`), cooldowns, `skills_dir`, `creation_mode` |
+| `config/forgeron.yaml` | profils LLM (`edit_profile`, `llm_profile`), seuils (`edit_call_threshold`, `edit_min_tool_errors`), cooldowns (`edit_cooldown_seconds`), `skills_dir`, `edit_mode`, `creation_mode`, `correction_mode` |
+| `config/horloger.yaml` | `tick_interval_seconds`, `catch_up_window_seconds`, `jobs_dir`, `db_path` |
 
 `initialize_user_dir()` copie l'ensemble des templates déclarés dans `common/init.DEFAULT_FILES`, y compris `config/aiguilleur.yaml` et `config/tui/config.yaml` (configuration du client TUI). Les sous-agents natifs (`relais-config`, …) sont **exclus** de cette copie : ils sont livrés directement dans `atelier/subagents/` (arbre source) et chargés en 2e tier par `SubagentRegistry`. Seul le répertoire `config/atelier/subagents/` est créé vide dans `RELAIS_HOME` pour accueillir les sous-agents custom de l'opérateur.
 
@@ -317,7 +329,9 @@ L'Atelier dispose d'une architecture 2-tier pour les sous-agents :
 3. Premier match par nom gagne (user overrides native)
 4. Chaque répertoire doit contenir `subagent.yaml`
 
-**Subagent natif livré** : `relais-config` (sous `atelier/subagents/relais-config/`) — configuration CRUD, outils WhatsApp, etc.
+**Subagents natifs livrés** :
+- `relais-config` (`atelier/subagents/relais-config/`) — configuration CRUD, outils WhatsApp, etc.
+- `horloger-manager` (`atelier/subagents/horloger-manager/`) — CRUD des fichiers YAML de jobs Horloger ; accessible via `/horloger` ou `/schedule`.
 
 **Utilisation** :
 - L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns, e.g. `["relais-config"]`, `["my-*"]`)
@@ -352,7 +366,8 @@ Toutes les briques supportent le rechargement à chaud de leur configuration san
 - **Sentinelle**: `config/sentinelle.yaml` (ACL, groupes)
 - **Atelier**: `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`, `config/atelier/subagents/` (user), `atelier/subagents/` (native)
 - **Souvenir**: aucun fichier surveillé — pas de config rechargeable (Souvenir ne fait pas d'appels LLM)
-- **Forgeron**: `config/forgeron.yaml` (seuils, profils LLM, `skills_dir`, `annotation_call_threshold`, `consolidation_line_threshold`)
+- **Forgeron**: `config/forgeron.yaml` (profils LLM, `skills_dir`, `edit_call_threshold`, `edit_mode`, `creation_mode`)
+- **Horloger**: aucun fichier surveillé — le `tick_loop` se recharge via `watchfiles` sur `jobs_dir` (un fichier YAML par job)
 - **Aiguilleur**: `config/aiguilleur.yaml` (définitions canaux) — voir ci-dessous pour la distinction champs souples/durs
 
 **Flux de rechargement** :
@@ -511,10 +526,15 @@ Voir `docs/BUNDLES.md` pour la spécification complète du format.
 
 ## Outils clients (`tools/`)
 
-### TUI (`tools/tui/`)
+### TUI Python (`tools/tui/`)
 
-Client terminal interactif pour le canal REST. Paquet Python indépendant (`relais-tui`), point d'entrée `relais` (script console défini dans `pyproject.toml`).
+Client terminal interactif pour le canal REST. Paquet Python indépendant (`relais-tui`), point d'entrée `relais` (script console défini dans `pyproject.toml`). Implémenté avec **prompt_toolkit** (pas Textual).
 
+- **`relais_tui/app.py`** — application principale `RelaisApp` (prompt_toolkit) : layout HSplit (banner + chat + input), key bindings (Enter=send, Escape+Enter/Ctrl+J=newline, Ctrl+C/D=quit), boucle SSE asynchrone, rendu markdown streamé.
+- **`relais_tui/chat_state.py`** — `ChatState` : gestion de l'état de la conversation (messages user/assistant/tool_call/tool_result), append immutable, formatage pour l'affichage.
+- **`relais_tui/md_stream.py`** — rendu markdown incrémental token-par-token avec `MdStreamRenderer` ; buffer de tokens, flush sur newline, conversion rich → prompt_toolkit `FormattedText`.
+- **`relais_tui/paste_handler.py`** — détection de grande colle (`is_large_paste`), capture d'image depuis le presse-papier (`grab_image_from_clipboard`), résumé de colle texte (`summarize_paste`).
+- **`relais_tui/attachments.py`** — dataclasses `ImagePayload` et `PasteBlock` pour les pièces jointes injectées dans le message.
 - **`relais_tui/config.py`** — chargement de la configuration depuis `<relais_home>/config/tui/config.yaml` (cascade RELAIS_HOME / `~/.relais`). Historique TUI par défaut dans `~/.relais/storage/tui/history`.
 - **`relais_tui/client.py`** — client REST/SSE asynchrone : `POST /v1/messages` puis lecture du stream SSE.
 - **`relais_tui/sse_parser.py`** — parseur SSE stateful ; `SSEEvent = TokenEvent | DoneEvent | ProgressEvent | ErrorEvent | Keepalive`.
@@ -522,6 +542,20 @@ Client terminal interactif pour le canal REST. Paquet Python indépendant (`rela
 - **`relais_tui/screens/bundles_screen.py`** — écran Bundles (DataTable + Install/Uninstall).
 
 La configuration TUI est initialisée par `initialize_user_dir()` depuis `config/tui/config.yaml.default`.
+
+### TUI TypeScript (`tools/tui-ts/`)
+
+Client terminal alternatif en TypeScript/Bun. Utilise **@opentui/solid** (rendu terminal SolidJS) comme moteur de rendu et **solid-js** pour la réactivité. Compilable en binaire autonome (`bun build --compile`).
+
+- **`src/main.tsx`** — point d'entrée : charge la config, instancie `RelaisClient`, rend `<App>` avec `@opentui/solid`, hydrate l'historique de session après le premier rendu.
+- **`src/app.tsx`** — composant racine `App` : layout (ChatHistory + InputArea + StatusBar), gestion sélection/copie via `useSelectionHandler` et `useKeyHandler`, dispatch des commandes `/clear`.
+- **`src/components/ChatHistory.tsx`** — `<scrollbox>` avec sticky-scroll auto-follow, affiche `<Banner>` + liste de `<MessageBubble>`.
+- **`src/components/InputArea.tsx`** — zone de saisie multi-ligne, Enter=submit, Shift+Enter=newline.
+- **`src/components/StatusBar.tsx`** — barre de statut (session ID, état envoi, flash copie, bannière d'erreur).
+- **`src/components/MessageBubble.tsx`** — bulle de message user/assistant avec rendu markdown.
+- **`src/lib/`** — `client.ts` (REST/SSE), `sse-parser.ts` (parseur SSE stateful), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + RELAIS_HOME resolution), `clipboard.ts`, `logger.ts`.
+
+Dépendances : `@opentui/core`, `@opentui/solid`, `solid-js`, `yaml`. Runtime : Bun ≥ 1.3.
 
 ---
 

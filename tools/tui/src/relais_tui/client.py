@@ -83,13 +83,14 @@ class RelaisClient:
     # ------------------------------------------------------------------
 
     async def send_message(
-        self, content: str, *, session_id: str | None = None
+        self, content: str, *, session_id: str | None = None, media_refs: list | None = None
     ) -> DoneEvent:
         """Send a message and receive a JSON response.
 
         Args:
             content: The user message text.
             session_id: Optional session ID for conversation continuity.
+            media_refs: Optional list of media reference dicts to attach.
 
         Returns:
             A ``DoneEvent`` built from the JSON response.
@@ -100,6 +101,8 @@ class RelaisClient:
         body: dict = {"content": content}
         if session_id is not None:
             body["session_id"] = session_id
+        if media_refs is not None:
+            body["media_refs"] = media_refs
 
         logger.debug(
             "send_message → POST %s%s session=%s api_key_set=%s",
@@ -127,7 +130,7 @@ class RelaisClient:
     # ------------------------------------------------------------------
 
     async def stream_message(
-        self, content: str, *, session_id: str | None = None
+        self, content: str, *, session_id: str | None = None, media_refs: list | None = None
     ) -> AsyncGenerator[SSEEvent, None]:
         """Send a message and stream SSE events.
 
@@ -138,6 +141,7 @@ class RelaisClient:
         Args:
             content: The user message text.
             session_id: Optional session ID for conversation continuity.
+            media_refs: Optional list of media reference dicts to attach.
 
         Yields:
             Typed SSE events (``TokenEvent``, ``ProgressEvent``,
@@ -146,6 +150,8 @@ class RelaisClient:
         body: dict = {"content": content}
         if session_id is not None:
             body["session_id"] = session_id
+        if media_refs is not None:
+            body["media_refs"] = media_refs
 
         headers = self._auth_headers()
         headers["Accept"] = "text/event-stream"

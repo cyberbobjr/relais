@@ -1,65 +1,67 @@
-"""RELAIS TUI — Textual chat application.
+"""RELAIS TUI — prompt_toolkit + rich REPL-style chat client.
 
 Entry point for the ``relais`` and ``relais-tui`` CLI commands.
 
 Usage::
 
-    relais                     # start with default config (~/.relais/config/tui/config.yaml)
+    relais                      # start with default config
     RELAIS_TUI_API_KEY=xyz relais  # override API key via env var
+    relais bundle install …     # bundle subcommands (no TUI started)
 """
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from typing import TYPE_CHECKING, cast
 import importlib.metadata
 import logging
 import os
 import sys
-import tomllib
 from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
-from textual import work
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.events import Key
-from textual.reactive import reactive
-from textual.screen import ModalScreen
-from textual.worker import Worker
-from textual.widgets import Footer, Header, Input, LoadingIndicator, RichLog, Static, TabbedContent, TabPane
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.text import Text
 
-from relais_tui.config import Config, load_config, save_config
 from relais_tui.client import RelaisClient
+from relais_tui.config import Config, ThemeConfig, load_config, save_config
+from relais_tui.md_stream import MarkdownStream
 from relais_tui.sse_parser import DoneEvent, ErrorEvent, ProgressEvent, TokenEvent
-from relais_tui.screens.bundles_screen import BundlesScreen
 
 _log = logging.getLogger(__name__)
 
-# Phrases emitted by Souvenir's ClearHandler that indicate a successful /clear.
-# Kept at module level to avoid recreating the tuple on every DoneEvent.
 _CLEAR_PHRASES = frozenset([
     "✓ Conversation history cleared.",
     "Conversation history cleared.",
 ])
 
+
+# ---------------------------------------------------------------------------
+# Version helpers
+# ---------------------------------------------------------------------------
+
+
 def _get_versions() -> tuple[str, str]:
     """Return (relais_core_version, tui_version).
 
-    TUI version comes from the installed package metadata.
-    RELAIS core version is read from the root pyproject.toml because the core
-    package is not installed inside the TUI venv.
+    Args: none
+
+    Returns:
+        Tuple of (core_version, tui_version) strings; unknown versions are "?".
     """
+    import tomllib
+
     try:
         tui_ver = importlib.metadata.version("relais-tui")
     except importlib.metadata.PackageNotFoundError:
         tui_ver = "?"
 
     try:
-        # __file__ lives at tools/tui/src/relais_tui/__main__.py
-        # parents[4] = project root
         root_toml = Path(__file__).parents[4] / "pyproject.toml"
         with root_toml.open("rb") as fh:
             relais_ver = tomllib.load(fh)["project"]["version"]
@@ -73,6 +75,15 @@ def _get_versions() -> tuple[str, str]:
 
 
 def _build_splash(config_path: Path, log_path: Path) -> str:
+    """Build the startup splash banner.
+
+    Args:
+        config_path: Resolved path to the loaded config file.
+        log_path: Path where TUI logs are written.
+
+    Returns:
+        Rich markup string for the banner.
+    """
     relais_ver, tui_ver = _get_versions()
     return (
         "[bold cyan]\n"
@@ -85,559 +96,349 @@ def _build_splash(config_path: Path, log_path: Path) -> str:
         f"[dim]core v{relais_ver}  ·  tui v{tui_ver}  ·  Autonomous AI assistant[/dim]\n"
         f"[dim]config  {config_path}[/dim]\n"
         f"[dim]logs    {log_path}[/dim]\n"
+        "[dim]Type [bold]/exit[/bold] to quit · [bold]/clear[/bold] to reset session · "
+        "[bold]Esc+Enter[/bold] or [bold]Ctrl+J[/bold] for newline[/dim]\n"
     )
 
-_OFFLINE_BANNER = """\
-[bold red]
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║          ⚠  RELAIS BACKEND IS NOT ACCESSIBLE  ⚠             ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝[/bold red]
 
-[yellow]The REST adapter could not be reached at:[/yellow]
-  [italic]{url}[/italic]
-
-[dim]• Make sure the RELAIS stack is running  (./supervisor.sh start all)
-• Check api_url in  ~/.relais/config/tui/config.yaml
-• Type [bold]/exit[/bold] or press [bold]Ctrl+Q[/bold] to quit[/dim]
-"""
-
-_CSS = """
-Screen {
-    layout: vertical;
-}
-
-TabbedContent {
-    height: 1fr;
-}
-
-TabPane {
-    layout: vertical;
-    padding: 0;
-}
-
-Header {
-    height: 1;
-    background: #0f3460;
-    color: #8be9fd;
-}
-
-#chat-log {
-    height: 1fr;
-    padding: 0 1;
-    background: #1a1a2e;
-    scrollbar-gutter: stable;
-    border: none;
-}
-
-#streaming {
-    height: auto;
-    min-height: 1;
-    padding: 0 1;
-    background: #1a1a2e;
-    color: #f8f8f2;
-}
-
-#spinner {
-    display: none;
-    height: 1;
-    background: #1a1a2e;
-    color: #50fa7b;
-}
-
-#spinner.active {
-    display: block;
-}
-
-#msg-input {
-    height: 3;
-    background: #16213e;
-    border: tall #0f3460;
-    color: #f8f8f2;
-    padding: 0 1;
-}
-
-#msg-input:focus {
-    border: tall #50fa7b;
-}
-
-#status {
-    height: 1;
-    background: #16213e;
-    color: #6272a4;
-    padding: 0 1;
-}
-
-/* Full-screen offline overlay */
-#offline-overlay {
-    display: none;
-    layer: dialog;
-    width: 100%;
-    height: 100%;
-    background: #1a1a2e 80%;
-    align: center middle;
-    padding: 2 4;
-    color: #f8f8f2;
-}
-
-#offline-overlay.visible {
-    display: block;
-}
-"""
+# ---------------------------------------------------------------------------
+# Prompt toolkit setup
+# ---------------------------------------------------------------------------
 
 
-_HELP_TEXT = """\
-[bold cyan]RELAIS TUI — Keyboard Shortcuts[/bold cyan]
+def _make_key_bindings() -> KeyBindings:
+    """Build key bindings: Enter submits, Escape+Enter inserts a newline.
 
-[bold]Input[/bold]
-  [bold]Enter[/bold]        Send message
-  [bold]↑ / ↓[/bold]       Navigate command history
-  [bold]ESC[/bold]          Stop streaming
+    Note: Most terminal emulators do not distinguish Shift+Enter from Enter.
+    Use Escape then Enter (or Ctrl+J) to insert a literal newline in the prompt.
 
-[bold]Application[/bold]
-  [bold]Ctrl+L[/bold]       Clear chat
-  [bold]Ctrl+T[/bold]       Toggle Bundles tab
-  [bold]Ctrl+Q[/bold]       Quit
-
-[bold]Commands[/bold]
-  [bold]/exit[/bold]        Quit the application
-  [bold]/clear[/bold]       Clear server-side conversation history
-
-Press [bold]F1[/bold] or [bold]ESC[/bold] to close.
-"""
-
-_HELP_CSS = """
-HelpScreen {
-    align: center middle;
-}
-#help-box {
-    width: 62;
-    height: auto;
-    padding: 1 2;
-    background: #16213e;
-    border: double #50fa7b;
-    color: #f8f8f2;
-}
-"""
-
-
-class HelpScreen(ModalScreen[None]):
-    """Modal overlay showing keyboard shortcuts."""
-
-    CSS = _HELP_CSS
-
-    BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("f1", "dismiss", "Close"),
-    ]
-
-    def compose(self) -> ComposeResult:
-        yield Static(_HELP_TEXT, id="help-box", markup=True)
-
-    def action_dismiss(self) -> None:
-        """Close the help overlay."""
-        self.dismiss()
-
-
-class HistoryInput(Input):
-    """Input widget with Up/Down arrow command-history navigation."""
-
-    _MAX_HISTORY = 100
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._history: deque[str] = deque(maxlen=self._MAX_HISTORY)
-        self._history_pos: int = -1
-        self._draft: str = ""
-
-    def add_to_history(self, value: str) -> None:
-        """Append *value* to history and reset the navigation cursor.
-
-        Args:
-            value: The submitted command string to record.
-        """
-        if value and (not self._history or self._history[-1] != value):
-            self._history.append(value)
-        self._history_pos = -1
-        self._draft = ""
-
-    async def _on_key(self, event: Key) -> None:
-        """Intercept Up/Down to navigate history; delegate everything else.
-
-        Args:
-            event: The key event from Textual.
-        """
-        if event.key == "up":
-            if not self._history:
-                return
-            if self._history_pos == -1:
-                self._draft = self.value
-                self._history_pos = len(self._history) - 1
-            elif self._history_pos > 0:
-                self._history_pos -= 1
-            self.value = self._history[self._history_pos]
-            self.cursor_position = len(self.value)
-            event.prevent_default()
-            event.stop()
-        elif event.key == "down":
-            if self._history_pos == -1:
-                return
-            if self._history_pos < len(self._history) - 1:
-                self._history_pos += 1
-                self.value = self._history[self._history_pos]
-            else:
-                self._history_pos = -1
-                self.value = self._draft
-            self.cursor_position = len(self.value)
-            event.prevent_default()
-            event.stop()
-        else:
-            await super()._on_key(event)
-
-
-class RelaisApp(App[None]):
-    """RELAIS terminal chat client.
-
-    Connects to the RELAIS REST SSE API and provides an interactive
-    streaming chat interface.
+    Returns:
+        A KeyBindings instance with submit and newline bindings.
     """
+    kb = KeyBindings()
 
-    CSS = _CSS
+    @kb.add("enter")
+    def _submit(event: object) -> None:
+        event.current_buffer.validate_and_handle()  # type: ignore[attr-defined]
 
-    BINDINGS = [
-        Binding("ctrl+q", "quit", "Quit"),
-        Binding("ctrl+l", "clear_chat", "Clear"),
-        Binding("escape", "stop_stream", "Stop", show=False),
-        Binding("ctrl+t", "toggle_bundles", "Bundles"),
-        Binding("f1", "help", "Help"),
-    ]
+    @kb.add("escape", "enter")
+    def _newline_esc(event: object) -> None:
+        event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
-    # Accumulates streaming tokens for the in-progress assistant reply.
-    _buf: reactive[str] = reactive("", layout=False)
+    @kb.add("c-j")
+    def _newline_ctrl_j(event: object) -> None:
+        event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
-    def __init__(self, config: Config, config_path: Path, log_path: Path) -> None:
-        """Initialise the application.
+    return kb
 
-        Args:
-            config: TUI configuration (URL, API key, session behaviour, …).
-            config_path: Resolved path to the loaded config file.
-            log_path: Path where TUI logs are written.
-        """
-        super().__init__()
-        self._config = config
-        self._config_path = config_path
-        self._log_path = log_path
-        self._client = RelaisClient(config)
-        # Restore last session from config; may be overwritten by DoneEvent
-        self._session_id: str | None = config.last_session_id or None
-        self._busy = False
-        self._stream_worker: Worker | None = None
 
-        # Dynamically apply theme from config to CSS
-        self._apply_theme_to_css()
+def _make_prompt_message(theme: ThemeConfig) -> HTML:
+    """Build the HTML-formatted prompt message using theme colors.
 
-    def _apply_theme_to_css(self) -> None:
-        """Replace color placeholders in CSS with values from config theme."""
-        theme = self._config.theme
-        replacements = {
-            "#1a1a2e": theme.background,
-            "#8be9fd": theme.user_text,
-            "#f8f8f2": theme.assistant_text,
-            "#282a36": theme.code_block,
-            "#6272a4": theme.metadata,
-            "#16213e": theme.status_bar,
-            "#50fa7b": theme.accent,
-            "#ff5555": theme.error,
-        }
-        css = self.CSS
-        for old, new in replacements.items():
-            css = css.replace(old, new)
-        
-        # Specific override for UI components
-        css = css.replace("#0f3460", theme.status_bar) 
+    Args:
+        theme: Theme configuration with user_text and metadata colors.
 
-        self.CSS = css
+    Returns:
+        HTML-formatted prompt string for PromptSession.
+    """
+    user_color = theme.user_text
+    arrow_color = theme.metadata
+    return HTML(
+        f'<style fg="{user_color}">you</style>'
+        f'<style fg="{arrow_color}"> › </style>'
+    )
 
-    # ------------------------------------------------------------------
-    # Composition
-    # ------------------------------------------------------------------
 
-    def compose(self) -> ComposeResult:
-        """Build the widget tree."""
-        yield Header(show_clock=True)
-        with TabbedContent(initial="chat"):
-            with TabPane("Chat", id="chat"):
-                yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True)
-                yield Static("", id="streaming", markup=True)
-                yield LoadingIndicator(id="spinner")
-                yield HistoryInput(
-                    placeholder="Type a message  ·  ↑↓ = history  ·  ESC = stop  ·  F1 = help  ·  Ctrl+Q = quit",
-                    id="msg-input",
+def _make_session(config: Config) -> PromptSession:
+    """Build a configured PromptSession with file history and key bindings.
+
+    Args:
+        config: TUI configuration with history_path.
+
+    Returns:
+        A ready-to-use PromptSession.
+    """
+    history_path = Path(config.history_path).expanduser()
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return PromptSession(
+        history=FileHistory(str(history_path)),
+        key_bindings=_make_key_bindings(),
+        multiline=True,
+        enable_open_in_editor=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Message sending / streaming
+# ---------------------------------------------------------------------------
+
+
+async def _stream_response(
+    client: RelaisClient,
+    content: str,
+    session_id: str | None,
+    console: Console,
+    config: Config,
+    config_path: Path,
+) -> tuple[str | None, str]:
+    """Stream a message to the RELAIS API and render the response.
+
+    Yields tokens via MarkdownStream (sliding window), then prints the final
+    complete response as rich Markdown.
+
+    Args:
+        client: The HTTP client.
+        content: User message text.
+        session_id: Current session ID (may be None).
+        console: Rich console for output.
+        config: TUI configuration.
+        config_path: Path to config file for session ID persistence.
+
+    Returns:
+        Tuple of (new_session_id, assistant_content).  new_session_id may be
+        None if the server did not return one.
+    """
+    theme = config.theme
+    buf = ""
+    new_session_id = session_id
+
+    console.print(
+        HTML(
+            f'<style fg="{theme.assistant_text}">relais</style>'
+            f'<style fg="{theme.metadata}"> › </style>'
+        )
+    )
+
+    stream = MarkdownStream(console)
+
+    try:
+        async for ev in client.stream_message(content, session_id=session_id):
+            if isinstance(ev, TokenEvent):
+                buf += ev.text
+                stream.update(buf)
+
+            elif isinstance(ev, DoneEvent):
+                if not buf and ev.content:
+                    buf = ev.content
+                stream.update(buf, final=True)
+
+                if ev.session_id and ev.session_id != session_id:
+                    new_session_id = ev.session_id
+
+            elif isinstance(ev, ProgressEvent):
+                console.print(
+                    f"[{theme.metadata}]⋯ {ev.event}[/{theme.metadata}]"
+                    + (f" · {ev.detail}" if ev.detail else ""),
                 )
-                yield Static("Connecting…", id="status", markup=True)
-                yield Static("", id="offline-overlay", markup=True)
-            with TabPane("Bundles", id="bundles"):
-                yield BundlesScreen()
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+            elif isinstance(ev, ErrorEvent):
+                stream.update(buf, final=True)
+                console.print(f"[{theme.error}]Error: {ev.error}[/{theme.error}]")
 
-    async def on_mount(self) -> None:
-        """Run after the DOM is ready: show splash, health-check, focus input."""
-        log = self.query_one("#chat-log", RichLog)
-        log.write(_build_splash(self._config_path, self._log_path))
-        self._healthcheck()
-        if self._session_id:
-            self.run_worker(self._load_history(), exclusive=False)
-        self.query_one("#msg-input", HistoryInput).focus()
+    except asyncio.CancelledError:
+        stream.update(buf, final=True)
+        if buf:
+            console.print(f"\n[{theme.metadata}]⏹ Streaming stopped.[/{theme.metadata}]")
+        raise
 
-    async def on_unmount(self) -> None:
-        """Close the HTTP client when the application exits."""
-        await self._client.close()
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError, OSError) as exc:
+        stream.update(buf, final=True)
+        console.print(f"[{theme.error}]Connection error: {type(exc).__name__}[/{theme.error}]")
+        _log.exception("Stream request failed: %s", exc)
 
-    # ------------------------------------------------------------------
-    # Reactive watchers
-    # ------------------------------------------------------------------
-
-    def watch__buf(self, value: str) -> None:
-        """Reflect the streaming buffer in the #streaming widget."""
-        streaming = self.query_one("#streaming", Static)
-        if value:
-            accent = self._config.theme.accent
-            streaming.update(f"[bold {accent}]RELAIS:[/bold {accent}] {value}[blink]▌[/blink]")
-        else:
-            streaming.update("")
-
-    # ------------------------------------------------------------------
-    # Event handlers
-    # ------------------------------------------------------------------
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Send the typed message when the user presses Enter."""
-        content = event.value.strip()
-        if not content or self._busy:
-            return
-        cast("HistoryInput", event.input).add_to_history(content)
-        event.input.clear()
-        if content.lower() in ("/exit", "/quit"):
-            self.exit()
-            return
-        self._busy = True
-        self._stream_worker = self._send(content)
-
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
-
-    def action_clear_chat(self) -> None:
-        """Clear the chat log and generate a new session_id."""
-        self._session_id = str(uuid4())
-        self._save_session_id()
-        self.query_one("#chat-log", RichLog).clear()
-
-    def action_stop_stream(self) -> None:
-        """Cancel the in-progress stream (ESC key).
-
-        When a reply is streaming, cancels the worker and lets the
-        CancelledError handler display a stop notice in the chat log.
-        If no stream is active the action is silently ignored.
-
-        Returns:
-            None. Side effect: the active worker is cancelled when busy.
-        """
-        if self._busy and self._stream_worker is not None:
-            self._stream_worker.cancel()
-
-    def action_help(self) -> None:
-        """Display the keyboard shortcuts help overlay."""
-        self.push_screen(HelpScreen())
-
-    def action_toggle_bundles(self) -> None:
-        """Toggle between Chat and Bundles tabs."""
-        tabs = self.query_one(TabbedContent)
-        if tabs.active == "bundles":
-            tabs.active = "chat"
-            self.query_one("#msg-input", HistoryInput).focus()
-        else:
-            self.set_focus(None)
-            tabs.active = "bundles"
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    return new_session_id, buf
 
 
-    def _save_session_id(self) -> None:
-        """Persist the current session ID back to the config file on disk.
+async def _do_clear(
+    client: RelaisClient,
+    session_id: str | None,
+    console: Console,
+    config: Config,
+    config_path: Path,
+) -> str:
+    """Send /clear to the server and return a fresh session ID.
 
-        Updates ``self._config`` (via ``dataclasses.replace``) and then
-        writes the full config to ``self._config_path`` using
-        ``save_config``.
+    Args:
+        client: The HTTP client.
+        session_id: Current session ID.
+        console: Rich console for output.
+        config: TUI configuration.
+        config_path: Path to config file.
 
-        Returns:
-            None. Side effect: config file is updated on disk.
-        """
-        session_str = self._session_id or ""
-        self._config = _dataclass_replace(self._config, last_session_id=session_str)
-        save_config(self._config, self._config_path)
+    Returns:
+        New session ID string.
+    """
+    theme = config.theme
+    stream = MarkdownStream(console)
+    new_session_id = str(uuid4())
 
-    async def _load_history(self) -> None:
-        """Load conversation history for the current session and display it.
+    try:
+        async for ev in client.stream_message("/clear", session_id=session_id):
+            if isinstance(ev, TokenEvent):
+                pass  # discard /clear tokens
+            elif isinstance(ev, DoneEvent):
+                stream.update(ev.content or "Cleared.", final=True)
+                if ev.session_id:
+                    new_session_id = ev.session_id
+            elif isinstance(ev, ErrorEvent):
+                stream.update("", final=True)
+                console.print(f"[{theme.error}]Clear failed: {ev.error}[/{theme.error}]")
+    except Exception as exc:
+        stream.update("", final=True)
+        console.print(f"[{theme.error}]Clear error: {exc}[/{theme.error}]")
 
-        Calls ``RelaisClient.fetch_history()`` and renders up to 20 turns
-        in the chat log.  Silently exits if no turns are returned or if the
-        session ID is not set.
+    # Persist new session ID
+    updated = _dataclass_replace(config, last_session_id=new_session_id)
+    save_config(updated, config_path)
+    return new_session_id
 
-        Returns:
-            None. Side effect: turns are written to the ``#chat-log`` widget.
-        """
-        if not self._session_id:
-            return
-        turns = await self._client.fetch_history(self._session_id, limit=20)
-        if not turns:
-            return
-        log = self.query_one("#chat-log", RichLog)
-        total = len(turns)
-        displayed = min(total, 20)
-        if total > displayed:
-            log.write(f"[dim]... {total - displayed} turns précédents[/dim]")
-        log.write("[dim]--- Historique ---[/dim]")
-        for turn in turns[-displayed:]:
-            if turn.get("user_content"):
-                log.write(f"[dim]{'─' * 60}[/dim]")
-                log.write(f"[bold]▶ Vous :[/bold] {turn['user_content']}")
-                log.write("")
-            if turn.get("assistant_content"):
-                log.write(f"[green]◀ Assistant :[/green] {turn['assistant_content']}")
-                log.write("")
-        log.write("[dim]--- Fin historique ---[/dim]")
 
-    # ------------------------------------------------------------------
-    # Workers
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# History display
+# ---------------------------------------------------------------------------
 
-    @work(exclusive=False)
-    async def _healthcheck(self) -> None:
-        """Ping /healthz and update the status bar (or show offline overlay)."""
-        ok = await self._client.healthz()
-        status = self.query_one("#status", Static)
-        if ok:
-            status.update(f"[green]Connected[/green] · {self._config.api_url}")
-        else:
-            status.update(
-                f"[bold red]Unreachable[/bold red] · {self._config.api_url}"
+
+async def _show_history(
+    client: "RelaisClient",
+    session_id: str,
+    console: Console,
+    config: Config,
+    limit: int = 10,
+) -> None:
+    """Fetch and display the last *limit* turns of a session.
+
+    Silently does nothing if the /v1/history endpoint is unavailable or
+    returns no turns.
+
+    Args:
+        client: The HTTP client.
+        session_id: Session whose history to display.
+        console: Rich console for output.
+        config: TUI configuration (for theme colors).
+        limit: Maximum number of turns to display.
+    """
+    turns = await client.fetch_history(session_id, limit=limit)
+    if not turns:
+        return
+
+    theme = config.theme
+    sep = "─" * 40
+    console.print(f"[{theme.metadata}]{sep}[/{theme.metadata}]")
+    console.print(
+        f"[{theme.metadata}]  Reprise · session {session_id[:8]}…  "
+        f"({len(turns)} tour{'s' if len(turns) > 1 else ''})[/{theme.metadata}]"
+    )
+    console.print(f"[{theme.metadata}]{sep}[/{theme.metadata}]\n")
+
+    for turn in turns:
+        user_msg = (turn.get("user_content") or "").strip()
+        asst_msg = (turn.get("assistant_content") or "").strip()
+        if user_msg:
+            console.print(
+                f"[{theme.user_text}]you[/{theme.user_text}]"
+                f"[{theme.metadata}] › [/{theme.metadata}]"
+                f"{user_msg}"
             )
-            overlay = self.query_one("#offline-overlay", Static)
-            overlay.update(_OFFLINE_BANNER.format(url=self._config.api_url))
-            overlay.add_class("visible")
-            # Disable input while offline
-            self.query_one("#msg-input", HistoryInput).disabled = True
+        if asst_msg:
+            console.print(
+                f"[{theme.assistant_text}]relais[/{theme.assistant_text}]"
+                f"[{theme.metadata}] › [/{theme.metadata}]"
+            )
+            console.print(Markdown(asst_msg))
+        console.print()
 
-    @work(exclusive=True)
-    async def _send(self, content: str) -> None:
-        """Send a message and stream the reply into the chat log.
+    console.print(f"[{theme.metadata}]{sep}[/{theme.metadata}]\n")
 
-        Runs as an exclusive worker so concurrent sends are not possible.
 
-        Args:
-            content: The user message text.
-        """
-        log = self.query_one("#chat-log", RichLog)
-        status = self.query_one("#status", Static)
+# ---------------------------------------------------------------------------
+# Main application loop
+# ---------------------------------------------------------------------------
 
-        _log.debug("_send: entered, content_len=%d, session_id=%s", len(content), self._session_id)
-        user_color = self._config.theme.user_text
-        log.write(f"[dim]{'─' * 60}[/dim]")
-        log.write(f"[bold {user_color}]▶ You:[/bold {user_color}] {content}")
-        log.write("")
 
-        buf = ""
-        self._buf = ""
-        spinner = self.query_one("#spinner", LoadingIndicator)
-        spinner.add_class("active")
+async def run_app(config: Config, config_path: Path, log_path: Path) -> None:
+    """Run the REPL-style chat loop.
 
-        try:
-            async for ev in self._client.stream_message(
-                content, session_id=self._session_id
-            ):
-                if isinstance(ev, TokenEvent):
-                    if not buf:
-                        # First token received — hide the spinner
-                        spinner.remove_class("active")
-                    buf += ev.text
-                    self._buf = buf
-                    # Yield to the Textual event loop so the reactive watcher
-                    # can schedule a repaint before the next token arrives.
-                    # Without this, multiple tokens from a single TCP chunk are
-                    # processed in a tight loop and only the last value is
-                    # painted (the message appears as a block at the end).
-                    await asyncio.sleep(0)
+    Displays the splash banner, performs a health check, then enters the
+    main prompt loop.  Exits on /exit or EOF (Ctrl+D).
 
-                elif isinstance(ev, DoneEvent):
-                    spinner.remove_class("active")
-                    # Update session_id only when the server returns a new one
-                    # and it actually differs from the current value — avoids
-                    # redundant disk writes on every reply.
-                    new_id = ev.session_id or self._session_id
-                    if new_id and new_id != self._session_id:
-                        self._session_id = new_id
-                        self._save_session_id()
-                    # Non-streaming fallback: server returned full content at once
-                    if not buf and ev.content:
-                        buf = ev.content
-                    # Detect /clear confirmation — generate a new session
-                    if buf.strip() in _CLEAR_PHRASES:
-                        self._session_id = str(uuid4())
-                        self._save_session_id()
-                        log.clear()
-                        buf = ""
-                    self._buf = ""
-                    if buf:
-                        accent = self._config.theme.accent
-                        log.write(f"[bold {accent}]◀ RELAIS:[/bold {accent}] {buf}")
-                        log.write("")
-                    session_short = (
-                        (self._session_id[:8] + "…") if self._session_id else "–"
-                    )
-                    status.update(f"[green]Connected[/green] · session={session_short}")
+    Args:
+        config: TUI configuration.
+        config_path: Resolved path to the config file.
+        log_path: Path where TUI logs are written.
+    """
+    theme = config.theme
+    console = Console(highlight=False)
 
-                elif isinstance(ev, ProgressEvent):
-                    status.update(
-                        f"[yellow]{ev.event}[/yellow] · {ev.detail or '…'}"
-                    )
+    console.print(
+        _build_splash(config_path, log_path),
+        markup=True,
+        highlight=False,
+    )
 
-                elif isinstance(ev, ErrorEvent):
-                    spinner.remove_class("active")
-                    self._buf = ""
-                    log.write(f"[bold red]Error:[/bold red] {ev.error}")
-                    status.update(f"[red]Error[/red] · {ev.error[:80]}")
+    client = RelaisClient(config)
+    session_id: str | None = config.last_session_id or None
 
-        except asyncio.CancelledError:
-            self._buf = ""
-            log.write("[dim]⏹ Stream interrompu.[/dim]")
-            raise  # must re-raise so Textual marks the worker as cancelled
+    # Health check
+    ok = await client.healthz()
+    if ok:
+        console.print(f"[{theme.accent}]✓ Connected[/{theme.accent}] · {config.api_url}\n")
+    else:
+        console.print(
+            f"[{theme.error}]✗ Cannot reach[/{theme.error}] {config.api_url}\n"
+            f"[{theme.metadata}]Make sure the RELAIS stack is running "
+            f"(./supervisor.sh start all)[/{theme.metadata}]\n"
+        )
 
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError, OSError) as exc:
-            self._buf = ""
-            _log.exception("Stream request failed: %s", exc)
-            error_label = type(exc).__name__
-            log.write(f"[bold red]Connection error:[/bold red] {error_label}")
-            status.update(f"[red]Connection error[/red] · {error_label}")
+    # Restore last session context
+    if ok and session_id:
+        await _show_history(client, session_id, console, config)
 
-        except Exception as exc:  # noqa: BLE001
-            self._buf = ""
-            _log.exception("Unexpected error in _send: %s", exc)
-            log.write(f"[bold red]Error:[/bold red] {exc}")
-            status.update(f"[red]Error[/red] · {type(exc).__name__}")
+    pt_session = _make_session(config)
+    prompt_msg = _make_prompt_message(theme)
 
-        finally:
-            spinner.remove_class("active")
-            self._buf = ""  # safety reset — already cleared per-branch but ensures cleanup on unexpected exit
-            self._stream_worker = None  # clear reference before opening the gate
-            self._busy = False
-            self.query_one("#msg-input", HistoryInput).focus()
+    try:
+        while True:
+            try:
+                raw = await pt_session.prompt_async(prompt_msg)
+            except (EOFError, KeyboardInterrupt):
+                console.print(f"\n[{theme.metadata}]Goodbye.[/{theme.metadata}]")
+                break
+
+            text = raw.strip()
+            if not text:
+                continue
+
+            cmd = text.lower()
+            if cmd in ("/exit", "/quit"):
+                console.print(f"[{theme.metadata}]Goodbye.[/{theme.metadata}]")
+                break
+
+            if cmd == "/clear":
+                session_id = await _do_clear(client, session_id, console, config, config_path)
+                continue
+
+            new_sid, reply = await _stream_response(
+                client, text, session_id, console, config, config_path
+            )
+
+            if new_sid and new_sid != session_id:
+                session_id = new_sid
+                updated = _dataclass_replace(config, last_session_id=session_id)
+                save_config(updated, config_path)
+                config = updated
+
+            # Handle server-side /clear response
+            if reply.strip() in _CLEAR_PHRASES:
+                session_id = str(uuid4())
+                updated = _dataclass_replace(config, last_session_id=session_id)
+                save_config(updated, config_path)
+                config = updated
+
+            console.print()  # blank line between turns
+
+    finally:
+        await client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -648,12 +449,10 @@ class RelaisApp(App[None]):
 def _bootstrap_relais_home() -> None:
     """Set RELAIS_HOME from the project .env if not already in the environment.
 
-    Walks up from this file (tools/tui/src/relais_tui/__main__.py, so
-    parents[4] = project root) to locate .env and loads it with dotenv
-    (override=False so existing env vars are never clobbered).  Skips if
-    RELAIS_HOME is already set by the caller (e.g. the ./relais wrapper).
-    After loading, any relative RELAIS_HOME is resolved against the project
-    root so downstream code always sees an absolute path.
+    Walks up from this file to locate .env and loads it with dotenv
+    (override=False so existing env vars are never clobbered).
+
+    Returns: nothing.
     """
     import os as _os
 
@@ -665,7 +464,6 @@ def _bootstrap_relais_home() -> None:
     project_root = Path(__file__).parents[4]
     load_dotenv(project_root / ".env", override=False)
 
-    # Resolve relative path against the project root
     relais_home = _os.environ.get("RELAIS_HOME")
     if relais_home and not Path(relais_home).is_absolute():
         _os.environ["RELAIS_HOME"] = str((project_root / relais_home).resolve())
@@ -674,14 +472,15 @@ def _bootstrap_relais_home() -> None:
 def _run_bundle_cli() -> None:
     """Dispatch ``relais bundle ...`` subcommands and exit.
 
-    Called when ``sys.argv[1] == "bundle"`` so the TUI is never launched for
-    CLI-only operations.  Exits with the handler's return code.
+    Returns: nothing (calls sys.exit internally).
     """
     import argparse
 
     from relais_tui.cli.bundle import add_bundle_subparser
 
-    root = argparse.ArgumentParser(prog="relais", description="RELAIS — micro-brick AI assistant CLI.")
+    root = argparse.ArgumentParser(
+        prog="relais", description="RELAIS — micro-brick AI assistant CLI."
+    )
     root_sub = root.add_subparsers(dest="command", metavar="{bundle,...}")
     root_sub.required = True
     add_bundle_subparser(root_sub)
@@ -694,24 +493,21 @@ def _run_bundle_cli() -> None:
 
 
 def main() -> None:
-    """Load config and start the TUI application, or dispatch bundle CLI."""
+    """Load config and start the TUI application, or dispatch bundle CLI.
+
+    Returns: nothing.
+    """
     _bootstrap_relais_home()
 
     if len(sys.argv) > 1 and sys.argv[1] == "bundle":
         _run_bundle_cli()
 
-    from relais_tui.config import _default_config_path  # noqa: PLC2701
+    from relais_tui.config import _default_config_path, _get_relais_home  # noqa: PLC2701
 
-    relais_home = os.environ.get("RELAIS_HOME")
-    config_path = _default_config_path().expanduser().resolve()
-    log_path = (
-        (Path(relais_home) / "logs" / "tui.log").resolve()
-        if relais_home
-        else Path("~/.relais/logs/tui.log").expanduser()
-    )
+    config_path = _default_config_path()
+    log_path = _get_relais_home() / "logs" / "tui.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # buffering=1 → flush après chaque ligne, sans délai
     _log_file = log_path.open("a", buffering=1, encoding="utf-8")
     _handler = logging.StreamHandler(_log_file)
     _handler.setFormatter(
@@ -724,7 +520,10 @@ def main() -> None:
     config = load_config(config_path)
     _log.info("config loaded — api_url=%s config=%s", config.api_url, config_path)
 
-    RelaisApp(config, config_path, log_path).run()
+    from relais_tui.app import RelaisApp
+
+    app = RelaisApp(config, config_path)
+    asyncio.run(app.run())
 
 
 if __name__ == "__main__":

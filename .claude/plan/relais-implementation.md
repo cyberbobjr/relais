@@ -330,13 +330,15 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 **Fichiers:** main.py, router.py, formatter.py
 **Priorité supervisord:** 10
 
-### 4.2 `veilleur/` — Planification CRON + backup
-**Taxonomie:** Pure Publisher
-**Lit:** HEARTBEAT.md, config backup
-**Publie:** `relais:tasks` (tâches planifiées)
-**Fichiers:** main.py, backup_handler.py, cleanup_handler.py
+### 4.2 ✅ `horloger/` — Planification CRON (2026-04-21) DONE
+**Taxonomie:** Pure Publisher (producteur-only ; `stream_specs()` retourne `[]`)
+**Lit:** `~/.relais/config/horloger/jobs/*.yaml` — hot-reload via watchfiles
+**Publie:** `relais:messages:incoming:horloger` (envelopes de déclenchement traversant tout le pipeline)
+**Exécution trace:** SQLite `~/.relais/storage/horloger.db` — statuts `triggered`, `publish_failed`, `skipped_catchup`, `skipped_disabled`, `skipped_double_fire`
+**Fichiers:** main.py, job_model.py, job_registry.py, scheduler.py, envelope_builder.py, execution_store.py, models.py
 **Priorité supervisord:** 10
-**Dépendance:** APScheduler ≥ 4.x
+**Sous-agent natif:** `horloger-manager` (`/horloger` ou `/schedule`) — CRUD YAML de jobs
+**Config:** `config/horloger.yaml.default` — `tick_interval_seconds` (défaut 30), `catch_up_window_seconds` (défaut 120), `jobs_dir`, `db_path`
 
 ### 4.3 `aiguilleur/rest/` — Canal REST/SSE + Webhooks HMAC
 **Taxonomie:** Relay (canal Aiguilleur)
@@ -350,15 +352,21 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 
 **Taxonomie:** BrickBase long-running — `autostart=true`, `autorestart=true`.
 
-**Deux mécanismes :**
-- **Changelog + consolidation (S3)** : consomme `relais:skill:trace` (groupe `forgeron_group`) → `SkillTraceStore` SQLite → `ChangelogWriter` (LLM rapide, observations dans CHANGELOG.md) → `SkillConsolidator` (LLM précis, réécrit SKILL.md quand changelog dépasse le seuil)
-- **Auto-creation pipeline** : consomme `relais:memory:request` (groupe `forgeron_archive_group`) → `IntentLabeler` (Fast LLM, snake_case) → `SkillCreator` (LLM précis) quand N sessions partagent le même label
+**Pipeline édition directe :**
+- **SkillEditor** : consomme `relais:skill:trace` (groupe `forgeron_group`) → reçoit SKILL.md + trace scopée → appel LLM unique avec `with_structured_output` → réécrit SKILL.md directement
+- Trigger : `edit_min_tool_errors`, `edit_call_threshold` (défaut 10), success-after-failure, aborted turn
+- Rate-limité : `relais:skill:edit_cooldown:{skill_name}` (TTL `edit_cooldown_seconds`)
+- `skill_paths: dict[str, str]` dans `SkillTraceCtx` — chemins absolus pour bundle skills
+- Profil : `edit_profile` (défaut precise)
+
+**Auto-creation pipeline :** consomme `relais:memory:request` (groupe `forgeron_archive_group`) → `IntentLabeler` → `SkillCreator` quand N sessions partagent le même label
 
 **Guard non-archive :** les actions autres que `archive` sur `relais:memory:request` sont ignorées (log DEBUG, return early).
 
 **Produit :** `relais:events:system` (skill_created), `relais:messages:outgoing_pending` (notifications), `relais:logs`
 
-**Fichiers:** main.py, trace_store.py, changelog_writer.py, skill_consolidator.py, session_store.py, intent_labeler.py, skill_creator.py, models.py, config.py
+**Fichiers:** main.py, trace_store.py, skill_editor.py, session_store.py, intent_labeler.py, skill_creator.py, models.py, config.py
+**Config keys:** `edit_profile`, `edit_mode`, `edit_call_threshold`, `edit_min_tool_errors`, `edit_cooldown_seconds`, `correction_mode`, `history_read_timeout_seconds`
 
 ---
 
@@ -401,7 +409,6 @@ Souvenir gère maintenant **deux streams** :
   1. Lit `messages_raw` depuis `envelope.metadata["messages_raw"]` (blob sérialisé par Atelier via `serialize_messages()`)
   2. RPUSH blob complet → `relais:context:{session_id}`, LTRIM -20, EXPIRE 24h (un blob par tour)
   3. SQLite upsert sur `correlation_id` — champs `user_content` + `assistant_content` + `messages_raw JSON`
-  4. `memory_extractor.extract()` → faits utilisateur → SQLite `user_facts` (fire-and-forget)
 
 > ⚠️ Redis Streams n'a pas de wildcard consumer groups — Souvenir s'abonne aux canaux connus explicitement (liste depuis `config.yaml`)
 
@@ -413,12 +420,6 @@ Souvenir → LRANGE relais:context:{session_id} 0 19  (cache Redis)
         → XADD relais:memory:response {correlation_id, messages:[...]}
 Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 ```
-
-**`souvenir/memory_extractor.py`** — IMPLÉMENTÉ :
-- `MemoryExtractor(model="provider:model-id")` — ex: `MemoryExtractor(model="anthropic:claude-haiku-4-5")`
-- `async def extract(envelope: Envelope) -> list[dict]`
-- `init_chat_model(model, temperature=0.1, max_tokens=512)` + `ainvoke([SystemMessage, HumanMessage])`
-- Filtre confidence > 0.7, fire-and-forget (non-bloquant)
 
 ### 6.2 ✅ Architecture AIGUILLEUR configurable (2026-03-30) DONE
 

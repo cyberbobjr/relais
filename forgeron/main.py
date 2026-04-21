@@ -4,8 +4,8 @@ Functional role
 ---------------
 Forgeron has two independent pipelines:
 
-1. **Skill improvement** (changelog + consolidation) — consumes execution
-   traces from Atelier and progressively improves existing SKILL.md files.
+1. **Skill improvement** (direct edit) — consumes execution traces from Atelier
+   and directly rewrites SKILL.md files via a single LLM call scoped per skill.
 2. **Skill auto-creation** — consumes session archives and detects recurring
    user intent patterns to generate new skills from scratch.
 
@@ -17,9 +17,9 @@ that used skills and made at least one tool call.  The trace carries
 ``messages_raw`` conversation history.
 
 For each skill in the trace, Forgeron evaluates **four** trigger conditions.
-Analysis fires when **any one** is true (AND ``annotation_mode`` is enabled):
+Analysis fires when **any one** is true (AND ``edit_mode`` is enabled):
 
-1. **Tool errors** — ``tool_error_count >= annotation_min_tool_errors``
+1. **Tool errors** — ``tool_error_count >= edit_min_tool_errors``
    (default 1).  Captures turns where the agent struggled.
 2. **Aborted turn** — ``tool_error_count == -1`` (sentinel value published
    by Atelier on the DLQ path when ``ToolErrorGuard`` aborts the loop).
@@ -32,31 +32,21 @@ Analysis fires when **any one** is true (AND ``annotation_mode`` is enabled):
    is tracked in-memory per skill (``_last_had_errors``) and resets after
    being consumed (no double-trigger on consecutive successes).
 4. **Usage threshold** — cumulative call count for a skill reaches
-   ``annotation_call_threshold`` (default 5).  Captures usage patterns
-   even when there are no errors.  Counter resets after each trigger.
+   ``edit_call_threshold`` (default 5).  Captures usage patterns even when
+   there are no errors.  Counter resets after each trigger.
 
 A per-skill **cooldown** (Redis TTL key
-``relais:skill:annotation_cooldown:{skill_name}``, default 300 s) prevents
-annotation spam.  If the cooldown is active, the trigger is silently
-skipped regardless of the condition that fired.
+``relais:skill:edit_cooldown:{skill_name}``, default 300 s) prevents edit
+spam.  If the cooldown is active, the trigger is silently skipped regardless
+of the condition that fired.
 
-Skill improvement — two-phase pipeline
----------------------------------------
-**Phase 1 — Changelog** (``ChangelogWriter``, fast LLM):
-  Receives the current SKILL.md + the full conversation trace.  Extracts
-  1–3 concrete, dated observations and appends them to a per-skill
-  ``CHANGELOG.md``.  The SKILL.md is never modified in this phase.
-  Returns ``wrote=True`` if new observations were added, ``False`` if the
-  LLM found nothing new or the cooldown was active.
-
-**Phase 2 — Consolidation** (``SkillConsolidator``, precise LLM):
-  Triggered when ``CHANGELOG.md`` exceeds ``consolidation_line_threshold``
-  lines (default 80) AND the consolidation cooldown has expired
-  (``consolidation_cooldown_seconds``, default 30 min).  Reads the current
-  SKILL.md + CHANGELOG.md, rewrites SKILL.md by absorbing the accumulated
-  observations, moves the old changelog to ``CHANGELOG_DIGEST.md`` (audit
-  trail), and empties CHANGELOG.md.  Optionally notifies the user via
-  ``relais:messages:outgoing_pending``.
+Skill improvement — single-step direct edit
+-------------------------------------------
+``SkillEditor`` receives the current SKILL.md + the conversation trace scoped
+to the target skill (via ``scope_messages_to_skill``).  It calls the LLM once
+with ``with_structured_output`` to produce a rewritten SKILL.md and a
+``changed`` flag.  SKILL.md is only written when ``changed=True`` and the
+content differs from the current file.
 
 Skill auto-creation — trigger rules
 -------------------------------------
@@ -87,21 +77,17 @@ Configuration reference (forgeron.yaml)
 ::
 
     forgeron:
-      annotation_mode: true               # enable Phase 1 changelog writing
-      annotation_profile: "fast"          # LLM profile for observations
-      annotation_min_tool_errors: 1       # min errors to trigger on error condition
-      annotation_cooldown_seconds: 300    # per-skill cooldown between annotations
-      annotation_call_threshold: 5        # usage-based trigger every N calls
-      consolidation_line_threshold: 80    # CHANGELOG lines before Phase 2
-      consolidation_cooldown_seconds: 1800    # 30 min between consolidations
-      consolidation_profile: "precise"    # LLM profile for SKILL.md rewrite
-      notify_user_on_consolidation: true
+      edit_mode: true                     # enable direct SKILL.md editing
+      edit_profile: "precise"             # LLM profile for edits
+      edit_min_tool_errors: 1             # min errors to trigger on error condition
+      edit_cooldown_seconds: 300          # per-skill cooldown between edits
+      edit_call_threshold: 5              # usage-based trigger every N calls
       creation_mode: true                 # enable auto-creation pipeline
       min_sessions_for_creation: 3        # sessions with same intent before creating
       creation_cooldown_seconds: 86400    # 24h between creation attempts per intent
       max_sessions_for_labeling: 5        # max examples passed to SkillCreator
       notify_user_on_creation: true
-      llm_profile: "default"             # LLM profile for SkillCreator
+      llm_profile: "precise"             # LLM profile for SkillCreator
       skills_dir: null                    # resolved from config cascade if null
 
 Technical overview
@@ -112,8 +98,7 @@ Key classes:
   ``relais:skill:trace`` and ``relais:memory:request``.
 * ``SkillTraceStore`` — SQLite accumulator; tracks one row per agent turn
   that used skills.
-* ``ChangelogWriter`` — Phase 1: appends observations to CHANGELOG.md.
-* ``SkillConsolidator`` — Phase 2: rewrites SKILL.md from changelog.
+* ``SkillEditor`` — rewrites SKILL.md directly from scoped conversation traces.
 * ``SessionStore`` — SQLite accumulator for per-session intent patterns.
 * ``IntentLabeler`` — fast LLM, extracts snake_case intent label.
 * ``SkillCreator`` — precise LLM, generates SKILL.md from examples.
@@ -138,10 +123,12 @@ XACK contract
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
-from common.config_loader import resolve_storage_dir
+from common.config_loader import resolve_config_path, resolve_storage_dir
 from common.contexts import CTX_FORGERON, CTX_SKILL_TRACE, CTX_SOUVENIR_REQUEST, SkillTraceCtx, ensure_ctx
 from common.envelope import Envelope
 from common.envelope_actions import (
@@ -159,13 +146,20 @@ from common.streams import (
     STREAM_SKILL_TRACE,
     STREAM_TASKS,
 )
-from forgeron.changelog_writer import ChangelogWriter
 from forgeron.config import ForgeonConfig, load_forgeron_config
 from forgeron.models import SkillTrace
 from forgeron.session_store import SessionStore
+from forgeron.skill_editor import SkillEditor
 from forgeron.trace_store import SkillTraceStore
 
 logger = logging.getLogger("forgeron")
+
+
+@dataclass
+class _ConfigSnapshot:
+    config: ForgeonConfig
+    llm_profile: ProfileConfig | None
+    edit_profile: ProfileConfig | None
 
 
 class Forgeron(BrickBase):
@@ -180,36 +174,77 @@ class Forgeron(BrickBase):
         super().__init__("forgeron")
         self._config: ForgeonConfig = ForgeonConfig()
         self._llm_profile: ProfileConfig | None = None
-        self._annotation_profile: ProfileConfig | None = None
-        self._consolidation_profile: ProfileConfig | None = None
+        self._edit_profile: ProfileConfig | None = None
         db_path = resolve_storage_dir() / "forgeron.db"
         self._trace_store = SkillTraceStore(db_path=db_path)
         self._session_store = SessionStore(db_path=db_path)
-        # In-memory call counter per skill — triggers annotation every N calls.
         self._skill_call_counts: dict[str, int] = {}
-        # Per-skill flag: True when the last turn had errors. Used to trigger
-        # analysis on the "success after failure" turn (the correction turn).
+        # Enables "success after failure" detection: the turn where the agent
+        # recovers carries the fix and is the most valuable one to capture.
         self._last_had_errors: dict[str, bool] = {}
         self._load()
 
     def _load(self) -> None:
-        """Reload Forgeron configuration from YAML.
+        """Load Forgeron configuration from YAML at init time only.
 
-        Called by BrickBase on startup and on hot-reload signals.
+        Hot-reload uses _build_config_candidate() and _apply_config() instead.
         """
         self._config = load_forgeron_config()
         profiles = load_profiles()
         self._llm_profile = resolve_profile(profiles, self._config.llm_profile)
-        self._annotation_profile = resolve_profile(profiles, self._config.annotation_profile)
-        self._consolidation_profile = resolve_profile(profiles, self._config.consolidation_profile)
+        self._edit_profile = resolve_profile(profiles, self._config.edit_profile)
         logger.info(
-            "Config loaded: annotation_mode=%s creation_mode=%s "
-            "llm=%s annotation=%s consolidation=%s skills_dir=%s",
-            self._config.annotation_mode,
+            "Config loaded: edit_mode=%s creation_mode=%s "
+            "llm=%s edit=%s skills_dir=%s",
+            self._config.edit_mode,
             self._config.creation_mode,
             self._config.llm_profile,
-            self._config.annotation_profile,
-            self._config.consolidation_profile,
+            self._config.edit_profile,
+            self._config.skills_dir,
+        )
+
+    def _config_watch_paths(self) -> list[Path]:
+        """Return forgeron.yaml path for file-based hot-reload.
+
+        Returns:
+            List containing the resolved forgeron.yaml path, or empty list if
+            the file is not found.
+        """
+        try:
+            return [resolve_config_path("forgeron.yaml")]
+        except FileNotFoundError:
+            return []
+
+    def _build_config_candidate(self) -> _ConfigSnapshot:
+        """Build a fresh config snapshot from disk without mutating self.
+
+        Returns:
+            _ConfigSnapshot with config and resolved profiles.
+        """
+        config = load_forgeron_config()
+        profiles = load_profiles()
+        return _ConfigSnapshot(
+            config=config,
+            llm_profile=resolve_profile(profiles, config.llm_profile),
+            edit_profile=resolve_profile(profiles, config.edit_profile),
+        )
+
+    def _apply_config(self, candidate: _ConfigSnapshot) -> None:
+        """Atomically swap in the new config snapshot.
+
+        Args:
+            candidate: Snapshot returned by ``_build_config_candidate()``.
+        """
+        self._config = candidate.config
+        self._llm_profile = candidate.llm_profile
+        self._edit_profile = candidate.edit_profile
+        logger.info(
+            "Config reloaded: edit_mode=%s creation_mode=%s "
+            "llm=%s edit=%s skills_dir=%s",
+            self._config.edit_mode,
+            self._config.creation_mode,
+            self._config.llm_profile,
+            self._config.edit_profile,
             self._config.skills_dir,
         )
 
@@ -295,6 +330,7 @@ class Forgeron(BrickBase):
         tool_error_count: int = trace_ctx.get("tool_error_count", 0)
         messages_raw_list: list[dict] = trace_ctx.get("messages_raw", [])
         messages_raw: str = json.dumps(messages_raw_list)
+        skill_paths: dict[str, str] = trace_ctx.get("skill_paths", {})
         correlation_id: str = envelope.correlation_id
         is_aborted = tool_error_count == -1
 
@@ -323,6 +359,7 @@ class Forgeron(BrickBase):
                 tool_call_count=tool_call_count,
                 tool_error_count=tool_error_count,
                 messages_raw=messages_raw,
+                skill_path=skill_paths.get(skill_name),
             )
             await self._trace_store.add_trace(trace)
             logger.info(
@@ -334,17 +371,17 @@ class Forgeron(BrickBase):
                 len(messages_raw_list),
             )
 
-            # Decide whether to trigger changelog analysis.
+            # Decide whether to trigger skill edit.
             call_count = self._skill_call_counts.get(skill_name, 0) + 1
             self._skill_call_counts[skill_name] = call_count
-            threshold_reached = call_count >= self._config.annotation_call_threshold
+            threshold_reached = call_count >= self._config.edit_call_threshold
             if threshold_reached:
                 self._skill_call_counts[skill_name] = 0
 
             # "Success after failure" — the previous turn for this skill had
             # errors, but this one succeeded. This is the correction turn where
             # the agent found the right approach; its messages_raw contains the
-            # fix that should be captured in the changelog.
+            # fix that should be captured in the skill.
             prev_had_errors = self._last_had_errors.get(skill_name, False)
             success_after_failure = (
                 prev_had_errors
@@ -357,32 +394,32 @@ class Forgeron(BrickBase):
                 tool_error_count > 0 or is_aborted
             )
 
-            should_analyze = (
+            should_edit = (
                 (tool_error_count > 0
                  or is_aborted
                  or threshold_reached
                  or success_after_failure)
-                and self._config.annotation_mode
+                and self._config.edit_mode
             )
 
-            if not should_analyze:
+            if not should_edit:
                 logger.info(
-                    "[TRACE] analysis NOT triggered — skill='%s' corr=%s "
+                    "[TRACE] edit NOT triggered — skill='%s' corr=%s "
                     "errors=%d aborted=%s threshold=%s/%d saf=%s mode=%s",
                     skill_name,
                     correlation_id,
                     tool_error_count,
                     is_aborted,
                     call_count,
-                    self._config.annotation_call_threshold,
+                    self._config.edit_call_threshold,
                     success_after_failure,
-                    self._config.annotation_mode,
+                    self._config.edit_mode,
                 )
                 continue
 
-            if self._annotation_profile is None:
+            if self._edit_profile is None:
                 logger.warning(
-                    "[TRACE] analysis SKIPPED — annotation_profile is None "
+                    "[TRACE] edit SKIPPED — edit_profile is None "
                     "for skill='%s' corr=%s",
                     skill_name,
                     correlation_id,
@@ -396,109 +433,36 @@ class Forgeron(BrickBase):
                 else f"threshold ({call_count} calls)"
             )
             logger.info(
-                "[TRACE] analysis TRIGGERED — skill='%s' reason=%s corr=%s "
+                "[TRACE] edit TRIGGERED — skill='%s' reason=%s corr=%s "
                 "profile=%s skills_dir=%s",
                 skill_name,
                 reason,
                 correlation_id,
-                self._annotation_profile.model,
+                self._edit_profile.model,
                 self._config.skills_dir,
             )
 
-            writer = ChangelogWriter(
-                profile=self._annotation_profile,
+            editor = SkillEditor(
+                profile=self._edit_profile,
                 skills_dir=self._config.skills_dir,
             )
-            wrote = await writer.observe(
+            raw_skill_path = skill_paths.get(skill_name)
+            skill_dir_override = Path(raw_skill_path) if raw_skill_path else None
+            edited = await editor.edit(
                 skill_name=skill_name,
-                tool_error_count=tool_error_count,
                 messages_raw=messages_raw_list,
                 config=self._config,
                 redis_conn=redis_conn,
+                trigger_reason=reason,
                 force=threshold_reached,
+                skill_path=skill_dir_override,
             )
             logger.info(
-                "[TRACE] changelog observe result — skill='%s' wrote=%s corr=%s",
+                "[TRACE] edit result — skill='%s' edited=%s corr=%s",
                 skill_name,
-                wrote,
+                edited,
                 correlation_id,
             )
-
-            # Check whether the changelog warrants consolidation.
-            if wrote and self._consolidation_profile is not None:
-                cl_path = writer.changelog_path(skill_name)
-                if cl_path is not None:
-                    should_consolidate = await writer.should_consolidate(
-                        cl_path, self._config, redis_conn, skill_name
-                    )
-                    logger.info(
-                        "[TRACE] consolidation check — skill='%s' "
-                        "should_consolidate=%s cl_path=%s corr=%s",
-                        skill_name,
-                        should_consolidate,
-                        cl_path,
-                        correlation_id,
-                    )
-                    if should_consolidate:
-                        await self._maybe_consolidate(
-                            skill_name=skill_name,
-                            envelope=envelope,
-                            redis_conn=redis_conn,
-                        )
-                else:
-                    logger.info(
-                        "[TRACE] consolidation SKIP — no changelog path "
-                        "for skill='%s' corr=%s",
-                        skill_name,
-                        correlation_id,
-                    )
-
-    async def _maybe_consolidate(
-        self,
-        skill_name: str,
-        envelope: Envelope,
-        redis_conn: Any,
-    ) -> None:
-        """Run periodic consolidation and optionally notify the user.
-
-        Args:
-            skill_name: Skill directory name.
-            envelope: Original trace envelope (for notification routing).
-            redis_conn: Active Redis connection.
-        """
-        from forgeron.skill_consolidator import SkillConsolidator  # noqa: PLC0415
-
-        logger.info(
-            "[CONSOLIDATION] starting — skill='%s' corr=%s",
-            skill_name,
-            envelope.correlation_id,
-        )
-        consolidator = SkillConsolidator(
-            profile=self._consolidation_profile,  # type: ignore[arg-type]
-            skills_dir=self._config.skills_dir,  # type: ignore[arg-type]
-        )
-        consolidated = await consolidator.consolidate(
-            skill_name, redis_conn, self._config
-        )
-        logger.info(
-            "[CONSOLIDATION] result — skill='%s' consolidated=%s corr=%s",
-            skill_name,
-            consolidated,
-            envelope.correlation_id,
-        )
-        if consolidated:
-            if self._config.notify_user_on_consolidation:
-                await self._notify_user(
-                    channel=envelope.channel,
-                    sender_id=envelope.sender_id,
-                    session_id=envelope.session_id,
-                    correlation_id=envelope.correlation_id,
-                    message=(
-                        f"[Forgeron] Skill `{skill_name}` consolidated — "
-                        "SKILL.md has been rewritten with accumulated observations."
-                    ),
-                    redis_conn=redis_conn,
-                )
 
     # ------------------------------------------------------------------ #
     # Archive consumer — auto-creation pipeline                          #
@@ -596,21 +560,21 @@ class Forgeron(BrickBase):
             user_preview[:80],
         )
 
-        # Run intent labeling with the cheap annotation profile
+        # Run intent labeling with the fast LLM profile
         from forgeron.intent_labeler import IntentLabelResult  # noqa: PLC0415
 
         label_result: IntentLabelResult | None = None
         intent_label: str | None = None
-        if self._annotation_profile is not None:
+        if self._llm_profile is not None:
             logger.info(
                 "[ARCHIVE] intent labeling — corr=%s model=%s",
                 corr,
-                self._annotation_profile.model,
+                self._llm_profile.model,
             )
             try:
                 from forgeron.intent_labeler import IntentLabeler  # noqa: PLC0415
 
-                labeler = IntentLabeler(profile=self._annotation_profile)
+                labeler = IntentLabeler(profile=self._llm_profile)
                 label_result = await labeler.label(messages_raw)
                 intent_label = label_result.label
                 logger.info(
@@ -632,7 +596,7 @@ class Forgeron(BrickBase):
                 )
         else:
             logger.info(
-                "[ARCHIVE] SKIP intent labeling — annotation_profile=None corr=%s",
+                "[ARCHIVE] SKIP intent labeling — llm_profile=None corr=%s",
                 corr,
             )
 
@@ -721,6 +685,7 @@ class Forgeron(BrickBase):
         corrected_behavior: str,
         skill_name_hint: str | None,
         redis_conn: Any,
+        skill_path: str | None = None,
     ) -> None:
         """Orchestrate the correction pipeline: fetch history, notify user, then publish task.
 
@@ -805,6 +770,8 @@ class Forgeron(BrickBase):
         forgeron_ctx["corrected_behavior"] = corrected_behavior
         if skill_name_hint:
             forgeron_ctx["skill_name_hint"] = skill_name_hint
+        if skill_path:
+            forgeron_ctx["skill_path"] = skill_path
         forgeron_ctx["history_turns"] = history_turns
 
         await redis_conn.xadd(STREAM_TASKS, {"payload": task_env.to_json()})

@@ -105,6 +105,38 @@ XADD relais:messages:incoming * payload <Envelope JSON>
 
 ---
 
+### `relais:messages:incoming:horloger`
+
+**Direction**: Horloger → Portail
+**Consumer groups**: `portail_group`
+
+Carries CRON-triggered envelopes produced by Horloger when a scheduled job fires. Treated by the downstream pipeline as a regular incoming message, traversing Portail → Sentinelle → Atelier. Horloger pre-stamps `context["portail"]` so Portail skips the UserRegistry channel lookup.
+
+```
+XADD relais:messages:incoming:horloger * payload <Envelope JSON>
+```
+
+**Envelope fields specific to Horloger triggers**:
+
+| Field | Value | Description |
+|-------|-------|-------------|
+| `sender_id` | `horloger:{owner_id}` | Impersonates the job owner so Sentinelle ACL applies correctly |
+| `channel` | `"horloger"` | Virtual channel — not a real external adapter |
+| `session_id` | `horloger-{job_id}` | Stable per-job — preserves conversation context across firings |
+| `action` | `horloger.trigger` | Defined in `common/envelope_actions.py` as `ACTION_HORLOGER_TRIGGER` |
+
+**Pre-stamped context keys**:
+
+| Namespace | Key | Value |
+|-----------|-----|-------|
+| `context.portail` | `user_id` | `job.owner_id` — stable user identifier |
+| `context.portail` | `llm_profile` | Result of `get_default_llm_profile()` |
+| `context.aiguilleur` | `channel_profile` | `"default"` |
+| `context.aiguilleur` | `streaming` | `false` |
+| `context.aiguilleur` | `reply_to` | `job.channel` — target channel for the reply (e.g. `"discord"`, `"telegram"`) |
+
+---
+
 ### `relais:security`
 
 **Direction**: Portail → Sentinelle
@@ -710,6 +742,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | Stream | Consumer group(s) | Brick |
 |--------|------------------|-------|
 | `relais:messages:incoming` | `portail_group` | Portail |
+| `relais:messages:incoming:horloger` | `portail_group` | Portail (CRON triggers from Horloger) |
 | `relais:security` | `sentinelle_group` | Sentinelle |
 | `relais:tasks` | `atelier_group` | Atelier |
 | `relais:commands` | `commandant_group` | Commandant |
