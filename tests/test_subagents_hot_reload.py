@@ -18,6 +18,13 @@ import pytest
 import yaml
 
 
+@pytest.fixture(autouse=True)
+def _no_real_bundles(tmp_path: Path):
+    """Prevent bundle-tier scan from picking up real ~/.relais/bundles/ during unit tests."""
+    with patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_no_bundles_"):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -69,7 +76,7 @@ def _make_atelier_with_tmp_subagents(tmp_path: Path):
 
     fake_profiles = {"default": MagicMock(name="default_profile")}
     fake_mcp_servers = {}
-    fake_progress = MagicMock(name="progress_config")
+    fake_display = MagicMock(name="display_config")
 
     mock_saver_cls = MagicMock()
     mock_saver_cls.from_conn_string.return_value = MagicMock()
@@ -77,7 +84,7 @@ def _make_atelier_with_tmp_subagents(tmp_path: Path):
     with (
         patch("atelier.main.load_profiles", return_value=fake_profiles),
         patch("atelier.main.load_for_sdk", return_value=fake_mcp_servers),
-        patch("atelier.main.load_display_config", return_value=fake_progress),
+        patch("atelier.main.load_display_config", return_value=fake_display),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
         patch("atelier.main.resolve_storage_dir", return_value=tmp_path),
@@ -198,6 +205,7 @@ async def test_reload_config_picks_up_new_subagent_yaml(tmp_path: Path) -> None:
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
     ):
         result = await atelier.reload_config()
 
@@ -218,6 +226,7 @@ async def test_reload_config_preserves_registry_when_profiles_fail(tmp_path: Pat
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
     ):
         await atelier.reload_config()
 
@@ -247,6 +256,7 @@ def test_build_config_candidate_includes_subagent_registry(tmp_path: Path) -> No
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
     ):
         candidate = atelier._build_config_candidate()
 
@@ -265,6 +275,7 @@ def test_build_config_candidate_subagent_registry_is_subagent_registry_instance(
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.load_display_config", return_value=MagicMock()),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
     ):
         candidate = atelier._build_config_candidate()
 

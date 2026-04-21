@@ -674,3 +674,44 @@ def test_parse_patterns_accepts_tuple() -> None:
     from atelier.subagents import _parse_subagent_patterns
 
     assert _parse_subagent_patterns(("x", "y")) == ("x", "y")
+
+
+# ---------------------------------------------------------------------------
+# response_format validation (M1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_specs_for_user_response_format_without_type_is_dropped(
+    tmp_path: Path, caplog
+) -> None:
+    """response_format missing 'type' key must be dropped with WARNING, not forwarded."""
+    from atelier.subagents import SubagentRegistry
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    # response_format dict deliberately missing the 'type' key
+    _write_pack(
+        subagents_dir,
+        "fmt-agent",
+        extra={"response_format": {"schema": {"type": "object"}}},
+    )
+
+    tool_registry = _make_fake_tool_registry()
+
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        caplog.at_level(logging.WARNING),
+    ):
+        registry = SubagentRegistry.load(tool_registry)
+
+    specs = registry.specs_for_user({"allowed_subagents": ["*"]})
+
+    assert len(specs) == 1
+    # response_format must NOT be in the entry dict
+    assert "response_format" not in specs[0]
+    # A WARNING must be logged mentioning the subagent name
+    assert any(
+        "fmt-agent" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
