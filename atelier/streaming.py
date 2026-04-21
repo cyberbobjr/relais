@@ -7,6 +7,7 @@ Also provides content normalisation utilities and sentinel constants.
 
 from __future__ import annotations
 
+import json as _json
 from typing import Awaitable, Callable
 
 # Number of buffered characters that triggers an automatic flush to the
@@ -159,3 +160,89 @@ def _has_tool_use_block(raw: object) -> str | None:
     """
     names = _extract_block_type(raw, "tool_use")
     return names[0] if names else None
+
+
+class TaskArgsTracker:
+    """Accumulates streamed ``task`` tool-call argument tokens to extract the subagent name.
+
+    The DeepAgents ``task`` tool streams its JSON arguments token-by-token.
+    This class buffers those fragments, attempts to parse them incrementally,
+    and maintains a namespace-ID → subagent-name mapping across the lifetime
+    of a single ``_stream()`` call.
+
+    Attributes:
+        buf: Accumulated JSON fragment for the current ``task`` call.
+        name_logged: Whether the subagent name for the current call has been logged.
+        ns_to_name: Mapping from DeepAgents namespace ID to declared subagent name.
+    """
+
+    def __init__(self) -> None:
+        self.buf: str = ""
+        self.name_logged: bool = False
+        self.ns_to_name: dict[str, str] = {}
+
+    def reset(self) -> None:
+        """Reset the argument buffer and name-logged flag for a new ``task`` call.
+
+        The ``ns_to_name`` mapping is preserved — subagent names registered in
+        earlier task calls remain available for the rest of the stream.
+        """
+        self.buf = ""
+        self.name_logged = False
+
+    def accumulate(self, fragment: str) -> None:
+        """Append an argument fragment to the buffer.
+
+        Args:
+            fragment: A token string from a ``tool_call_chunk`` args field.
+        """
+        self.buf += fragment
+
+    def try_parse_name(self) -> str | None:
+        """Attempt to parse the subagent name from the current buffer.
+
+        Tries to JSON-decode the accumulated buffer and extract the ``name``
+        field (preferred) or the ``subagent_type`` field (fallback).
+
+        Returns:
+            The subagent name string if parseable and non-empty, otherwise ``None``.
+        """
+        if not self.buf:
+            return None
+        try:
+            parsed = _json.loads(self.buf)
+            name = parsed.get("name", "") or parsed.get("subagent_type", "")
+            return name if name else None
+        except Exception:
+            return None
+
+    def register_ns(self, ns_id: str, name: str) -> None:
+        """Store the resolved name for a DeepAgents namespace ID.
+
+        Args:
+            ns_id: The namespace identifier string from the stream chunk ``ns`` field.
+            name: The human-readable subagent name to associate with this namespace.
+        """
+        self.ns_to_name[ns_id] = name
+
+    def has_ns(self, ns_id: str) -> bool:
+        """Return True if a name has been registered for *ns_id*.
+
+        Args:
+            ns_id: The namespace identifier to check.
+
+        Returns:
+            True if a mapping exists, False otherwise.
+        """
+        return ns_id in self.ns_to_name
+
+    def get_name_for_ns(self, ns_id: str) -> str:
+        """Return the registered name for *ns_id*, falling back to *ns_id* itself.
+
+        Args:
+            ns_id: The namespace identifier to look up.
+
+        Returns:
+            The registered name, or *ns_id* if no mapping exists.
+        """
+        return self.ns_to_name.get(ns_id, ns_id)
