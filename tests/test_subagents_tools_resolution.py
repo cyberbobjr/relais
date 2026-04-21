@@ -527,3 +527,204 @@ def test_specs_for_user_omits_skills_key_when_empty(tmp_path: Path) -> None:
 
     assert len(specs) == 1
     assert "skills" not in specs[0]
+
+
+# ---------------------------------------------------------------------------
+# Dedicated resolver functions — unit tests (F-05)
+# Each of the 5 token forms must have its own function in subagents_resolver.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_inherit_tokens_returns_all_request_tools() -> None:
+    """_resolve_inherit_tokens returns every tool in request_tools."""
+    from atelier.subagents_resolver import _resolve_inherit_tokens
+
+    tool_a = _make_mock_tool("a")
+    tool_b = _make_mock_tool("b")
+    seen: set[str] = set()
+    result: list = []
+
+    _resolve_inherit_tokens([tool_a, tool_b], result, seen)
+
+    assert tool_a in result
+    assert tool_b in result
+    assert len(result) == 2
+
+
+@pytest.mark.unit
+def test_resolve_inherit_tokens_deduplicates() -> None:
+    """_resolve_inherit_tokens skips tools already in seen_names."""
+    from atelier.subagents_resolver import _resolve_inherit_tokens
+
+    tool = _make_mock_tool("dup")
+    seen: set[str] = {"dup"}  # already seen
+    result: list = []
+
+    _resolve_inherit_tokens([tool], result, seen)
+
+    assert result == []
+
+
+@pytest.mark.unit
+def test_resolve_local_token_found() -> None:
+    """_resolve_local_token resolves tool from local_tools dict."""
+    from atelier.subagents_resolver import _resolve_local_token
+
+    local_tool = _make_mock_tool("helper")
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    _resolve_local_token("helper", {"helper": local_tool}, "my-agent", result, failed, seen)
+
+    assert local_tool in result
+    assert failed == []
+
+
+@pytest.mark.unit
+def test_resolve_local_token_missing_logs_and_records_failure(caplog) -> None:
+    """_resolve_local_token logs WARNING and appends to failed_tokens when missing."""
+    from atelier.subagents_resolver import _resolve_local_token
+
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    with caplog.at_level(logging.WARNING):
+        _resolve_local_token("ghost", {}, "my-agent", result, failed, seen)
+
+    assert result == []
+    assert "local:ghost" in failed
+    assert any("ghost" in r.message or "my-agent" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+
+@pytest.mark.unit
+def test_resolve_mcp_token_filters_by_glob() -> None:
+    """_resolve_mcp_token filters request_tools by fnmatch pattern."""
+    from atelier.subagents_resolver import _resolve_mcp_token
+
+    fs_read = _make_mock_tool("fs_read")
+    fs_write = _make_mock_tool("fs_write")
+    git_log = _make_mock_tool("git_log")
+    result: list = []
+    seen: set[str] = set()
+
+    _resolve_mcp_token("fs_*", [fs_read, fs_write, git_log], result, seen)
+
+    assert fs_read in result
+    assert fs_write in result
+    assert git_log not in result
+
+
+@pytest.mark.unit
+def test_resolve_mcp_token_no_match_returns_empty() -> None:
+    """_resolve_mcp_token with no matching tools leaves result empty."""
+    from atelier.subagents_resolver import _resolve_mcp_token
+
+    tool = _make_mock_tool("unrelated")
+    result: list = []
+    seen: set[str] = set()
+
+    _resolve_mcp_token("no_match_*", [tool], result, seen)
+
+    assert result == []
+
+
+@pytest.mark.unit
+def test_resolve_module_token_imports_tools() -> None:
+    """_resolve_module_token imports tools from a module: path."""
+    from atelier.subagents_resolver import _resolve_module_token
+
+    fake_tool = _make_mock_tool("imported_tool")
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    with patch(
+        "atelier.subagents_resolver._load_tools_from_import",
+        return_value={"imported_tool": fake_tool},
+    ):
+        _resolve_module_token(
+            "atelier.tools.fake_module", "my-agent", result, failed, seen
+        )
+
+    assert fake_tool in result
+    assert failed == []
+
+
+@pytest.mark.unit
+def test_resolve_module_token_zero_tools_logs_and_records_failure(caplog) -> None:
+    """_resolve_module_token logs WARNING and appends to failed when no tools exported."""
+    from atelier.subagents_resolver import _resolve_module_token
+
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    with caplog.at_level(logging.WARNING):
+        with patch(
+            "atelier.subagents_resolver._load_tools_from_import",
+            return_value={},
+        ):
+            _resolve_module_token(
+                "atelier.tools.empty_module", "my-agent", result, failed, seen
+            )
+
+    assert result == []
+    assert "module:atelier.tools.empty_module" in failed
+    assert any("empty_module" in r.message or "my-agent" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+
+@pytest.mark.unit
+def test_resolve_static_token_from_registry() -> None:
+    """_resolve_static_token resolves tool via tool_registry.get()."""
+    from atelier.subagents_resolver import _resolve_static_token
+
+    static_tool = _make_mock_tool("read_config")
+    registry = _make_fake_tool_registry({"read_config": static_tool})
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    _resolve_static_token("read_config", registry, {}, "my-agent", result, failed, seen)
+
+    assert static_tool in result
+    assert failed == []
+
+
+@pytest.mark.unit
+def test_resolve_static_token_fallback_to_local_tools() -> None:
+    """_resolve_static_token falls back to local_tools when not in registry."""
+    from atelier.subagents_resolver import _resolve_static_token
+
+    local_tool = _make_mock_tool("local_only")
+    registry = _make_fake_tool_registry()  # empty
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    _resolve_static_token(
+        "local_only", registry, {"local_only": local_tool}, "my-agent", result, failed, seen
+    )
+
+    assert local_tool in result
+    assert failed == []
+
+
+@pytest.mark.unit
+def test_resolve_static_token_unknown_logs_and_records_failure(caplog) -> None:
+    """_resolve_static_token logs WARNING and appends to failed for unknown token."""
+    from atelier.subagents_resolver import _resolve_static_token
+
+    registry = _make_fake_tool_registry()  # empty
+    result: list = []
+    failed: list[str] = []
+    seen: set[str] = set()
+
+    with caplog.at_level(logging.WARNING):
+        _resolve_static_token("ghost_tool", registry, {}, "my-agent", result, failed, seen)
+
+    assert result == []
+    assert "ghost_tool" in failed
+    assert any("ghost_tool" in r.message or "my-agent" in r.message for r in caplog.records if r.levelno == logging.WARNING)

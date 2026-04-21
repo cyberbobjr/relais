@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import LLMResult
+
+
+class SubagentMetrics(NamedTuple):
+    """Captured metrics for a single subagent namespace.
+
+    Attributes:
+        messages: Ordered list of LLM input and output messages.
+        tool_calls: Total number of tool invocations within the namespace.
+        tool_errors: Number of tool invocations that returned an error.
+    """
+
+    messages: list[BaseMessage]
+    tool_calls: int
+    tool_errors: int
 
 
 def _normalize_ns(metadata: dict[str, Any] | None) -> str | None:
@@ -152,19 +166,17 @@ class SubagentMessageCapture(BaseCallbackHandler):
         if is_error:
             self._tool_errors_by_ns[ns] = self._tool_errors_by_ns.get(ns, 0) + 1
 
-    def get_subagent_data(
-        self, ns_id: str
-    ) -> tuple[list[BaseMessage], int, int]:
+    def get_subagent_data(self, ns_id: str) -> SubagentMetrics:
         """Return captured data for a given namespace.
 
         Args:
             ns_id: The normalized namespace string (dot-joined).
 
         Returns:
-            Tuple of (messages, tool_call_count, tool_error_count).
+            SubagentMetrics with messages, tool_calls, and tool_errors.
             All values are zero/empty if nothing was captured for this ns.
         """
         messages = list(self._messages_by_ns.get(ns_id, []))
-        tool_count = self._tool_counts_by_ns.get(ns_id, 0)
+        tool_calls = self._tool_counts_by_ns.get(ns_id, 0)
         tool_errors = self._tool_errors_by_ns.get(ns_id, 0)
-        return messages, tool_count, tool_errors
+        return SubagentMetrics(messages=messages, tool_calls=tool_calls, tool_errors=tool_errors)

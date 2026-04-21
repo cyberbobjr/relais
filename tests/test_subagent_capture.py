@@ -6,6 +6,7 @@ Tests validate (TDD RED phase):
 3. Tool errors are counted when ToolMessage.status == "error"
 4. Tool errors are counted when output is an error string
 5. Successful tool calls increment count but not error count
+6. get_subagent_data() returns a SubagentMetrics NamedTuple with named attributes
 """
 
 from __future__ import annotations
@@ -168,4 +169,35 @@ def test_no_error_on_successful_tool() -> None:
 
     _, tool_count, tool_errors = capture.get_subagent_data("ns4")
     assert tool_count == 1
+    assert tool_errors == 0
+
+
+@pytest.mark.unit
+def test_get_subagent_data_returns_named_tuple() -> None:
+    """get_subagent_data() returns a SubagentMetrics NamedTuple with named attributes."""
+    from atelier.subagent_capture import SubagentMessageCapture, SubagentMetrics
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    capture = SubagentMessageCapture()
+    model_rid = _run_id()
+    capture.on_chat_model_start(
+        serialized={},
+        messages=[[HumanMessage(content="ping")]],
+        run_id=model_rid,
+        metadata={"langgraph_namespace": ["ns5"]},
+    )
+    ai_msg = AIMessage(content="pong")
+    gen = ChatGeneration(message=ai_msg)
+    capture.on_llm_end(LLMResult(generations=[[gen]]), run_id=model_rid)
+
+    result = capture.get_subagent_data("ns5")
+
+    assert isinstance(result, SubagentMetrics)
+    assert len(result.messages) == 2
+    assert result.tool_calls == 0
+    assert result.tool_errors == 0
+    # Also verify positional unpack still works (NamedTuple is a tuple subclass)
+    messages, tool_calls, tool_errors = result
+    assert messages == result.messages
+    assert tool_calls == 0
     assert tool_errors == 0

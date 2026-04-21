@@ -145,6 +145,10 @@ def isolated_search_path(
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [config_root]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", native_root),
+        patch(
+            "atelier.subagents.resolve_bundles_dir",
+            return_value=config_root / "_nonexistent_bundles_",
+        ),
     ):
         yield
 

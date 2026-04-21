@@ -2,15 +2,6 @@
 
 Replaces SDKExecutor with a LangChain/DeepAgents agent that supports
 native streaming (token-by-token) and multi-provider models.
-
-Helper modules extracted to keep this file under 800 lines (all symbols
-re-exported here for backward compatibility):
-- ``atelier.profile_model`` — ``_resolve_profile_model``
-- ``atelier.diagnostic_trace`` — ``format_diagnostic_trace``, ``_render_diagnostic_trace``
-- ``atelier.prompts`` — system-prompt constants and builders
-- ``atelier.transient_errors`` — ``_is_transient_provider_error``
-- ``atelier.streaming`` — ``StreamBuffer``, ``TaskArgsTracker``, ``ChunkPayload``, ``decode_chunk``
-- ``atelier.stream_loop`` — ``StreamLoopState``, ``compute_reply_text``, ``build_subagent_traces``, ``handle_updates_chunk``, ``handle_tool_call_chunks``, ``handle_tool_result``
 """
 
 from __future__ import annotations
@@ -18,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Awaitable, cast
@@ -28,7 +18,6 @@ from deepagents import SubAgent
 from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 from langchain_core.runnables import RunnableConfig
-from langchain.chat_models import BaseChatModel, init_chat_model
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -56,11 +45,7 @@ from atelier.prompts import (
     _build_execution_context,
     _enrich_system_prompt,
 )
-from atelier.transient_errors import (
-    _TRANSIENT_ERROR_NAMES,
-    _TRANSIENT_VALUE_ERROR_PATTERNS,
-    _is_transient_provider_error,
-)
+from atelier.transient_errors import _is_transient_provider_error
 from atelier.profile_model import _resolve_profile_model
 from atelier.stream_loop import (
     StreamLoopState,
@@ -98,7 +83,6 @@ __all__ = [
 ]
 from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, AiguilleurCtx, PortailCtx
 from common.envelope import Envelope
-from atelier.error_synthesizer import extract_tool_errors
 from atelier.subagent_capture import SubagentMessageCapture
 
 logger = logging.getLogger(__name__)
@@ -145,18 +129,6 @@ class AgentResult:
     tool_call_count: int
     tool_error_count: int
     subagent_traces: tuple[SubagentTrace, ...]
-
-
-# REPLY_PLACEHOLDER, _EXECUTE_FAILURE_MARKER, _normalise_content
-# are imported from atelier.streaming above.
-
-# _TRANSIENT_ERROR_NAMES, _TRANSIENT_VALUE_ERROR_PATTERNS, _is_transient_provider_error
-# are imported from atelier.transient_errors above.
-
-# _resolve_profile_model is imported from atelier.profile_model above.
-
-# _DIAGNOSTIC_MAX_CHARS, format_diagnostic_trace, _render_diagnostic_trace
-# are imported from atelier.diagnostic_trace above.
 
 
 class AgentExecutor:
@@ -225,13 +197,11 @@ class AgentExecutor:
                 "/memories/": memories_backend,
             },
         )
-        # Build skill map: subagent name → list of skill basenames (for trace enrichment)
         self._subagent_skill_map: dict[str, list[str]] = {
             spec["name"]: [Path(s).name for s in spec.get("skills", [])]
             for spec in (subagents or [])
             if spec.get("name")
         }
-        # Convert dict subagent specs to SubAgent objects
         compiled_subagents: list[SubAgent] = [
             SubAgent(**spec) for spec in (subagents or [])
         ]
@@ -589,7 +559,3 @@ class AgentExecutor:
             serialize_messages_fn=serialize_messages,
         )
         return reply_text, guard.total_calls, guard.total_errors, subagent_traces
-
-
-# _build_execution_context and _enrich_system_prompt are imported from atelier.prompts above.
-# emit_text and emit_thinking are imported from atelier.stream_loop above.

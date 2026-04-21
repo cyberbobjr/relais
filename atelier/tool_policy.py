@@ -15,10 +15,10 @@ collections rather than raising exceptions, because they operate on
 untrusted data from envelope metadata stamped upstream by Portail.
 """
 
-import fnmatch
 from pathlib import Path
 
 from common.config_loader import resolve_bundles_dir
+from common.pattern_matcher import matches, parse_patterns
 
 
 class ToolPolicy:
@@ -54,12 +54,12 @@ class ToolPolicy:
         Returns:
             A tuple of strings; never None.
         """
-        return self._parse_policy(metadata_value)
+        return self._load_policy_file(metadata_value)
 
     def resolve_skills(self, metadata_value: object) -> list[str]:
         """Parse metadata and expand skill-directory specs into absolute paths.
 
-        Combines ``_parse_policy`` and ``_resolve_paths`` in a single call.
+        Combines ``_load_policy_file`` and ``_resolve_paths`` in a single call.
         A ``"*"`` entry expands to all immediate subdirectories of the base
         dir; other entries are resolved relative to the base dir.
         Non-existent paths and path-traversal attempts are silently dropped.
@@ -75,7 +75,7 @@ class ToolPolicy:
             List of absolute path strings for directories that exist on disk,
             including bundle skill directories deduplicated by path.
         """
-        dirs = self._parse_policy(metadata_value)
+        dirs = self._load_policy_file(metadata_value)
         local = self._resolve_paths(dirs)
         seen: set[str] = set(local)
         result = list(local)
@@ -99,7 +99,7 @@ class ToolPolicy:
         Returns:
             Filtered list of tools whose names match at least one pattern.
         """
-        patterns = self._parse_policy(metadata_value)
+        patterns = self._load_policy_file(metadata_value)
         return self._filter_tools(tools, patterns)
 
     # ------------------------------------------------------------------
@@ -107,18 +107,24 @@ class ToolPolicy:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_policy(raw: object) -> tuple[str, ...]:
+    def _load_policy_file(raw: object) -> tuple[str, ...]:
         """Normalise a raw metadata value into a tuple of strings.
 
+        Delegates to ``common.pattern_matcher.parse_patterns`` for
+        consistent fail-closed semantics across the pipeline.
+
+        Note: despite being a static method, this acts as the boundary
+        where untrusted envelope metadata is sanitised; callers should
+        treat the result as opaque and immutable.
+
         Args:
-            raw: Any value from ``envelope.context[namespace]``.
+            raw: Any value from ``envelope.context[namespace]`` — list,
+                tuple, None, or any other unexpected type.
 
         Returns:
-            Tuple of strings; empty tuple on any unexpected type.
+            Tuple of strings; empty tuple on any unexpected or unsupported type.
         """
-        if isinstance(raw, (list, tuple)):
-            return tuple(str(v) for v in raw)
-        return ()
+        return parse_patterns(raw)  # type: ignore[arg-type]
 
     def _resolve_paths(self, skills_dirs: tuple[str, ...]) -> list[str]:
         """Expand skill directory specs into existing absolute path strings.
@@ -192,4 +198,4 @@ class ToolPolicy:
         """
         if not patterns:
             return []
-        return [t for t in tools if any(fnmatch.fnmatch(t.name, p) for p in patterns)]
+        return [t for t in tools if matches(t.name, patterns)]

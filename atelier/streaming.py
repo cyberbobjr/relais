@@ -3,6 +3,18 @@
 Provides the token-buffering class and content-extraction helpers used by
 ``AgentExecutor._stream()`` to handle LangChain / DeepAgents streaming output.
 Also provides content normalisation utilities and sentinel constants.
+
+Classes:
+    StreamBuffer: Buffers streamed tokens and flushes them to a callback.
+    TaskArgsTracker: Accumulates ``task`` tool-call argument fragments to
+        extract the subagent name from streamed JSON, maintaining a namespace-
+        ID to subagent-name mapping across a single ``_stream()`` call.
+    ChunkPayload: Parsed and validated DeepAgents astream v2 chunk (NamedTuple).
+
+Functions:
+    decode_chunk: Validate and decode a raw DeepAgents astream v2 chunk dict;
+        returns ``None`` for non-conforming input so callers can skip unknown
+        shapes with a simple ``if payload is None: continue`` guard.
 """
 
 from __future__ import annotations

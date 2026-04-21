@@ -146,9 +146,6 @@ def load_mcp_servers(
     for entry in mcp_section.get("contextual") or []:
         if not entry.get("enabled", False):
             continue
-        # When profile_name is None: include all enabled contextual servers.
-        # When profile_name is set: include only servers whose profiles list
-        # contains the requested profile.
         profiles: list[str] = entry.get("profiles") or []
         if profile_name is not None and profile_name not in profiles:
             continue

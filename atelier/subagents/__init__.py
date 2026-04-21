@@ -53,7 +53,6 @@ Validation rules (fail-closed per directory — ERROR log + skip on violation):
 from __future__ import annotations
 
 import dataclasses
-import fnmatch
 import logging
 import re
 from dataclasses import dataclass, field
@@ -63,10 +62,17 @@ from typing import Any
 import yaml
 
 from common.config_loader import CONFIG_SEARCH_PATH, resolve_bundles_dir
+from common.pattern_matcher import matches as _matches_patterns
+from common.pattern_matcher import parse_patterns as _parse_subagent_patterns
 from atelier.subagents_resolver import (  # noqa: F401 — re-exported for test imports
     _ALLOWED_MODULE_PREFIXES,
     _load_tools_from_import,
     _load_tools_from_module,
+    _resolve_inherit_tokens,
+    _resolve_local_token,
+    _resolve_mcp_token,
+    _resolve_module_token,
+    _resolve_static_token,
     _resolve_tool_tokens,
     _resolve_skill_tokens,
     validate_module_token,
@@ -129,35 +135,6 @@ class SubagentSpec:
     response_format: dict | None = field(default=None)
     degraded_tokens: tuple[str, ...] = field(default=())
 
-
-def _parse_subagent_patterns(raw: object) -> tuple[str, ...]:
-    """Normalise an ``allowed_subagents`` value into a tuple of strings.
-
-    Only ``list`` or ``tuple`` inputs are accepted; anything else (None,
-    str, int, dict) returns an empty tuple (fail-closed).
-
-    Args:
-        raw: The raw value from ``user_record.get("allowed_subagents")``.
-
-    Returns:
-        A tuple of strings suitable for fnmatch filtering.
-    """
-    if isinstance(raw, (list, tuple)):
-        return tuple(str(item) for item in raw)
-    return ()
-
-
-def _matches_patterns(name: str, patterns: tuple[str, ...]) -> bool:
-    """Return True if *name* matches any fnmatch pattern in *patterns*.
-
-    Args:
-        name: The subagent name to test.
-        patterns: Tuple of fnmatch-style glob patterns.
-
-    Returns:
-        True if at least one pattern matches.
-    """
-    return any(fnmatch.fnmatch(name, p) for p in patterns)
 
 
 def _load_yaml_file(path: Path) -> dict | None:
@@ -307,6 +284,91 @@ def _validate_and_build_spec(data: dict, yaml_path: Path, pack_dir: Path) -> Sub
 
 
 
+def _load_subagent_tier(
+    tier_name: str,
+    pack_dirs: list[Path],
+    seen_names: set[str],
+) -> list[tuple[SubagentSpec, dict[str, Any], dict[str, str]]]:
+    """Scan a list of pack directories and load all valid subagent specs.
+
+    Shared scan/load/validate/register logic for all three tiers (user config,
+    native, bundle).  Each tier calls this function with its resolved list of
+    pack directories; the ``seen_names`` set is updated in-place so that
+    higher-priority tiers already registered prevent lower-priority ones from
+    overriding them.
+
+    Args:
+        tier_name: Human-readable tier label used in log messages (e.g.
+            ``"user"``, ``"native"``, ``"bundle"``).  The empty string ``""``
+            means the primary user-config tier (log messages omit the prefix).
+        pack_dirs: Sorted list of candidate pack directories to inspect.  Each
+            entry must be a directory; those without a ``subagent.yaml`` are
+            silently skipped at DEBUG level.
+        seen_names: Mutable set of subagent names already registered by
+            higher-priority tiers.  Updated in-place for every accepted spec.
+
+    Returns:
+        A list of ``(spec, local_tools, local_skills)`` triples for every
+        pack that passed validation and was not shadowed by a higher-priority
+        tier.  The caller is responsible for merging these into the shared
+        ``specs``, ``local_tools``, and ``local_skills`` accumulators and
+        emitting any cross-tier warning (e.g. F-17 override warnings).
+    """
+    prefix = f"{tier_name} " if tier_name else ""
+    results: list[tuple[SubagentSpec, dict[str, Any], dict[str, str]]] = []
+
+    for pack_dir in pack_dirs:
+        yaml_path = pack_dir / "subagent.yaml"
+        if not yaml_path.is_file():
+            logger.debug(
+                "SubagentRegistry: %s has no subagent.yaml — skipping",
+                pack_dir,
+            )
+            continue
+
+        data = _load_yaml_file(yaml_path)
+        if data is None:
+            continue
+
+        spec = _validate_and_build_spec(data, yaml_path, pack_dir)
+        if spec is None:
+            continue
+
+        if spec.name in seen_names:
+            logger.debug(
+                "SubagentRegistry: skipping %s%s — '%s' already loaded "
+                "from a higher-priority path",
+                prefix, pack_dir, spec.name,
+            )
+            continue
+
+        tools = _load_local_tools(pack_dir, spec.name)
+
+        skills: dict[str, str] = {}
+        skills_dir = pack_dir / "skills"
+        if skills_dir.is_dir():
+            for skill_dir in sorted(
+                p for p in skills_dir.iterdir() if p.is_dir()
+            ):
+                skills[skill_dir.name] = str(skill_dir.resolve())
+                logger.debug(
+                    "SubagentRegistry: subagent '%s' — found local skill '%s' at %s",
+                    spec.name, skill_dir.name, skill_dir,
+                )
+
+        seen_names.add(spec.name)
+        results.append((spec, tools, skills))
+
+        label = f"{tier_name} subagent" if tier_name else "subagent"
+        logger.info(
+            "SubagentRegistry: loaded %s '%s' from %s "
+            "(%d local tool(s), %d local skill(s))",
+            label, spec.name, pack_dir, len(tools), len(skills),
+        )
+
+    return results
+
+
 def _load_local_tools(pack_dir: Path, spec_name: str) -> dict[str, Any]:
     """Discover and load all tools from a subagent's ``tools/`` directory.
 
@@ -409,166 +471,65 @@ class SubagentRegistry:
         local_tools: dict[str, dict[str, Any]] = {}
         local_skills: dict[str, dict[str, str]] = {}
 
+        # --- Tier 1: user config cascade (user > system > project) ---
+        user_pack_dirs: list[Path] = []
         for base in CONFIG_SEARCH_PATH:
             subagents_dir = base / "config" / "atelier" / "subagents"
-            if not subagents_dir.is_dir():
-                continue
-
-            for pack_dir in sorted(p for p in subagents_dir.iterdir() if p.is_dir()):
-                yaml_path = pack_dir / "subagent.yaml"
-                if not yaml_path.is_file():
-                    logger.debug(
-                        "SubagentRegistry: %s has no subagent.yaml — skipping",
-                        pack_dir,
-                    )
-                    continue
-
-                data = _load_yaml_file(yaml_path)
-                if data is None:
-                    continue
-
-                spec = _validate_and_build_spec(data, yaml_path, pack_dir)
-                if spec is None:
-                    continue
-
-                if spec.name in seen_names:
-                    logger.debug(
-                        "SubagentRegistry: skipping %s — '%s' already loaded "
-                        "from a higher-priority path",
-                        pack_dir, spec.name,
-                    )
-                    continue
-
-                # Load tools from tools/*.py
-                tools = _load_local_tools(pack_dir, spec.name)
-
-                # Resolve skills from skills/*/
-                skills: dict[str, str] = {}
-                skills_dir = pack_dir / "skills"
-                if skills_dir.is_dir():
-                    for skill_dir in sorted(
-                        p for p in skills_dir.iterdir() if p.is_dir()
-                    ):
-                        skills[skill_dir.name] = str(skill_dir.resolve())
-                        logger.debug(
-                            "SubagentRegistry: subagent '%s' — found local skill '%s' at %s",
-                            spec.name, skill_dir.name, skill_dir,
-                        )
-
-                seen_names.add(spec.name)
-                specs.append(spec)
-                local_tools[spec.name] = tools
-                local_skills[spec.name] = skills
-
-                logger.info(
-                    "SubagentRegistry: loaded subagent '%s' from %s "
-                    "(%d local tool(s), %d local skill(s))",
-                    spec.name, pack_dir, len(tools), len(skills),
+            if subagents_dir.is_dir():
+                user_pack_dirs.extend(
+                    sorted(p for p in subagents_dir.iterdir() if p.is_dir())
                 )
+        for spec, tools, skills in _load_subagent_tier("", user_pack_dirs, seen_names):
+            specs.append(spec)
+            local_tools[spec.name] = tools
+            local_skills[spec.name] = skills
 
         # Scan native subagents (second tier — user packs already take priority)
+        native_pack_dirs: list[Path] = []
         if NATIVE_SUBAGENTS_PATH.is_dir():
-            for pack_dir in sorted(p for p in NATIVE_SUBAGENTS_PATH.iterdir() if p.is_dir()):
-                yaml_path = pack_dir / "subagent.yaml"
-                if not yaml_path.is_file():
-                    logger.debug(
-                        "SubagentRegistry: %s has no subagent.yaml — skipping",
-                        pack_dir,
-                    )
-                    continue
+            native_pack_dirs = sorted(
+                p for p in NATIVE_SUBAGENTS_PATH.iterdir() if p.is_dir()
+            )
+        for spec, tools, skills in _load_subagent_tier("native", native_pack_dirs, seen_names):
+            specs.append(spec)
+            local_tools[spec.name] = tools
+            local_skills[spec.name] = skills
 
-                data = _load_yaml_file(yaml_path)
-                if data is None:
-                    continue
-
-                spec = _validate_and_build_spec(data, yaml_path, pack_dir)
-                if spec is None:
-                    continue
-
-                if spec.name in seen_names:
-                    logger.debug(
-                        "SubagentRegistry: skipping native %s — '%s' already loaded "
-                        "from a higher-priority path",
-                        pack_dir, spec.name,
-                    )
-                    continue
-
-                tools = _load_local_tools(pack_dir, spec.name)
-
-                skills: dict[str, str] = {}
-                skills_dir = pack_dir / "skills"
-                if skills_dir.is_dir():
-                    for skill_dir in sorted(
-                        p for p in skills_dir.iterdir() if p.is_dir()
-                    ):
-                        skills[skill_dir.name] = str(skill_dir.resolve())
-
-                seen_names.add(spec.name)
-                specs.append(spec)
-                local_tools[spec.name] = tools
-                local_skills[spec.name] = skills
-
-                logger.info(
-                    "SubagentRegistry: loaded native subagent '%s' from %s "
-                    "(%d local tool(s), %d local skill(s))",
-                    spec.name, pack_dir, len(tools), len(skills),
-                )
+        # F-17: snapshot registered names before bundle tier to detect overrides
+        names_before_bundles = frozenset(seen_names)
 
         # Scan bundle subagents (third tier — user and native packs take priority)
+        bundle_pack_dirs: list[Path] = []
         bundles_dir = resolve_bundles_dir()
         if bundles_dir.is_dir():
             for bundle_dir in sorted(p for p in bundles_dir.iterdir() if p.is_dir()):
                 bundle_subagents_dir = bundle_dir / "subagents"
-                if not bundle_subagents_dir.is_dir():
-                    continue
-
-                for pack_dir in sorted(
-                    p for p in bundle_subagents_dir.iterdir() if p.is_dir()
-                ):
-                    yaml_path = pack_dir / "subagent.yaml"
-                    if not yaml_path.is_file():
-                        logger.debug(
-                            "SubagentRegistry: %s has no subagent.yaml — skipping",
-                            pack_dir,
-                        )
-                        continue
-
-                    data = _load_yaml_file(yaml_path)
-                    if data is None:
-                        continue
-
-                    spec = _validate_and_build_spec(data, yaml_path, pack_dir)
-                    if spec is None:
-                        continue
-
-                    if spec.name in seen_names:
-                        logger.debug(
-                            "SubagentRegistry: skipping bundle %s — '%s' already loaded "
-                            "from a higher-priority path",
-                            pack_dir, spec.name,
-                        )
-                        continue
-
-                    tools = _load_local_tools(pack_dir, spec.name)
-
-                    skills: dict[str, str] = {}
-                    skills_dir = pack_dir / "skills"
-                    if skills_dir.is_dir():
-                        for skill_dir in sorted(
-                            p for p in skills_dir.iterdir() if p.is_dir()
-                        ):
-                            skills[skill_dir.name] = str(skill_dir.resolve())
-
-                    seen_names.add(spec.name)
-                    specs.append(spec)
-                    local_tools[spec.name] = tools
-                    local_skills[spec.name] = skills
-
-                    logger.info(
-                        "SubagentRegistry: loaded bundle subagent '%s' from %s "
-                        "(%d local tool(s), %d local skill(s))",
-                        spec.name, pack_dir, len(tools), len(skills),
+                if bundle_subagents_dir.is_dir():
+                    bundle_pack_dirs.extend(
+                        sorted(p for p in bundle_subagents_dir.iterdir() if p.is_dir())
                     )
+
+        # F-17: warn for every bundle subagent shadowed by a higher-priority tier
+        for pack_dir in bundle_pack_dirs:
+            yaml_path = pack_dir / "subagent.yaml"
+            if not yaml_path.is_file():
+                continue
+            data = _load_yaml_file(yaml_path)
+            if data is None or not isinstance(data.get("name"), str):
+                continue
+            bundle_name = data["name"].strip()
+            if bundle_name in names_before_bundles:
+                logger.warning(
+                    "SubagentRegistry: subagent '%s' from bundle at %s is shadowed "
+                    "by a higher-priority user or native subagent with the same name",
+                    bundle_name,
+                    pack_dir,
+                )
+
+        for spec, tools, skills in _load_subagent_tier("bundle", bundle_pack_dirs, seen_names):
+            specs.append(spec)
+            local_tools[spec.name] = tools
+            local_skills[spec.name] = skills
 
         logger.info("SubagentRegistry: %d subagent(s) loaded", len(specs))
         registry = cls(

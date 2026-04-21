@@ -1,14 +1,17 @@
 """Custom exceptions and error-tracking utilities for the Atelier brick.
 
-Provides ``AgentExecutionError``, ``ExhaustedRetriesError``, and
-``ToolErrorGuard`` — the three error-related types previously defined
-inline in ``atelier/agent_executor.py``.  They are extracted here so that
+Provides ``AgentExecutionError``, ``ExhaustedRetriesError``, ``ToolErrorGuard``,
+and ``DiagnosticTrace`` — the error-related types previously defined inline in
+``atelier/agent_executor.py``.  They are extracted here so that
 ``agent_executor.py`` stays below the 800-line file size limit while all
 existing import sites (``from atelier.agent_executor import ...``) continue
 to work via re-exports in that module.
 """
 
 from __future__ import annotations
+
+import dataclasses
+from dataclasses import dataclass
 
 
 class AgentExecutionError(Exception):
@@ -50,6 +53,33 @@ class ExhaustedRetriesError(AgentExecutionError):
     """
 
 
+@dataclass
+class DiagnosticTrace:
+    """Structured diagnostic summary produced by ``format_diagnostic_trace()``.
+
+    Captures the key counters and identifiers from a failed agent turn so
+    callers can either format a human-readable string (``str(trace)``) or
+    access individual fields for structured logging / error synthesis.
+
+    Attributes:
+        messages_count: Total number of serialised messages in the turn.
+        tool_count: Total number of tool invocations during the turn.
+        tool_errors: Number of tool invocations that returned errors.
+        last_tool: Name of the last tool that was called, or ``None``.
+        last_error: Short preview of the last tool error content, or ``None``.
+        tool_error_details: Extracted tool-error entries from the turn, each a
+            dict with ``tool_name`` and ``content_preview`` keys.  Stored here
+            so callers do not need to re-iterate ``messages_raw``.
+    """
+
+    messages_count: int
+    tool_count: int
+    tool_errors: int
+    last_tool: str | None
+    last_error: str | None
+    tool_error_details: tuple[dict, ...] = dataclasses.field(default_factory=tuple)
+
+
 class ToolErrorGuard:
     """Tracks consecutive and total tool errors to abort runaway loops.
 
@@ -86,8 +116,69 @@ class ToolErrorGuard:
         """Total number of tool error invocations recorded."""
         return self._total_errors
 
+    def _check_total_limit(self, tool_name: str) -> None:
+        """Raise ``AgentExecutionError`` if the total error limit has been reached.
+
+        Compares the current ``_total_errors`` counter against ``_max_total``.
+        Must be called *after* ``_total_errors`` has been incremented for the
+        current invocation.
+
+        Args:
+            tool_name: The name of the tool that triggered the error
+                (included in the error message for diagnostics).
+
+        Raises:
+            AgentExecutionError: When ``_total_errors >= _max_total``.
+        """
+        if self._total_errors >= self._max_total:
+            raise AgentExecutionError(
+                f"Aborting: {self._total_errors} total tool errors exceeded limit. "
+                f"Last tool: '{tool_name}'",
+                tool_call_count=self._total_calls,
+                tool_error_count=self._total_errors,
+            )
+
+    def _check_consecutive_limit(self, tool_name: str) -> None:
+        """Raise ``AgentExecutionError`` if the consecutive error limit has been reached.
+
+        Unnamed tools (``tool_name == "?"``) are silently skipped to avoid
+        false positives when different tools all lack a name attribute.
+
+        Updates the consecutive tracking state (``_consecutive_name`` and
+        ``_consecutive_count``) as a side effect before checking the limit.
+        Must be called *after* ``_check_total_limit`` so that total-limit
+        errors take precedence when both limits are hit simultaneously.
+
+        Args:
+            tool_name: The name of the tool that triggered the error.
+
+        Raises:
+            AgentExecutionError: When the same named tool has errored
+                ``_max_consecutive`` times in a row.
+        """
+        if tool_name == "?":
+            return
+        if tool_name == self._consecutive_name:
+            self._consecutive_count += 1
+        else:
+            self._consecutive_name = tool_name
+            self._consecutive_count = 1
+        if self._consecutive_count >= self._max_consecutive:
+            raise AgentExecutionError(
+                f"Tool '{tool_name}' errored {self._consecutive_count} "
+                f"consecutive times — aborting to prevent infinite loop.",
+                tool_call_count=self._total_calls,
+                tool_error_count=self._total_errors,
+            )
+
     def record(self, tool_name: str, is_error: bool) -> None:
         """Record the result of a tool invocation and raise if limits exceeded.
+
+        Orchestrates the two limit checks in a defined order:
+        1. ``_check_total_limit`` — fires first when the global error budget is
+           exhausted, regardless of which tool caused the errors.
+        2. ``_check_consecutive_limit`` — fires when the same named tool keeps
+           failing in a row (skipped for unnamed ``"?"`` tools).
 
         Unnamed tools (``tool_name == "?"``) are excluded from the consecutive
         error check to avoid false positives when different tools all lack a
@@ -107,25 +198,5 @@ class ToolErrorGuard:
             return
 
         self._total_errors += 1
-        if self._total_errors >= self._max_total:
-            raise AgentExecutionError(
-                f"Aborting: {self._total_errors} total tool errors exceeded limit. "
-                f"Last tool: '{tool_name}'",
-                tool_call_count=self._total_calls,
-                tool_error_count=self._total_errors,
-            )
-
-        named_tool = tool_name if tool_name != "?" else None
-        if named_tool is not None:
-            if named_tool == self._consecutive_name:
-                self._consecutive_count += 1
-            else:
-                self._consecutive_name = named_tool
-                self._consecutive_count = 1
-            if self._consecutive_count >= self._max_consecutive:
-                raise AgentExecutionError(
-                    f"Tool '{tool_name}' errored {self._consecutive_count} "
-                    f"consecutive times — aborting to prevent infinite loop.",
-                    tool_call_count=self._total_calls,
-                    tool_error_count=self._total_errors,
-                )
+        self._check_total_limit(tool_name)
+        self._check_consecutive_limit(tool_name)

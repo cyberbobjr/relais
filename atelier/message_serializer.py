@@ -14,13 +14,17 @@ Supported message types:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
-if TYPE_CHECKING:
-    from langchain_core.messages import BaseMessage
 
-
-def serialize_messages(messages: list["BaseMessage"]) -> list[dict]:
+def serialize_messages(messages: list[BaseMessage]) -> list[dict]:
     """Convert a list of LangChain messages to JSON-serializable dicts.
 
     Each dict contains at minimum a ``role`` and ``content`` key.
@@ -36,23 +40,22 @@ def serialize_messages(messages: list["BaseMessage"]) -> list[dict]:
     """
     result: list[dict] = []
     for msg in messages:
-        msg_type = type(msg).__name__
         content = msg.content
 
-        if msg_type in ("HumanMessage",):
+        if isinstance(msg, HumanMessage):
             result.append({"role": "human", "content": content})
 
-        elif msg_type in ("AIMessage", "AIMessageChunk"):
+        elif isinstance(msg, (AIMessage, AIMessageChunk)):
             entry: dict = {"role": "ai", "content": content}
             tool_calls = getattr(msg, "tool_calls", None)
             if tool_calls:
                 entry["tool_calls"] = list(tool_calls)
             result.append(entry)
 
-        elif msg_type == "SystemMessage":
+        elif isinstance(msg, SystemMessage):
             result.append({"role": "system", "content": content})
 
-        elif msg_type == "ToolMessage":
+        elif isinstance(msg, ToolMessage):
             result.append({
                 "role": "tool",
                 "content": content,
@@ -62,12 +65,12 @@ def serialize_messages(messages: list["BaseMessage"]) -> list[dict]:
 
         else:
             # Fallback: store with the raw type name so it is not silently lost
-            result.append({"role": msg_type.lower(), "content": content})
+            result.append({"role": type(msg).__name__.lower(), "content": content})
 
     return result
 
 
-def deserialize_messages(data: list[dict]) -> list["BaseMessage"]:
+def deserialize_messages(data: list[dict]) -> list[BaseMessage]:
     """Convert a list of role/content dicts back to LangChain message objects.
 
     Reconstructs the exact LangChain type from the ``role`` field:
@@ -86,13 +89,6 @@ def deserialize_messages(data: list[dict]) -> list["BaseMessage"]:
         ValueError: If a dict contains an unknown ``role`` value that cannot
             be mapped to a LangChain message type.
     """
-    from langchain_core.messages import (
-        AIMessage,
-        HumanMessage,
-        SystemMessage,
-        ToolMessage,
-    )
-
     result: list[BaseMessage] = []
     for entry in data:
         role = entry.get("role", "")

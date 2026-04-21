@@ -22,6 +22,7 @@ from common.contexts import CTX_FORGERON, CTX_PORTAIL
 from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_TASK
 from atelier.agent_executor import AgentResult
+from atelier.soul_assembler import AssemblyResult
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +128,7 @@ def _common_patches(atelier, redis_conn, envelope, mock_executor_instance):
 
                 with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                     with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                        with patch("atelier.main.assemble_system_prompt", return_value="soul"):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 yield MockExecutor
 

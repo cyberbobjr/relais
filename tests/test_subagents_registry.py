@@ -22,6 +22,13 @@ import pytest
 import yaml
 
 
+@pytest.fixture(autouse=True)
+def _no_real_bundles(tmp_path: Path):
+    """Prevent bundle-tier scan from picking up real ~/.relais/bundles/ during unit tests."""
+    with patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_no_bundles_"):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -659,11 +666,11 @@ def test_parse_patterns_accepts_list() -> None:
 
 @pytest.mark.unit
 def test_parse_patterns_rejects_non_list() -> None:
-    """_parse_subagent_patterns returns () for non-list/tuple inputs."""
+    """_parse_subagent_patterns returns () for non-string/list/tuple inputs."""
     from atelier.subagents import _parse_subagent_patterns
 
     assert _parse_subagent_patterns(None) == ()
-    assert _parse_subagent_patterns("*") == ()
+    assert _parse_subagent_patterns("*") == ("*",)  # bare string is a valid single pattern
     assert _parse_subagent_patterns(42) == ()
     assert _parse_subagent_patterns({}) == ()
 
@@ -715,3 +722,113 @@ def test_specs_for_user_response_format_without_type_is_dropped(
         "fmt-agent" in r.message and r.levelno == logging.WARNING
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# F-04 — _load_subagent_tier helper (extracted shared logic)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_subagent_tier_returns_specs_for_valid_packs(tmp_path: Path) -> None:
+    """_load_subagent_tier returns one triple per valid pack directory."""
+    from atelier.subagents import _load_subagent_tier
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    _write_pack(subagents_dir, "tier-agent")
+
+    pack_dirs = sorted(p for p in subagents_dir.iterdir() if p.is_dir())
+    seen: set[str] = set()
+    results = _load_subagent_tier("", pack_dirs, seen)
+
+    assert len(results) == 1
+    spec, tools, skills = results[0]
+    assert spec.name == "tier-agent"
+    assert isinstance(tools, dict)
+    assert isinstance(skills, dict)
+    assert "tier-agent" in seen
+
+
+@pytest.mark.unit
+def test_load_subagent_tier_skips_already_seen(tmp_path: Path) -> None:
+    """_load_subagent_tier skips packs whose name is already in seen_names."""
+    from atelier.subagents import _load_subagent_tier
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    _write_pack(subagents_dir, "existing-agent")
+
+    pack_dirs = sorted(p for p in subagents_dir.iterdir() if p.is_dir())
+    seen: set[str] = {"existing-agent"}  # pre-populated — simulates higher tier
+    results = _load_subagent_tier("native", pack_dirs, seen)
+
+    assert results == []
+
+
+@pytest.mark.unit
+def test_load_subagent_tier_logs_tier_name_in_info(tmp_path: Path, caplog) -> None:
+    """_load_subagent_tier includes the tier label in its INFO log message."""
+    from atelier.subagents import _load_subagent_tier
+
+    subagents_dir = tmp_path / "config" / "atelier" / "subagents"
+    _write_pack(subagents_dir, "native-pack")
+
+    pack_dirs = sorted(p for p in subagents_dir.iterdir() if p.is_dir())
+    seen: set[str] = set()
+
+    with caplog.at_level(logging.INFO):
+        _load_subagent_tier("native", pack_dirs, seen)
+
+    assert any(
+        "native subagent" in r.message and "native-pack" in r.message
+        for r in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# F-17 — WARNING on override: user/native subagent shadows bundle subagent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_logs_warning_on_override(tmp_path: Path, caplog) -> None:
+    """load() emits WARNING when a user subagent shadows a bundle subagent with the same name.
+
+    A bundle subagent named 'shared-agent' exists alongside a user config subagent
+    with the same name.  The user config must win (first-match-wins) AND a WARNING
+    must be logged identifying the shadowed bundle pack.
+    """
+    from atelier.subagents import SubagentRegistry
+
+    # Tier 1 (user config): defines 'shared-agent'
+    user_subagents = tmp_path / "config" / "atelier" / "subagents"
+    _write_pack(user_subagents, "shared-agent", extra={"description": "User version"})
+
+    # Tier 3 (bundle): also defines 'shared-agent'
+    bundle_dir = tmp_path / "bundles" / "my-bundle" / "subagents"
+    _write_pack(bundle_dir, "shared-agent", extra={"description": "Bundle version"})
+
+    tool_registry = _make_fake_tool_registry()
+
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch(
+            "atelier.subagents.resolve_bundles_dir",
+            return_value=tmp_path / "bundles",
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        registry = SubagentRegistry.load(tool_registry)
+
+    # User version must be the one registered (first-match-wins)
+    assert "shared-agent" in registry.all_names
+    spec = next(s for s in registry._specs if s.name == "shared-agent")
+    assert spec.description == "User version"
+
+    # F-17: a WARNING must be logged about the shadowed bundle subagent
+    assert any(
+        "shared-agent" in r.message
+        and "shadowed" in r.message
+        and r.levelno == logging.WARNING
+        for r in caplog.records
+    ), f"Expected override WARNING, got: {[r.message for r in caplog.records]}"

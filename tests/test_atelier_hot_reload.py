@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from atelier.soul_assembler import AssemblyResult
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -206,7 +208,7 @@ async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> 
         patch("atelier.main.McpSessionManager"),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=profile_mock),
-        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()
@@ -298,7 +300,7 @@ async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false()
         patch("atelier.main.McpSessionManager"),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=profile_mock),
-        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()

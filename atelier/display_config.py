@@ -44,31 +44,100 @@ class DisplayConfig:
     events: dict[str, bool] = field(default_factory=lambda: dict(_DEFAULT_EVENTS))
 
 
+def _validate_bool(field_name: str, raw: object, default: bool) -> bool:
+    """Coerce *raw* to bool, warning on unexpected types.
+
+    Args:
+        field_name: YAML key name, used in the warning message.
+        raw: Value read from YAML (may be any type).
+        default: Fallback value returned when *raw* cannot be coerced.
+
+    Returns:
+        Coerced bool value, or *default* if coercion failed.
+    """
+    if not isinstance(raw, bool):
+        logger.warning(
+            "display_config: champ '%s' invalide (reçu %r, attendu %s), valeur par défaut utilisée",
+            field_name,
+            raw,
+            "bool",
+        )
+        return default
+    return raw
+
+
+def _validate_int(field_name: str, raw: object, default: int, min_val: int = 0) -> int:
+    """Coerce *raw* to int and check lower bound, warning on failure.
+
+    Args:
+        field_name: YAML key name, used in the warning message.
+        raw: Value read from YAML (may be any type).
+        default: Fallback value returned when coercion or bounds check fails.
+        min_val: Minimum accepted value (inclusive).
+
+    Returns:
+        Coerced int value, or *default* if validation failed.
+    """
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        logger.warning(
+            "display_config: champ '%s' invalide (reçu %r, attendu %s), valeur par défaut utilisée",
+            field_name,
+            raw,
+            "int",
+        )
+        return default
+    if value < min_val:
+        logger.warning(
+            "display_config: champ '%s' invalide (reçu %r, attendu int >= %d), valeur par défaut utilisée",
+            field_name,
+            raw,
+            min_val,
+        )
+        return default
+    return value
+
+
 def load_display_config() -> DisplayConfig:
     """Load the display configuration from atelier.yaml.
 
     Walks the standard config cascade (``~/.relais/config/``).
-    Logs at DEBUG level and returns default values when atelier.yaml is absent.
+    Validates each field individually: invalid fields emit a WARNING and fall back
+    to their default value while the rest of the configuration is still applied.
+    Logs at DEBUG level and returns a fully-default instance when atelier.yaml is absent.
 
     Returns:
-        DisplayConfig populated from the YAML file, or a default instance
-        if the file is not found.
+        DisplayConfig populated from the YAML file, with per-field defaults applied
+        for any invalid values.
     """
     try:
         path = resolve_config_path("atelier.yaml")
         raw: dict = yaml.safe_load(path.read_text()) or {}
-        display = raw.get("display", {})
-        events_raw = display.get("events", {})
-        events = {**_DEFAULT_EVENTS, **events_raw}
-        return DisplayConfig(
-            enabled=bool(display.get("enabled", True)),
-            final_only=bool(display.get("final_only", True)),
-            detail_max_length=int(display.get("detail_max_length", 100)),
-            events=events,
-        )
     except FileNotFoundError:
         logger.debug("atelier.yaml not found — using default display config")
         return DisplayConfig()
-    except (TypeError, ValueError) as exc:
-        logger.warning("atelier.yaml display section has invalid value — using defaults: %s", exc)
-        return DisplayConfig()
+
+    display = raw.get("display", {}) if isinstance(raw.get("display"), dict) else {}
+
+    enabled = _validate_bool("enabled", display.get("enabled", True), default=True)
+    final_only = _validate_bool("final_only", display.get("final_only", True), default=True)
+    detail_max_length = _validate_int(
+        "detail_max_length",
+        display.get("detail_max_length", 100),
+        default=100,
+        min_val=0,
+    )
+
+    events_raw = display.get("events", {})
+    events: dict[str, bool] = dict(_DEFAULT_EVENTS)
+    if isinstance(events_raw, dict):
+        for key, val in events_raw.items():
+            events[key] = _validate_bool(f"events.{key}", val, default=_DEFAULT_EVENTS.get(key, False))
+
+    return DisplayConfig(
+        enabled=enabled,
+        final_only=final_only,
+        detail_max_length=detail_max_length,
+        events=events,
+    )

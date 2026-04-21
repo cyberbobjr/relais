@@ -21,6 +21,7 @@ import yaml
 from common.envelope import Envelope
 from common.contexts import CTX_PORTAIL
 from atelier.agent_executor import AgentResult
+from atelier.soul_assembler import AssemblyResult
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +450,7 @@ def test_registry_parse_patterns_boundary() -> None:
     from atelier.subagents import _parse_subagent_patterns
 
     assert _parse_subagent_patterns(None) == ()
-    assert _parse_subagent_patterns("*") == ()
+    assert _parse_subagent_patterns("*") == ("*",)  # bare string treated as single pattern
     assert _parse_subagent_patterns(42) == ()
     assert _parse_subagent_patterns(["*"]) == ("*",)
     assert _parse_subagent_patterns(["a", "b"]) == ("a", "b")
@@ -542,6 +543,7 @@ def _make_atelier_for_gating():
         patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmpdir]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmpdir / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmpdir / "_nonexistent_bundles_"),
     ]
     for p in patchers:
         p.start()
@@ -583,7 +585,7 @@ async def _run_handle_message(allowed_subagents: list[str] | None) -> dict:
         patch("atelier.main.McpSessionManager", return_value=AsyncMock()),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=MagicMock(model="test:m")),
-        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()
