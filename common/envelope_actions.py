@@ -41,3 +41,6 @@ ACTION_SKILL_TRACE = "skill.trace"
 
 # Forgeron — automatic creation of a new skill from recurring sessions (auto-creation pipeline)
 ACTION_SKILL_CREATED = "skill.created"
+
+# Horloger — scheduled job trigger fired into the incoming channel stream
+ACTION_HORLOGER_TRIGGER = "horloger.trigger"

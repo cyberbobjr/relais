@@ -85,6 +85,7 @@ system_prompt: |
   | Edit a subagent | config/atelier/subagents/{name}/subagent.yaml | atelier |
   | Delete a subagent | config/atelier/subagents/{name}/ (entire dir) | atelier |
   | Grant/revoke subagent access | config/portail.yaml → roles[*].allowed_subagents | portail |
+  | **CRON / scheduled tasks** | delegate to `horloger-manager` (create, list, edit, delete, enable, disable cron jobs in `config/horloger/jobs/`) | — |
 
   ## Prompt overlay layers
 

@@ -16,6 +16,7 @@ Active bricks in the repo:
 - `souvenir`: Redis short-term memory + SQLite archiving
 - `archiviste`: logs and partial pipeline observation
 - `forgeron`: autonomous skill improvement (changelog + periodic consolidation) and automatic skill creation from archives
+- `horloger`: CRON scheduler — fires scheduled prompts as virtual user messages through the full pipeline
 
 Channel adapters actually shipped:
 
@@ -126,6 +127,7 @@ flowchart TD
 | Stream | Producer | Consumer |
 |--------|----------|----------|
 | `relais:messages:incoming` | Aiguilleur | Portail |
+| `relais:messages:incoming:horloger` | Horloger | Portail |
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |

@@ -199,7 +199,7 @@ from common.config_reload import watch_and_reload
 from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
-from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult
+from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, build_project_context_prompt, format_diagnostic_trace
 from atelier.error_synthesizer import ErrorSynthesizer
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
@@ -207,7 +207,7 @@ from atelier.souvenir_backend import SouvenirBackend
 from atelier.stream_publisher import StreamPublisher
 from atelier.display_config import load_display_config, DisplayConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from common.config_loader import resolve_bundles_dir, resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
+from common.config_loader import get_relais_home, get_relais_project_dir, resolve_bundles_dir, resolve_config_path, resolve_prompts_dir, resolve_skills_dir, resolve_storage_dir
 from atelier.tool_policy import ToolPolicy
 from atelier.subagents import SubagentRegistry
 from atelier.tools._registry import ToolRegistry
@@ -672,6 +672,12 @@ class Atelier(BrickBase):
             # 3. Resolve per-user skills and MCP tool policy
             skills = self._tool_policy.resolve_skills(ur.get("skills_dirs"))
             skills_used = [Path(s).name for s in skills]
+            _bundles_dir = resolve_bundles_dir().resolve()
+            skill_paths = {
+                Path(s).name: s
+                for s in skills
+                if Path(s).resolve().is_relative_to(_bundles_dir)
+            }
             mcp_patterns = self._tool_policy.parse_mcp_patterns(ur.get("allowed_mcp_tools"))
             logger.info(
                 "[TASK] skills resolved — corr=%s skills=%s mcp_patterns=%s",
@@ -693,7 +699,12 @@ class Atelier(BrickBase):
 
             # 5. Resolve subagents and delegation prompt
             stream_pub: StreamPublisher | None = None
-            subagents = self._subagent_registry.specs_for_user(ur, request_tools=mcp_tools)
+            _project_context = build_project_context_prompt(
+                str(get_relais_home()), str(get_relais_project_dir())
+            )
+            subagents = self._subagent_registry.specs_for_user(
+                ur, request_tools=mcp_tools, project_context=_project_context
+            )
             delegation_prompt = self._subagent_registry.delegation_prompt_for_user(ur)
             logger.info(
                 "[TASK] subagents resolved — corr=%s count=%d delegation_len=%d",
@@ -785,6 +796,7 @@ class Atelier(BrickBase):
                         "tool_call_count": agent_result.tool_call_count,
                         "tool_error_count": agent_result.tool_error_count,
                         "messages_raw": agent_result.messages_raw,
+                        "skill_paths": skill_paths,
                     }},
                 )
                 await redis_conn.xadd(
@@ -896,6 +908,14 @@ class Atelier(BrickBase):
                     corr, synth_exc,
                 )
 
+            diag_text = format_diagnostic_trace(
+                error=str(exc),
+                messages_raw=exc.messages_raw,
+                tool_call_count=exc.tool_call_count,
+                tool_error_count=exc.tool_error_count,
+            )
+            await agent_executor.inject_diagnostic_message(envelope, diag_text)
+
             # Publish failure trace so Forgeron can analyze aborted turns
             if skills_used:
                 try:
@@ -911,6 +931,7 @@ class Atelier(BrickBase):
                             "tool_call_count": exc.tool_call_count,
                             "tool_error_count": -1,  # sentinel: aborted turn
                             "messages_raw": exc.messages_raw,
+                            "skill_paths": skill_paths,
                         }},
                     )
                     await redis_conn.xadd(

@@ -12,3 +12,6 @@ theme:
   metadata: "#6272a4"
   status_bar: "#16213e"
   accent: "#50fa7b"
+font:
+  family: ''
+  size: 0

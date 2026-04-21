@@ -107,10 +107,11 @@ class SkillTraceCtx(TypedDict, total=False):
     Forgeron reads it via ``envelope.context[CTX_SKILL_TRACE]``.
     """
 
-    skill_names: list[str]   # skill directory names used in the turn
-    tool_call_count: int     # total tool invocations
-    tool_error_count: int    # tool invocations that returned an error
-    messages_raw: list[dict] # full serialized LangChain message list
+    skill_names: list[str]        # skill directory names used in the turn
+    tool_call_count: int          # total tool invocations
+    tool_error_count: int         # tool invocations that returned an error
+    messages_raw: list[dict]      # full serialized LangChain message list
+    skill_paths: dict[str, str]   # {skill_name: absolute_skill_dir_path} — set for bundle skills
 
 
 class SouvenirRequest(TypedDict, total=False):

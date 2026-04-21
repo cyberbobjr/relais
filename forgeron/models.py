@@ -24,6 +24,7 @@ class SkillTrace(SQLModel, table=True):
     tool_call_count: int
     tool_error_count: int
     messages_raw: str = Field(default="[]")  # JSON blob — full LangChain message list
+    skill_path: str | None = Field(default=None)  # absolute skill dir path (set for bundle skills)
     created_at: float = Field(default_factory=time.time)
 
 

@@ -1,10 +1,12 @@
 """Tests verifying that Forgeron emits INFO logs at key processing steps.
 
-These tests are written BEFORE the implementation (TDD RED phase).
 Expected behaviour:
 - INFO log on trace reception (correlation_id visible)
-- INFO log before ChangelogWriter.observe() ("analysis trigger")
-- INFO log after consolidation decision (triggered or skipped)
+- INFO log before SkillEditor.edit() is called ("edit TRIGGERED")
+- INFO log after edit result ("edit result")
+- INFO log when edit is skipped ("edit NOT triggered")
+- INFO log for aborted turns
+- INFO log confirming trace stored per skill
 """
 
 import logging
@@ -29,7 +31,7 @@ def _make_trace_envelope(
     messages_raw: list | None = None,
     correlation_id: str = "corr-test-123",
 ) -> Envelope:
-    env = Envelope(
+    return Envelope(
         content="",
         sender_id="atelier:1",
         channel="discord",
@@ -48,7 +50,6 @@ def _make_trace_envelope(
         },
         media_refs=[],
     )
-    return env
 
 
 def _make_forgeron():
@@ -67,15 +68,13 @@ def _make_forgeron():
     )
 
     forgeron = Forgeron.__new__(Forgeron)
-    # Bypass BrickBase.__init__ side effects; set internal attrs BrickBase expects.
     forgeron._brick_name = "forgeron"
-    forgeron._brick_logger = None  # triggers fallback BrickLogger → writes to Python logging (caplog)
+    forgeron._brick_logger = None
     forgeron._config = ForgeonConfig(
-        annotation_mode=True,
-        annotation_call_threshold=10,
+        edit_mode=True,
+        edit_call_threshold=10,
     )
-    forgeron._annotation_profile = profile
-    forgeron._consolidation_profile = profile
+    forgeron._edit_profile = profile
     forgeron._skill_call_counts = {}
     forgeron._last_had_errors = {}
     forgeron._trace_store = AsyncMock()
@@ -97,39 +96,38 @@ async def test_forgeron_logs_info_on_trace_reception(caplog) -> None:
     envelope = _make_trace_envelope(correlation_id="corr-abc-999")
     redis_conn = AsyncMock()
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=False)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=False)
+        MockEditor.return_value = mock_editor
 
         with caplog.at_level(logging.INFO, logger="forgeron"):
             await forgeron._handle_trace(envelope, redis_conn)
 
     reception_logs = [r for r in caplog.records if "corr-abc-999" in r.message]
     assert len(reception_logs) >= 1, (
-        f"Expected at least one INFO log containing the correlation_id 'corr-abc-999', "
+        f"Expected at least one INFO log containing 'corr-abc-999', "
         f"got: {[r.message for r in caplog.records]}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — INFO log before analysis is triggered
+# Test 2 — INFO log before edit is triggered
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_forgeron_logs_info_before_analysis_trigger(caplog) -> None:
-    """An INFO log is emitted before ChangelogWriter.observe() is called."""
+async def test_forgeron_logs_info_before_edit_trigger(caplog) -> None:
+    """An INFO log is emitted before SkillEditor.edit() is called."""
     forgeron = _make_forgeron()
-    # tool_error_count > 0 → triggers analysis
+    # tool_error_count > 0 → triggers edit
     envelope = _make_trace_envelope(tool_error_count=2, skill_name="mail-agent")
     redis_conn = AsyncMock()
 
     observed_after_info: list[bool] = []
 
-    async def spy_observe(*args, **kwargs):
-        # Check that an INFO log was emitted before this call
+    async def spy_edit(*args, **kwargs):
         analysis_logs = [
             r for r in caplog.records
             if r.levelno == logging.INFO and "mail-agent" in r.message
@@ -137,75 +135,67 @@ async def test_forgeron_logs_info_before_analysis_trigger(caplog) -> None:
         observed_after_info.append(len(analysis_logs) > 0)
         return True
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = MagicMock()
-        mock_writer.observe = spy_observe
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        mock_writer.should_consolidate = AsyncMock(return_value=False)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = MagicMock()
+        mock_editor.edit = spy_edit
+        MockEditor.return_value = mock_editor
 
         with caplog.at_level(logging.INFO, logger="forgeron"):
             await forgeron._handle_trace(envelope, redis_conn)
 
-    assert observed_after_info, "spy_observe was never called"
+    assert observed_after_info, "spy_edit was never called"
     assert observed_after_info[0], (
-        "Expected an INFO log for 'mail-agent' before ChangelogWriter.observe() was called"
+        "Expected an INFO log for 'mail-agent' before SkillEditor.edit() was called"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — INFO log after consolidation is triggered
+# Test 3 — INFO log after edit result
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_forgeron_logs_info_when_consolidation_triggered(caplog) -> None:
-    """An INFO log is emitted when consolidation is triggered for a skill."""
-    from pathlib import Path
-
+async def test_forgeron_logs_info_after_edit_result(caplog) -> None:
+    """An INFO log mentioning the edit result is emitted after SkillEditor.edit()."""
     forgeron = _make_forgeron()
     envelope = _make_trace_envelope(tool_error_count=2, skill_name="mail-agent")
     redis_conn = AsyncMock()
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = MagicMock()
-        mock_writer.observe = AsyncMock(return_value=True)
-        mock_writer.changelog_path = MagicMock(return_value=Path("/fake/CHANGELOG.md"))
-        mock_writer.should_consolidate = AsyncMock(return_value=True)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=True)
+        MockEditor.return_value = mock_editor
 
-        with patch.object(forgeron, "_maybe_consolidate", new_callable=AsyncMock) as mock_consolidate:
-            with caplog.at_level(logging.INFO, logger="forgeron"):
-                await forgeron._handle_trace(envelope, redis_conn)
+        with caplog.at_level(logging.INFO, logger="forgeron"):
+            await forgeron._handle_trace(envelope, redis_conn)
 
-    consolidation_logs = [
+    result_logs = [
         r for r in caplog.records
-        if r.levelno == logging.INFO and "consolidat" in r.message.lower()
+        if r.levelno == logging.INFO and "edit result" in r.message.lower()
     ]
-    assert len(consolidation_logs) >= 1, (
-        f"Expected at least one INFO log about consolidation, "
+    assert len(result_logs) >= 1, (
+        f"Expected at least one INFO log about edit result, "
         f"got: {[r.message for r in caplog.records]}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 4 — INFO log when analysis is skipped (no errors)
+# Test 4 — INFO log when edit is skipped (no errors)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_forgeron_logs_info_skipped_when_no_errors(caplog) -> None:
-    """An INFO log is emitted even when analysis is skipped due to no errors.
+    """An INFO log is emitted even when edit is skipped due to no errors.
 
-    The first reception INFO log must still appear so operators can confirm
+    The reception INFO log must still appear so operators can confirm
     the trace was received.
     """
     forgeron = _make_forgeron()
-    # No errors, below threshold → analysis NOT triggered
-    forgeron._config.annotation_mode = True
-    forgeron._config.annotation_call_threshold = 100
+    forgeron._config.edit_mode = True
+    forgeron._config.edit_call_threshold = 100
     envelope = _make_trace_envelope(tool_error_count=0, tool_call_count=1)
     redis_conn = AsyncMock()
 
@@ -227,11 +217,7 @@ async def test_forgeron_logs_info_skipped_when_no_errors(caplog) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_forgeron_logs_info_on_aborted_turn(caplog) -> None:
-    """An INFO log mentioning 'aborted' is emitted for tool_error_count == -1 traces.
-
-    Aborted turns (DLQ-routed) use the sentinel value -1 and should produce
-    a clearly labeled INFO log so operators can spot them in the log stream.
-    """
+    """An INFO log mentioning 'aborted' is emitted for tool_error_count == -1 traces."""
     forgeron = _make_forgeron()
     envelope = _make_trace_envelope(
         tool_error_count=-1,
@@ -240,11 +226,10 @@ async def test_forgeron_logs_info_on_aborted_turn(caplog) -> None:
     )
     redis_conn = AsyncMock()
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=False)
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=False)
+        MockEditor.return_value = mock_editor
 
         with caplog.at_level(logging.INFO, logger="forgeron"):
             await forgeron._handle_trace(envelope, redis_conn)
@@ -267,11 +252,7 @@ async def test_forgeron_logs_info_on_aborted_turn(caplog) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_forgeron_logs_trace_stored_per_skill(caplog) -> None:
-    """An INFO log confirming trace storage is emitted for each skill in the trace.
-
-    This log must include the skill name and error/call counts so operators
-    can monitor skill health at a glance.
-    """
+    """An INFO log confirming trace storage is emitted for each skill in the trace."""
     forgeron = _make_forgeron()
     envelope = _make_trace_envelope(
         skill_name="search-web",
@@ -297,30 +278,26 @@ async def test_forgeron_logs_trace_stored_per_skill(caplog) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — File-level logger also emits on trace reception (visibility fix)
+# Test 7 — File-level logger emits on trace reception
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_forgeron_file_logger_emits_on_trace(caplog) -> None:
-    """The module-level 'forgeron' logger must emit an INFO record on trace
-    reception, ensuring the log appears in the supervisord stdout log file
-    even if BrickLogger's Redis side fails.
-    """
+    """The module-level 'forgeron' logger must emit an INFO record on trace reception."""
     forgeron = _make_forgeron()
     envelope = _make_trace_envelope(correlation_id="corr-file-log-001")
     redis_conn = AsyncMock()
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=False)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=False)
+        MockEditor.return_value = mock_editor
 
         with caplog.at_level(logging.INFO, logger="forgeron"):
             await forgeron._handle_trace(envelope, redis_conn)
 
-    # At least one record must come from the module-level logger (not just BrickLogger)
     forgeron_records = [
         r for r in caplog.records
         if r.name == "forgeron" and r.levelno == logging.INFO

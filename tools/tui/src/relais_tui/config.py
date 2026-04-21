@@ -53,6 +53,17 @@ class ThemeConfig:
 
 
 @dataclass(frozen=True)
+class FontConfig:
+    """Terminal font hint. The actual font must be configured in your terminal emulator
+    (e.g. iTerm2 → Preferences → Profiles → Text, Alacritty → font.family).
+    These fields are documentation only — the TUI cannot change the terminal font.
+    """
+
+    family: str = ""  # e.g. "JetBrains Mono", "Fira Code"
+    size: int = 0     # e.g. 14
+
+
+@dataclass(frozen=True)
 class Config:
     """TUI configuration.
 
@@ -66,6 +77,7 @@ class Config:
     request_timeout: int = 120
     last_session_id: str = ""
     theme: ThemeConfig = field(default_factory=ThemeConfig)
+    font: FontConfig = field(default_factory=FontConfig)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -133,12 +145,21 @@ def _build_config(raw: dict) -> Config:
         for k in ThemeConfig.__dataclass_fields__
     })
 
+    font_raw = raw.get("font") or {}
+    font_defaults = FontConfig()
+    font = FontConfig(**{
+        k: font_raw.get(k, getattr(font_defaults, k))
+        for k in FontConfig.__dataclass_fields__
+    })
+
     known_fields = Config.__dataclass_fields__
     defaults = Config()
     kwargs: dict = {}
     for key in known_fields:
         if key == "theme":
             kwargs["theme"] = theme
+        elif key == "font":
+            kwargs["font"] = font
         elif key in raw:
             kwargs[key] = raw[key]
         else:

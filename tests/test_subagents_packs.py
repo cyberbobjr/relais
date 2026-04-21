@@ -312,6 +312,7 @@ def test_specs_for_user_resolves_local_tool_token(tmp_path: Path) -> None:
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
@@ -336,6 +337,7 @@ def test_specs_for_user_unknown_local_tool_token_dropped(tmp_path: Path, caplog)
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
         caplog.at_level(logging.WARNING),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
@@ -367,6 +369,7 @@ def test_specs_for_user_resolves_local_skill_token(tmp_path: Path) -> None:
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
@@ -375,7 +378,9 @@ def test_specs_for_user_resolves_local_skill_token(tmp_path: Path) -> None:
     assert len(specs) == 1
     skills = specs[0].get("skills", [])
     assert len(skills) == 1
-    assert str(skill_dir.resolve()) == skills[0]
+    # SkillsMiddleware expects the *parent* directory containing skill subdirs,
+    # not the individual skill directory itself.
+    assert str(skill_dir.parent.resolve()) == skills[0]
 
 
 @pytest.mark.unit
@@ -392,6 +397,7 @@ def test_specs_for_user_skill_missing_dir_dropped(tmp_path: Path, caplog) -> Non
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
         caplog.at_level(logging.WARNING),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
@@ -423,6 +429,7 @@ def test_specs_for_user_multiple_skills_all_resolved(tmp_path: Path) -> None:
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
@@ -430,8 +437,10 @@ def test_specs_for_user_multiple_skills_all_resolved(tmp_path: Path) -> None:
 
     assert len(specs) == 1
     skills = specs[0].get("skills", [])
-    assert str(alpha_dir.resolve()) in skills
-    assert str(beta_dir.resolve()) in skills
+    # Both alpha and beta share the same parent skills/ dir; SkillsMiddleware
+    # receives the parent directory and discovers all skill subdirs inside it.
+    assert len(skills) == 1
+    assert str(alpha_dir.parent.resolve()) in skills
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +468,7 @@ def test_path_traversal_skill_token_dropped_by_specs_for_user(
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
         caplog.at_level(logging.WARNING),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
@@ -493,6 +503,7 @@ def test_empty_local_skill_token_dropped_by_specs_for_user(
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
         caplog.at_level(logging.WARNING),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
@@ -664,6 +675,7 @@ def test_flat_yaml_file_in_subagents_dir_ignored(tmp_path: Path) -> None:
     with (
         patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
         patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
+        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
     ):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 

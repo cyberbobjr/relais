@@ -30,6 +30,7 @@ dependencies = [
     "langsmith>=0.7.23",
     "watchfiles>=0.21",
     "aiohttp>=3.9",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

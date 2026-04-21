@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 # Path to the native subagents bundled with the source tree (second tier).
 # Patched in tests via conftest.isolated_search_path to prevent real packs loading.
-NATIVE_SUBAGENTS_PATH: Path = Path(__file__).parent / "subagents"
+NATIVE_SUBAGENTS_PATH: Path = Path(__file__).parent
 
 # Regex for valid subagent names
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -679,6 +679,7 @@ class SubagentRegistry:
         self,
         user_record: dict[str, Any],
         request_tools: list | None = None,
+        project_context: str = "",
     ) -> list[dict[str, Any]]:
         """Return deepagents-compatible spec dicts filtered by user ACL.
 
@@ -699,6 +700,9 @@ class SubagentRegistry:
             user_record: The user record dict stamped by Portail.
             request_tools: Per-request list of ``BaseTool`` instances (MCP
                 tools filtered by ``ToolPolicy``).  Defaults to ``[]``.
+            project_context: Pre-built project environment block (RELAIS_HOME,
+                RELAIS_PROJECT_DIR) to append to each subagent's system prompt.
+                Empty string skips injection.
 
         Returns:
             A list of dicts with keys ``name``, ``description``,
@@ -729,10 +733,15 @@ class SubagentRegistry:
                 spec.skill_tokens, local_skills, spec.name
             )
 
+            enriched_prompt = (
+                f"{spec.system_prompt}\n\n{project_context}"
+                if project_context and project_context not in spec.system_prompt
+                else spec.system_prompt
+            )
             entry: dict[str, Any] = {
                 "name": spec.name,
                 "description": spec.description,
-                "system_prompt": spec.system_prompt,
+                "system_prompt": enriched_prompt,
             }
             if resolved_tools:
                 entry["tools"] = resolved_tools

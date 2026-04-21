@@ -1,10 +1,11 @@
 [project]
 name = "relais-tui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Terminal User Interface client for RELAIS via REST SSE API"
 requires-python = ">=3.11"
 dependencies = [
-    "textual>=3.0,<4.0",
+    "prompt_toolkit>=3.0",
+    "rich>=13.0",
     "httpx>=0.28,<1.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
@@ -26,7 +27,6 @@ dev = [
     "pytest>=9.0",
     "pytest-asyncio>=1.3",
     "pytest-cov>=7.1.0",
-    "textual-dev>=1.0",
 ]
 
 [tool.pytest.ini_options]

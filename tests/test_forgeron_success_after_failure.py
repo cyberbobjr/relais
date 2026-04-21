@@ -1,10 +1,8 @@
 """Tests for Forgeron 'success after failure' analysis trigger.
 
 When a skill turn succeeds (tool_error_count == 0) but the PREVIOUS turn
-for the same skill had errors, Forgeron should trigger analysis on the
+for the same skill had errors, Forgeron should trigger edit on the
 successful turn — that's where the correction/fix is captured.
-
-TDD RED phase — tests written before implementation.
 """
 
 import logging
@@ -30,7 +28,6 @@ def _make_trace_envelope(
     messages_raw: list | None = None,
     correlation_id: str = "corr-test",
 ) -> Envelope:
-    """Build a trace envelope for testing."""
     return Envelope(
         content="",
         sender_id="atelier:1",
@@ -52,7 +49,7 @@ def _make_trace_envelope(
     )
 
 
-def _make_forgeron(annotation_call_threshold: int = 10):
+def _make_forgeron(edit_call_threshold: int = 10):
     """Return a Forgeron instance with mocked config and stores."""
     from forgeron.main import Forgeron
     from common.profile_loader import ProfileConfig, ResilienceConfig
@@ -71,11 +68,10 @@ def _make_forgeron(annotation_call_threshold: int = 10):
     forgeron._brick_name = "forgeron"
     forgeron._brick_logger = None
     forgeron._config = ForgeonConfig(
-        annotation_mode=True,
-        annotation_call_threshold=annotation_call_threshold,
+        edit_mode=True,
+        edit_call_threshold=edit_call_threshold,
     )
-    forgeron._annotation_profile = profile
-    forgeron._consolidation_profile = profile
+    forgeron._edit_profile = profile
     forgeron._skill_call_counts = {}
     forgeron._last_had_errors = {}
     forgeron._trace_store = AsyncMock()
@@ -85,18 +81,18 @@ def _make_forgeron(annotation_call_threshold: int = 10):
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — Success after failure triggers analysis
+# Test 1 — Success after failure triggers edit
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_success_after_failure_triggers_analysis(caplog) -> None:
-    """A turn with 0 errors must trigger analysis if the previous turn
-    for the same skill had errors.
+async def test_success_after_failure_triggers_edit(caplog) -> None:
+    """A turn with 0 errors must trigger SkillEditor.edit() if the previous
+    turn for the same skill had errors.
 
     This captures the 'correction turn' — the one where the agent found
-    the right syntax after failing on previous attempts.
+    the right approach after failing on previous attempts.
     """
     forgeron = _make_forgeron()
     redis_conn = AsyncMock()
@@ -108,12 +104,10 @@ async def test_success_after_failure_triggers_analysis(caplog) -> None:
         correlation_id="corr-error",
     )
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=True)
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        MockWriter.return_value = mock_writer
-
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=True)
+        MockEditor.return_value = mock_editor
         await forgeron._handle_trace(env_error, redis_conn)
 
     # Turn 2: mail-agent with 0 errors (success after failure)
@@ -124,17 +118,16 @@ async def test_success_after_failure_triggers_analysis(caplog) -> None:
         correlation_id="corr-success",
     )
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=True)
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=True)
+        MockEditor.return_value = mock_editor
 
         with caplog.at_level(logging.INFO, logger="forgeron"):
             await forgeron._handle_trace(env_success, redis_conn)
 
-        # ChangelogWriter.observe MUST be called for the success turn
-        mock_writer.observe.assert_called_once()
+        # SkillEditor.edit MUST be called for the success turn
+        mock_editor.edit.assert_called_once()
 
     # Log must mention "success after failure"
     saf_logs = [
@@ -155,9 +148,9 @@ async def test_success_after_failure_triggers_analysis(caplog) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_success_without_prior_failure_no_trigger() -> None:
-    """A turn with 0 errors and no prior failure must NOT trigger analysis
+    """A turn with 0 errors and no prior failure must NOT trigger edit
     (unless the call threshold is reached)."""
-    forgeron = _make_forgeron(annotation_call_threshold=100)
+    forgeron = _make_forgeron(edit_call_threshold=100)
     redis_conn = AsyncMock()
 
     env = _make_trace_envelope(
@@ -166,15 +159,15 @@ async def test_success_without_prior_failure_no_trigger() -> None:
         correlation_id="corr-normal",
     )
 
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=False)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=False)
+        MockEditor.return_value = mock_editor
 
         await forgeron._handle_trace(env, redis_conn)
 
-        # ChangelogWriter.observe must NOT be called
-        mock_writer.observe.assert_not_called()
+        # SkillEditor must NOT be instantiated at all
+        MockEditor.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -185,9 +178,9 @@ async def test_success_without_prior_failure_no_trigger() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_success_after_failure_flag_resets() -> None:
-    """After a 'success after failure' analysis, the flag must reset so that
+    """After a 'success after failure' edit, the flag must reset so that
     the NEXT success turn does NOT trigger again."""
-    forgeron = _make_forgeron(annotation_call_threshold=100)
+    forgeron = _make_forgeron(edit_call_threshold=100)
     redis_conn = AsyncMock()
 
     # Turn 1: error
@@ -196,26 +189,24 @@ async def test_success_after_failure_flag_resets() -> None:
         tool_error_count=1,
         correlation_id="corr-err",
     )
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=True)
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=True)
+        MockEditor.return_value = mock_editor
         await forgeron._handle_trace(env_error, redis_conn)
 
-    # Turn 2: success (triggers analysis)
+    # Turn 2: success (triggers edit)
     env_success1 = _make_trace_envelope(
         skill_name="mail-agent",
         tool_error_count=0,
         correlation_id="corr-suc1",
     )
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=True)
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=True)
+        MockEditor.return_value = mock_editor
         await forgeron._handle_trace(env_success1, redis_conn)
-        mock_writer.observe.assert_called_once()
+        mock_editor.edit.assert_called_once()
 
     # Turn 3: success again (must NOT trigger — flag was consumed)
     env_success2 = _make_trace_envelope(
@@ -223,12 +214,12 @@ async def test_success_after_failure_flag_resets() -> None:
         tool_error_count=0,
         correlation_id="corr-suc2",
     )
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=False)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=False)
+        MockEditor.return_value = mock_editor
         await forgeron._handle_trace(env_success2, redis_conn)
-        mock_writer.observe.assert_not_called()
+        MockEditor.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -240,8 +231,8 @@ async def test_success_after_failure_flag_resets() -> None:
 @pytest.mark.asyncio
 async def test_success_after_failure_per_skill_isolation() -> None:
     """The 'last had errors' flag is tracked per skill — an error on
-    mail-agent must not trigger analysis on search-web's success turn."""
-    forgeron = _make_forgeron(annotation_call_threshold=100)
+    mail-agent must not trigger edit on search-web's success turn."""
+    forgeron = _make_forgeron(edit_call_threshold=100)
     redis_conn = AsyncMock()
 
     # mail-agent error
@@ -250,11 +241,10 @@ async def test_success_after_failure_per_skill_isolation() -> None:
         tool_error_count=2,
         correlation_id="corr-mail-err",
     )
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=True)
-        mock_writer.changelog_path = MagicMock(return_value=None)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=True)
+        MockEditor.return_value = mock_editor
         await forgeron._handle_trace(env_mail_err, redis_conn)
 
     # search-web success (no prior error for search-web)
@@ -263,9 +253,9 @@ async def test_success_after_failure_per_skill_isolation() -> None:
         tool_error_count=0,
         correlation_id="corr-search-ok",
     )
-    with patch("forgeron.main.ChangelogWriter") as MockWriter:
-        mock_writer = AsyncMock()
-        mock_writer.observe = AsyncMock(return_value=False)
-        MockWriter.return_value = mock_writer
+    with patch("forgeron.main.SkillEditor") as MockEditor:
+        mock_editor = AsyncMock()
+        mock_editor.edit = AsyncMock(return_value=False)
+        MockEditor.return_value = mock_editor
         await forgeron._handle_trace(env_search_ok, redis_conn)
-        mock_writer.observe.assert_not_called()
+        MockEditor.assert_not_called()

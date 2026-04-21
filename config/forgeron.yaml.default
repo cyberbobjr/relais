@@ -1,25 +1,25 @@
 forgeron:
-  # LLM profile for skill creation and consolidation (precise, heavier model).
+  # LLM profile for skill creation (precise, heavier model).
   # References a named profile from atelier/profiles.yaml (config cascade).
   llm_profile: "precise"
 
-  # LLM profile for Phase 1 changelog observations and intent labeling (fast, cheap).
-  annotation_profile: "fast"
+  # LLM profile for direct SKILL.md editing.
+  edit_profile: "precise"
 
-  # Enable S3 Phase 1: extract observations into per-skill CHANGELOG.md
-  # after turns with errors or after annotation_call_threshold cumulative calls.
-  annotation_mode: true
+  # Enable direct SKILL.md editing after turns with errors or after
+  # edit_call_threshold cumulative calls.
+  edit_mode: true
 
-  # Minimum tool errors in a turn to trigger a changelog observation.
-  annotation_min_tool_errors: 1
+  # Minimum tool errors in a turn to trigger a skill edit.
+  edit_min_tool_errors: 1
 
-  # Cooldown for changelog observations per skill (seconds).
-  # Redis TTL key: relais:skill:annotation_cooldown:{skill_name}
-  annotation_cooldown_seconds: 300
+  # Cooldown for skill edits per skill (seconds).
+  # Redis TTL key: relais:skill:edit_cooldown:{skill_name}
+  edit_cooldown_seconds: 300
 
-  # Trigger a changelog observation after this many cumulative calls,
+  # Trigger a skill edit after this many cumulative calls,
   # even when there are no errors.
-  annotation_call_threshold: 10
+  edit_call_threshold: 10
 
   # skills_dir: null means resolved from the config cascade
   # (~/.relais/skills/ > /opt/relais/skills/ > ./skills/)
@@ -45,17 +45,10 @@ forgeron:
   # Notify the user when Forgeron creates a new skill.
   notify_user_on_creation: true
 
-  # --- S3 Phase 2: periodic consolidation ---
+  # --- Correction pipeline ---
 
-  # Consolidate SKILL.md when CHANGELOG.md exceeds this many lines.
-  consolidation_line_threshold: 80
+  # Enable the correction pipeline: user feedback triggers skill-designer via force_subagent.
+  correction_mode: true
 
-  # Minimum interval between two consolidations for the same skill (seconds, default 7 days).
-  # Redis TTL key: relais:skill:consolidation_cooldown:{skill_name}
-  consolidation_cooldown_seconds: 604800
-
-  # LLM profile for consolidation (heavier model than annotation).
-  consolidation_profile: "precise"
-
-  # Notify the user when a skill is consolidated.
-  notify_user_on_consolidation: true
+  # Seconds to wait for Souvenir BRPOP response when fetching session history.
+  history_read_timeout_seconds: 30

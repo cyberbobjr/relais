@@ -23,6 +23,23 @@ def get_relais_home() -> Path:
         return Path(custom).expanduser().resolve()
     return (Path(__file__).parent.parent / ".relais").resolve()
 
+
+def get_relais_project_dir() -> Path:
+    """Returns the RELAIS Python source root directory.
+
+    Defaults to the parent of the ``common/`` package (i.e. the repository
+    root).  Override via the ``RELAIS_PROJECT_DIR`` environment variable for
+    installations where the source tree is not co-located with the data
+    directory.
+
+    Returns:
+        Absolute, resolved path to the RELAIS project source directory.
+    """
+    custom = os.environ.get("RELAIS_PROJECT_DIR")
+    if custom:
+        return Path(custom).expanduser().resolve()
+    return Path(__file__).parent.parent.resolve()
+
 # Search path — user config always takes priority.
 # Note: dev mode is covered by get_relais_home() which defaults to
 # <project_root>/.relais when RELAIS_HOME is not set.  The project root

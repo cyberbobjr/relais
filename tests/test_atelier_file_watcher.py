@@ -76,21 +76,21 @@ def test_atelier_config_watch_paths_returns_list() -> None:
 
 
 @pytest.mark.unit
-def test_atelier_watch_paths_contains_four_paths() -> None:
-    """_config_watch_paths() returns exactly 4 paths when no subagents dirs exist."""
+def test_atelier_watch_paths_contains_five_paths() -> None:
+    """_config_watch_paths() returns exactly 5 paths when no user subagents dirs exist."""
     atelier = _make_atelier_minimal()
 
     fake_path = Path("/fake/config.yaml")
-    # Use a nonexistent base so no config/atelier/subagents/ dir is found, giving exactly 4 paths
+    # Use a nonexistent base so no config/atelier/subagents/ dir is found, giving exactly 5 paths
     with (
         patch("atelier.main.resolve_config_path", return_value=fake_path),
         patch("common.config_loader.CONFIG_SEARCH_PATH", [Path("/nonexistent-base-xyz")]),
     ):
         paths = atelier._config_watch_paths()
 
-    assert len(paths) == 4, (
-        "_config_watch_paths() must return 4 paths "
-        f"(profiles.yaml, mcp_servers.yaml, atelier.yaml, native subagents dir), got {len(paths)}"
+    assert len(paths) == 5, (
+        "_config_watch_paths() must return 5 paths "
+        f"(profiles.yaml, mcp_servers.yaml, atelier.yaml, native subagents dir, bundles dir), got {len(paths)}"
     )
 
 

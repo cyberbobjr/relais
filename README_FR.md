@@ -16,6 +16,7 @@ Les briques actives du repo sont :
 - `souvenir` : mémoire court terme Redis + archivage SQLite
 - `archiviste` : logs et observation partielle du pipeline
 - `forgeron` : amélioration autonome des skills (changelog + consolidation périodique) et création automatique de skills depuis les archives
+- `horloger` : planificateur CRON — déclenche des prompts programmés comme messages utilisateurs virtuels à travers le pipeline complet
 
 Adaptateurs de canaux réellement livrés :
 
@@ -126,6 +127,7 @@ flowchart TD
 | Stream | Producteur | Consommateur |
 |--------|------------|--------------|
 | `relais:messages:incoming` | Aiguilleur | Portail |
+| `relais:messages:incoming:horloger` | Horloger | Portail |
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |

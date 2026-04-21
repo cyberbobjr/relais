@@ -15,7 +15,8 @@ from typing import cast
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from common.profile_loader import ProfileConfig, build_chat_model
+from common.profile_loader import ProfileConfig
+from forgeron.llm_factory import build_chat_model
 
 logger = logging.getLogger(__name__)
 

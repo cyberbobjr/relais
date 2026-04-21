@@ -1,6 +1,6 @@
 """write_skill tool — create or overwrite a SKILL.md file in the skills directory.
 
-This tool is registered in the skill-designer subagent pack.  It creates the
+This tool is registered in the skill_designer subagent pack.  It creates the
 skill directory if it does not exist and writes the SKILL.md content provided
 by the subagent.
 
@@ -77,6 +77,7 @@ class WriteSkillTool(BaseTool):
         skill_name: str,
         content: str,
         overwrite: bool = False,
+        skill_path: Optional[str] = None,
     ) -> str:
         """Write the SKILL.md file synchronously.
 
@@ -84,6 +85,9 @@ class WriteSkillTool(BaseTool):
             skill_name: Name of the skill directory (e.g. ``"send-email"``).
             content: Full content of the SKILL.md file.
             overwrite: If ``True``, overwrite an existing SKILL.md.
+            skill_path: Absolute path to an existing skill directory override
+                (e.g. for bundle-installed skills).  When provided,
+                ``resolve_skills_dir()`` is not called.
 
         Returns:
             Absolute path of the written file on success, or an error message.
@@ -94,13 +98,16 @@ class WriteSkillTool(BaseTool):
             logger.warning("WriteSkillTool: validation failed — %s", error)
             return f"ERROR: {error}"
 
-        skills_dir = resolve_skills_dir()
-        skill_dir = skills_dir / skill_name
-        skill_path = skill_dir / "SKILL.md"
+        if skill_path is not None:
+            skill_dir = Path(skill_path)
+        else:
+            skills_dir = resolve_skills_dir()
+            skill_dir = skills_dir / skill_name
+        skill_path_file = skill_dir / "SKILL.md"
 
-        if skill_path.exists() and not overwrite:
+        if skill_path_file.exists() and not overwrite:
             msg = (
-                f"SKILL.md already exists at {skill_path}. "
+                f"SKILL.md already exists at {skill_path_file}. "
                 "Pass overwrite=true to replace it."
             )
             logger.warning("WriteSkillTool: %s", msg)
@@ -108,18 +115,18 @@ class WriteSkillTool(BaseTool):
 
         try:
             skill_dir.mkdir(parents=True, exist_ok=True)
-            skill_path.write_text(content, encoding="utf-8")
+            skill_path_file.write_text(content, encoding="utf-8")
             logger.info(
                 "WriteSkillTool: wrote skill='%s' path=%s overwrite=%s",
                 skill_name,
-                skill_path,
+                skill_path_file,
                 overwrite,
             )
-            return str(skill_path)
+            return str(skill_path_file)
         except OSError as exc:
             logger.error(
                 "WriteSkillTool: I/O error writing '%s': %s",
-                skill_path,
+                skill_path_file,
                 exc,
             )
             return f"ERROR: {exc}"
@@ -129,6 +136,7 @@ class WriteSkillTool(BaseTool):
         skill_name: str,
         content: str,
         overwrite: bool = False,
+        skill_path: Optional[str] = None,
     ) -> str:
         """Async wrapper — delegates to the synchronous implementation.
 
@@ -136,11 +144,17 @@ class WriteSkillTool(BaseTool):
             skill_name: Name of the skill directory.
             content: Full content of the SKILL.md file.
             overwrite: If ``True``, overwrite an existing SKILL.md.
+            skill_path: Absolute path to an existing skill directory override.
 
         Returns:
             Absolute path of the written file on success, or an error message.
         """
-        return self._run(skill_name=skill_name, content=content, overwrite=overwrite)
+        return self._run(
+            skill_name=skill_name,
+            content=content,
+            overwrite=overwrite,
+            skill_path=skill_path,
+        )
 
 
 # Module-level instance discovered by the SubagentRegistry tool loader.

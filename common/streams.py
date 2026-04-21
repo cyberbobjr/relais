@@ -61,6 +61,9 @@ Consumed by Forgeron for statistical analysis and skill improvement."""
 STREAM_OUTGOING_FAILED: str = "relais:messages:outgoing:failed"
 """Dead-letter queue for outgoing messages that failed to deliver."""
 
+STREAM_INCOMING_HORLOGER: str = "relais:messages:incoming:horloger"
+"""Scheduled job triggers fired by Horloger (CRON scheduler brick)."""
+
 KEY_WHATSAPP_PAIRING: str = "relais:whatsapp:pairing"
 """Redis key storing the active WhatsApp QR pairing context (JSON, TTL 300s)."""
 

@@ -16,12 +16,16 @@ class MediaRef:
         mime_type: MIME type of the file.
         size_bytes: Size of the file in bytes.
         expires_in_hours: Expiration time for the media link.
+        data_base64: Raw image bytes encoded as base64 ASCII (no data-URI prefix).
+            Present when the sender embeds the image inline (e.g. TUI clipboard paste).
+            ``None`` when only a file-system reference is carried.
     """
     media_id: str
     path: str
     mime_type: str
     size_bytes: int
     expires_in_hours: int = 24
+    data_base64: str | None = None
 
 
 @dataclass

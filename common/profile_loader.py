@@ -15,14 +15,11 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import Final
 
 import yaml
 
 from common.config_loader import resolve_config_path
-
-if TYPE_CHECKING:
-    from langchain_core.language_models import BaseChatModel
 
 # Matches any $VAR or ${VAR} that survives os.path.expandvars — i.e. the variable was unset.
 _UNEXPANDED_VAR_RE: Final[re.Pattern[str]] = re.compile(
@@ -199,40 +196,3 @@ def resolve_profile(
     if name in profiles:
         return profiles[name]
     return profiles["default"]
-
-
-def build_chat_model(profile: ProfileConfig) -> "BaseChatModel":
-    """Build a LangChain BaseChatModel from a ProfileConfig.
-
-    Injects ``base_url``, ``api_key`` (from the named env var), and
-    ``parallel_tool_calls`` (as a model kwarg) when present on the profile.
-    Unlike ``_resolve_profile_model`` in ``agent_executor``, this function
-    always returns a ``BaseChatModel`` — suitable for direct ``ainvoke()``
-    calls in Forgeron (ChangelogWriter, SkillConsolidator, IntentLabeler).
-
-    Args:
-        profile: The profile whose parameters drive the LLM instantiation.
-
-    Returns:
-        An instantiated ``BaseChatModel`` ready for async invocation.
-
-    Raises:
-        KeyError: If ``profile.api_key_env`` is set but the environment
-            variable is not present.
-    """
-    from langchain.chat_models import init_chat_model  # noqa: PLC0415
-
-    kwargs: dict[str, Any] = {}
-    if profile.base_url is not None:
-        kwargs["base_url"] = profile.base_url
-    if profile.api_key_env is not None:
-        api_key = os.environ.get(profile.api_key_env)
-        if api_key is None:
-            raise EnvironmentError(
-                f"Required environment variable '{profile.api_key_env}' for profile "
-                f"model '{profile.model}' is not set."
-            )
-        kwargs["api_key"] = api_key
-    if profile.parallel_tool_calls is not None:
-        kwargs["model_kwargs"] = {"parallel_tool_calls": profile.parallel_tool_calls}
-    return init_chat_model(profile.model, **kwargs)

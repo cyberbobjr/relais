@@ -63,6 +63,7 @@ Aiguilleur
 | Stream | Producteur | Consommateur |
 |--------|------------|--------------|
 | `relais:messages:incoming` | Aiguilleur | Portail |
+| `relais:messages:incoming:horloger` | Horloger | Portail |
 | `relais:security` | Portail | Sentinelle |
 | `relais:tasks` | Sentinelle | Atelier |
 | `relais:commands` | Sentinelle | Commandant |
@@ -212,6 +213,27 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 - Action `history_read` : publiée par Forgeron pour lire l'historique complet des messages bruts d'une session ; le handler lit de SQLite, tronque selon un budget de tokens (~4 chars/token), et publie le résultat JSON sur `relais:memory:response:{correlation_id}` (Redis List avec TTL 60s) pour que Forgeron le récupère via `BRPOP` (handshake synchrone).
 - Les actions de fichiers (`file_*`) servent les requêtes d'agents via `SouvenirBackend`, répondent sur `relais:memory:response`.
 - Handlers: `ArchiveHandler`, `ClearHandler`, `FileWriteHandler`, `FileReadHandler`, `FileListHandler`, `SessionsHandler`, `ResumeHandler`, `HistoryReadHandler` — pas d'appels LLM dans Souvenir.
+
+### Horloger
+
+- **Producteur uniquement** : `stream_specs()` retourne `[]` ; BrickBase attend sur `shutdown_event` pendant que la `_tick_loop` tourne en tâche de fond.
+- Lit les specs de jobs YAML dans `~/.relais/config/horloger/jobs/*.yaml` (un fichier par job) ; rechargement automatique via watchfiles.
+- À chaque tick (`tick_interval_seconds`, défaut 30s) :
+  1. `JobRegistry.reload()` + `Scheduler.sync_jobs()` — rechargement des jobs et purge de l'historique des jobs supprimés.
+  2. `Scheduler.get_due_jobs()` — classifie les jobs en `to_trigger` / `to_skip` selon quatre gardes : guard futur, guard catch-up, guard désactivé, guard double-fire.
+  3. Publie une envelope de déclenchement sur `relais:messages:incoming:horloger` pour chaque job à déclencher.
+  4. Enregistre chaque outcome dans `storage/horloger.db` (SQLite via SQLModel + aiosqlite) : statuts `triggered`, `publish_failed`, `skipped_catchup`, `skipped_disabled`, `skipped_double_fire`.
+- **Patron canal virtuel** : l'envelope traverse le pipeline complet (Portail → Sentinelle → Atelier) comme un vrai message utilisateur.
+  - `sender_id = f"horloger:{job.owner_id}"` pour que la Sentinelle applique le bon ACL.
+  - `context["portail"]` pré-estampillé (`user_id`, `llm_profile`) pour éviter la lookup UserRegistry (`"horloger"` n'est pas un canal réel dans `portail.yaml`).
+  - `context["aiguilleur"]["reply_to"] = job.channel` pour que Sentinelle route la réponse vers le bon canal de sortie.
+- Guard anti-tempête : les jobs dont le dernier temps planifié est antérieur à `catch_up_window_seconds` (défaut 120s) sont ignorés, non re-déclenchés, après un redémarrage.
+- **Sous-agent `horloger-manager`** (natif) : gère le CRUD des fichiers YAML de jobs via les commandes `/horloger` ou `/schedule`.
+
+| Stream | Direction |
+|--------|-----------|
+| `relais:messages:incoming:horloger` | Produit par Horloger, consommé par `portail_group` |
+| `relais:logs` | Produit par Horloger (BrickBase) |
 
 ### Archiviste
 

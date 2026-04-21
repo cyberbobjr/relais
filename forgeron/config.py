@@ -19,12 +19,12 @@ class ForgeonConfig:
     """
 
     llm_profile: str = "precise"
-    annotation_profile: str = "fast"
-    annotation_mode: bool = True
-    annotation_min_tool_errors: int = 1
-    annotation_cooldown_seconds: int = 300
-    annotation_call_threshold: int = 5
-    """Annotate a skill after this many cumulative calls, even without errors."""
+    edit_profile: str = "precise"
+    edit_mode: bool = True
+    edit_min_tool_errors: int = 1
+    edit_cooldown_seconds: int = 300
+    edit_call_threshold: int = 5
+    """Edit a skill after this many cumulative calls, even without errors."""
     skills_dir: Path | None = None
     # --- Automatic skill creation from session archives ---
     creation_mode: bool = True
@@ -38,16 +38,6 @@ class ForgeonConfig:
     """Maximum number of representative sessions to pass to SkillCreator."""
     notify_user_on_creation: bool = True
     """Publish a notification to relais:messages:outgoing_pending when a skill is created."""
-    # --- Changelog-based periodic consolidation ---
-    consolidation_line_threshold: int = 80
-    """Consolidate SKILL.md when CHANGELOG.md exceeds this many lines."""
-    consolidation_cooldown_seconds: int = 1800
-    """Minimum interval between two consolidations for the same skill (seconds, default 30 min).
-    Redis TTL key: relais:skill:consolidation_cooldown:{skill_name}"""
-    consolidation_profile: str = "precise"
-    """LLM profile to use for consolidation (heavier model than annotation)."""
-    notify_user_on_consolidation: bool = True
-    """Publish a notification to relais:messages:outgoing_pending when a skill is consolidated."""
     # --- Correction pipeline (user feedback → skill fix via skill-designer) ---
     correction_mode: bool = True
     """Enable the correction pipeline: user feedback triggers skill-designer via force_subagent."""
@@ -81,29 +71,17 @@ def load_forgeron_config() -> ForgeonConfig:
 
     return ForgeonConfig(
         llm_profile=str(section.get("llm_profile", "precise")),
-        annotation_profile=str(section.get("annotation_profile", "fast")),
-        annotation_mode=bool(section.get("annotation_mode", True)),
-        annotation_min_tool_errors=int(
-            section.get("annotation_min_tool_errors", 1)
-        ),
-        annotation_cooldown_seconds=int(
-            section.get("annotation_cooldown_seconds", 300)
-        ),
-        annotation_call_threshold=int(
-            section.get("annotation_call_threshold", 5)
-        ),
+        edit_profile=str(section.get("edit_profile", "precise")),
+        edit_mode=bool(section.get("edit_mode", True)),
+        edit_min_tool_errors=int(section.get("edit_min_tool_errors", 1)),
+        edit_cooldown_seconds=int(section.get("edit_cooldown_seconds", 300)),
+        edit_call_threshold=int(section.get("edit_call_threshold", 5)),
         skills_dir=skills_dir,
         creation_mode=bool(section.get("creation_mode", True)),
         min_sessions_for_creation=int(section.get("min_sessions_for_creation", 3)),
         creation_cooldown_seconds=int(section.get("creation_cooldown_seconds", 86400)),
         max_sessions_for_labeling=int(section.get("max_sessions_for_labeling", 5)),
         notify_user_on_creation=bool(section.get("notify_user_on_creation", True)),
-        consolidation_line_threshold=int(section.get("consolidation_line_threshold", 80)),
-        consolidation_cooldown_seconds=int(
-            section.get("consolidation_cooldown_seconds", 1800)
-        ),
-        consolidation_profile=str(section.get("consolidation_profile", "precise")),
-        notify_user_on_consolidation=bool(section.get("notify_user_on_consolidation", True)),
         correction_mode=bool(section.get("correction_mode", True)),
         history_read_timeout_seconds=int(section.get("history_read_timeout_seconds", 30)),
     )
