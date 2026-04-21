@@ -10,7 +10,7 @@ re-exported here for backward compatibility):
 - ``atelier.prompts`` — system-prompt constants and builders
 - ``atelier.transient_errors`` — ``_is_transient_provider_error``
 - ``atelier.streaming`` — ``StreamBuffer``, ``TaskArgsTracker``, ``ChunkPayload``, ``decode_chunk``
-- ``atelier.stream_loop`` — ``StreamLoopState``, ``compute_reply_text``, ``build_subagent_traces``
+- ``atelier.stream_loop`` — ``StreamLoopState``, ``compute_reply_text``, ``build_subagent_traces``, ``handle_updates_chunk``, ``handle_tool_call_chunks``, ``handle_tool_result``
 """
 
 from __future__ import annotations
@@ -43,8 +43,6 @@ from atelier.streaming import (
     StreamBuffer,
     TaskArgsTracker,
     decode_chunk,
-    _extract_thinking,
-    _has_tool_use_block,
     _normalise_content,
     _EXECUTE_FAILURE_MARKER,
     REPLY_PLACEHOLDER,
@@ -68,6 +66,8 @@ from atelier.stream_loop import (
     StreamLoopState,
     compute_reply_text,
     build_subagent_traces,
+    emit_text,
+    emit_thinking,
     handle_updates_chunk,
     handle_tool_call_chunks,
     handle_tool_result,
@@ -556,20 +556,20 @@ class AgentExecutor:
                     if token.type != "tool" and token.content:
                         text = _normalise_content(token.content)
                         if text:
-                            state = StreamLoopState(
-                                full_reply=state.full_reply + text,
-                                last_tool_result=state.last_tool_result,
-                                pending_tool_name=state.pending_tool_name,
-                                current_section=await self._emit_text(text, buf, state.current_section),
+                            new_sec = await emit_text(
+                                text=text, buf=buf,
+                                current_section=state.current_section,
+                                final_only=self._display.final_only,
                             )
-                        new_section = await self._emit_thinking(token.content, buf, state.current_section)
-                        if new_section is not state.current_section:
-                            state = StreamLoopState(
-                                full_reply=state.full_reply,
-                                last_tool_result=state.last_tool_result,
-                                pending_tool_name=state.pending_tool_name,
-                                current_section=new_section,
-                            )
+                            state = StreamLoopState(state.full_reply + text, state.last_tool_result, state.pending_tool_name, new_sec)
+                        new_sec = await emit_thinking(
+                            raw=token.content, buf=buf,
+                            current_section=state.current_section,
+                            thinking_enabled=self._display.events.get("thinking", False),
+                            final_only=self._display.final_only,
+                        )
+                        if new_sec is not state.current_section:
+                            state = StreamLoopState(state.full_reply, state.last_tool_result, state.pending_tool_name, new_sec)
 
         if stream_callback is not None:
             if self._display.final_only:
@@ -591,56 +591,5 @@ class AgentExecutor:
         return reply_text, guard.total_calls, guard.total_errors, subagent_traces
 
 
-    async def _emit_text(self, text: str, buf: StreamBuffer, current_section: str) -> str:
-        """Emit a text token to the stream buffer or accumulate for final_only mode.
-
-        Args:
-            text: The text fragment to emit.
-            buf: The StreamBuffer to write to when not in final_only mode.
-            current_section: The accumulated text since the last tool call.
-
-        Returns:
-            The updated current_section string.
-        """
-        if self._display.final_only:
-            return current_section + text
-        await buf.add(text)
-        return current_section
-
-    async def _emit_thinking(self, raw: object, buf: StreamBuffer, current_section: str) -> str:
-        """Emit a thinking token to the stream buffer if the thinking event is enabled.
-
-        Thinking tokens are only emitted when ``events["thinking"]`` is True in the
-        DisplayConfig. The token is wrapped in a blockquote for visual distinction.
-
-        Behaviour depends on ``final_only``:
-
-        - ``final_only=False`` (stream mode): the thinking block is pushed to ``buf``
-          so it appears in the live token stream. It is NOT added to ``full_reply`` or
-          ``current_section`` — the stored reply text will not contain thinking content.
-        - ``final_only=True`` (block mode): the thinking block is appended to
-          ``current_section`` and therefore included in the final reply sent to the
-          channel. This is intentional and useful for debugging or transparency: the
-          user receives the model's reasoning inline with the answer.
-
-        Args:
-            raw: The raw content field from a LangChain AIMessageChunk.
-            buf: The StreamBuffer to write to when not in final_only mode.
-            current_section: The accumulated text since the last tool call.
-
-        Returns:
-            The updated current_section string.
-        """
-        if not self._display.events.get("thinking", False):
-            return current_section
-        thinking = _extract_thinking(raw)
-        if not thinking:
-            return current_section
-        wrapped = f"\n> *[thinking]* {thinking}\n"
-        if self._display.final_only:
-            return current_section + wrapped
-        await buf.add(wrapped)
-        return current_section
-
-
 # _build_execution_context and _enrich_system_prompt are imported from atelier.prompts above.
+# emit_text and emit_thinking are imported from atelier.stream_loop above.

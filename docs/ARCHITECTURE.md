@@ -1,6 +1,6 @@
 # RELAIS — Architecture Technique
 
-**Dernière mise à jour :** 2026-04-19
+**Dernière mise à jour :** 2026-04-21
 
 Ce document décrit l'architecture effectivement implémentée dans le code du dépôt.
 
@@ -182,14 +182,19 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
   - le streaming texte/progress sur `relais:messages:streaming:{channel}:{correlation_id}`
   - certains événements de progression sur `relais:messages:outgoing:{channel}`
   - une action `archive` sur `relais:memory:request` avec la réponse complète et `messages_raw` pour archivage Souvenir
-  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`. Publié dans deux cas : (a) après un tour réussi quand `tool_call_count > 0`, (b) sur le chemin DLQ (`AgentExecutionError`) avec `tool_error_count = -1` (sentinelle : tour avorté) et `messages_raw = exc.messages_raw` (conversation partielle capturée depuis le graph state)
+  - une trace d'exécution sur `relais:skill:trace` pour Forgeron (fire-and-forget ; uniquement quand `skills_used` non vide) ; `context[CTX_SKILL_TRACE]` contient `skill_names`, `tool_call_count`, `tool_error_count`, `messages_raw`, `skill_paths`. Publié dans deux cas : (a) après un tour réussi quand `tool_call_count > 0`, (b) sur le chemin DLQ (`AgentExecutionError`) avec `tool_error_count = -1` (sentinelle : tour avorté) et `messages_raw = exc.messages_raw` (conversation partielle capturée depuis le graph state). De plus, une trace distincte est publiée **pour chaque sous-agent** ayant utilisé des outils (`SubagentTrace`, step 7b) — les messages capturés par `SubagentMessageCapture` (callback LangChain injecté dans le `RunnableConfig`) sont scopés au namespace LangGraph du sous-agent
   - la réponse finale sur `relais:messages:outgoing_pending` (sans `messages_raw`) ; `context["atelier"]["skills_used"]` estampillé si des skills ont été utilisés
   - en cas d'échec agent (`AgentExecutionError`) : une réponse d'erreur synthétisée par `ErrorSynthesizer` (appel LLM léger) publiée sur `relais:messages:outgoing_pending` pour que l'utilisateur reçoive un message empathique au lieu d'un silence
   - les erreurs finales sur `relais:tasks:failed`
 - **Modules extraits** :
-  - `atelier/streaming.py` — `StreamBuffer`, `_extract_thinking`, `_has_tool_use_block` ; helpers de buffering de tokens extraits de `agent_executor.py` pour maintenir chaque module sous 800 lignes.
+  - `atelier/streaming.py` — `StreamBuffer`, `_extract_thinking`, `_has_tool_use_block`, `_extract_block_type`, `TaskArgsTracker`, `ChunkPayload`, `decode_chunk` ; helpers de buffering de tokens et d'extraction de blocs de contenu ; `TaskArgsTracker` accumule les fragments d'arguments JSON du tool `task` (streaming token-by-token) pour en extraire le nom du sous-agent et maintenir un mapping namespace-ID → nom sur la durée d'un `_stream()` ; `ChunkPayload` (NamedTuple) modélise un chunk validé DeepAgents astream v2 (`chunk_type`, `ns`, `data`, propriété `source`) ; `decode_chunk` valide et décode un chunk brut dict en `ChunkPayload` ou retourne `None` pour les formes inconnues ; également `REPLY_PLACEHOLDER`, `_EXECUTE_FAILURE_MARKER`, `_normalise_content` (constantes sentinelles et normalisation de contenu) ; tous extraits de `agent_executor.py` pour maintenir chaque module sous 800 lignes.
   - `atelier/subagents_resolver.py` — fonctions pures de résolution des tokens `tools:` et `skills:` (`_load_tools_from_import`, `_resolve_skill_token`, …) ; extraites de `atelier/subagents.py`.
   - `atelier/display_config.py` — `DisplayConfig` (dataclass frozen) chargée depuis `atelier.yaml` (section `display:`), remplace l'ancien `progress_config.py`.
+  - `atelier/profile_model.py` — `_resolve_profile_model()` ; construit le `BaseChatModel` ou renvoie le string `model` selon la `ProfileConfig` ; extrait de `agent_executor.py`.
+  - `atelier/prompts.py` — constantes et helpers de construction du prompt système : `LONG_TERM_MEMORY_PROMPT`, `SELF_DIAGNOSIS_PROMPT`, `DIAGNOSTIC_MARKER`, `DIAGNOSTIC_AWARENESS_PROMPT`, `build_project_context_prompt`, `_build_execution_context`, `_enrich_system_prompt` ; extraits de `agent_executor.py`.
+  - `atelier/transient_errors.py` — détection des erreurs transitoires provider-agnostic : `_TRANSIENT_ERROR_NAMES`, `_TRANSIENT_VALUE_ERROR_PATTERNS`, `_is_transient_provider_error` ; extraits de `agent_executor.py`.
+  - `atelier/diagnostic_trace.py` — formatage de la trace diagnostique post-erreur : `_DIAGNOSTIC_MAX_CHARS`, `format_diagnostic_trace`, `_render_diagnostic_trace` ; extraits de `agent_executor.py`. Réexportés depuis `agent_executor.py` pour compatibilité descendante.
+  - `atelier/stream_loop.py` — état et helpers purs de la boucle de streaming : `StreamLoopState` (dataclass accumulatrice d'un appel `_stream()` : `full_reply`, `last_tool_result`, `pending_tool_name`, `current_section`) ; `compute_reply_text` (calcule le texte de réponse final — fallback vers `last_tool_result` pour les modèles sans token IA final comme nemotron-mini, puis `REPLY_PLACEHOLDER`) ; `build_subagent_traces` (construit les `SubagentTrace` à partir des données de callback LangChain) ; `handle_updates_chunk` (traite les chunks de type `updates` : transitions de step et détection de lancement de sous-agent) ; `handle_tool_call_chunks` (traite les tool call chunks d'un token messages — détection primaire via `tool_call_chunks`, fallback via `_has_tool_use_block` — retourne un nouveau `StreamLoopState` immuable) ; `handle_tool_result` (traite un message outil `ToolMessage` : normalise le contenu et met à jour `last_tool_result` dans le state) ; `emit_text` (émet un token texte dans le `StreamBuffer` ou accumule dans `current_section` selon le mode `final_only`) ; `emit_thinking` (émet un bloc de pensée si l'événement `thinking` est activé dans la `DisplayConfig`) ; extraits de `agent_executor.py`. Réexportés depuis `agent_executor.py` pour compatibilité descendante.
 - **Note** : l'annotation inline des skills (anciennement `SkillAnnotator` dans Atelier) a été migrée vers Forgeron (S3 — `ChangelogWriter`). Atelier publie les traces sur `relais:skill:trace` ; Forgeron gère le cycle changelog → consolidation de manière autonome.
 
 ### Commandant
@@ -248,7 +253,7 @@ Forgeron est le brick d'auto-amélioration des skills. Il dispose de deux pipeli
 #### Pipeline édition directe — Amélioration progressive des skills
 
 - Consomme `relais:skill:trace` (groupe `forgeron_group`, `ack_mode="always"` — les traces sont advisory).
-- Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`), et `skill_paths` (dict `{skill_name: chemin_absolu}` pour les skills bundle).
+- Atelier publie sur ce stream après chaque tour agent : noms de skills utilisés, nombre d'appels d'outils et d'erreurs, messages bruts LangChain sérialisés (`CTX_SKILL_TRACE`), et `skill_paths` (dict `{skill_name: chemin_absolu}` pour les skills bundle).  Atelier publie également une trace distincte **par sous-agent** ayant utilisé des outils (step 7b, `SubagentTrace`), avec les messages scopés au namespace LangGraph du sous-agent via `SubagentMessageCapture`.
 - Forgeron accumule une ligne par trace par skill dans SQLite (`SkillTraceStore`).
 
 **Édition directe (`SkillEditor`, LLM precise)** :
@@ -547,13 +552,13 @@ La configuration TUI est initialisée par `initialize_user_dir()` depuis `config
 
 Client terminal alternatif en TypeScript/Bun. Utilise **@opentui/solid** (rendu terminal SolidJS) comme moteur de rendu et **solid-js** pour la réactivité. Compilable en binaire autonome (`bun build --compile`).
 
-- **`src/main.tsx`** — point d'entrée : charge la config, instancie `RelaisClient`, rend `<App>` avec `@opentui/solid`, hydrate l'historique de session après le premier rendu.
+- **`src/main.tsx`** — point d'entrée : charge la config, instancie `RelaisClient`, rend `<App>` avec `@opentui/solid`, hydrate l'historique de session après le premier rendu. Patch `TextBufferRenderable.prototype.onResize` pour déclencher `setWrapWidth` après que Yoga a assigné la largeur finale — nécessaire pour activer le word-wrap dynamique.
 - **`src/app.tsx`** — composant racine `App` : layout (ChatHistory + InputArea + StatusBar), gestion sélection/copie via `useSelectionHandler` et `useKeyHandler`, dispatch des commandes `/clear` via `handleClear`.
 - **`src/components/ChatHistory.tsx`** — `<scrollbox>` avec sticky-scroll auto-follow, affiche `<Banner>` + liste de `<MessageBubble>`.
 - **`src/components/InputArea.tsx`** — zone de saisie multi-ligne, Enter=submit, Shift+Enter=newline.
 - **`src/components/StatusBar.tsx`** — barre de statut (session ID, état envoi, flash copie, bannière d'erreur).
 - **`src/components/MessageBubble.tsx`** — bulle de message user/assistant avec rendu markdown.
-- **`src/lib/`** — `client.ts` (REST/SSE), `sse-parser.ts` (parseur SSE stateful), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + RELAIS_HOME resolution), `clipboard.ts`, `logger.ts`, `handle-clear.ts` (logique `/clear` : vide l'UI immédiatement puis envoie `/clear` au backend pour purger l'historique Redis+SQLite, réinitialise le `sessionId`, affiche un flash de confirmation ou une bannière d'erreur).
+- **`src/lib/`** — `client.ts` (REST/SSE), `sse-parser.ts` (parseur SSE stateful), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + RELAIS_HOME resolution), `theme.ts` (store SolidJS réactif pour la palette de couleurs, initialisé depuis `config.theme` au démarrage via `initTheme()`), `clipboard.ts`, `logger.ts`, `handle-clear.ts` (logique `/clear` : vide l'UI immédiatement puis envoie `/clear` au backend pour purger l'historique Redis+SQLite, réinitialise le `sessionId`, affiche un flash de confirmation ou une bannière d'erreur).
 
 Dépendances : `@opentui/core`, `@opentui/solid`, `solid-js`, `yaml`. Runtime : Bun ≥ 1.3.
 

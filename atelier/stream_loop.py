@@ -17,6 +17,7 @@ from atelier.streaming import (
     StreamBuffer,
     TaskArgsTracker,
     _EXECUTE_FAILURE_MARKER,
+    _extract_thinking,
     _has_tool_use_block,
     _normalise_content,
 )
@@ -268,3 +269,60 @@ def build_subagent_traces(
             )
         )
     return tuple(traces)
+
+
+async def emit_text(
+    *,
+    text: str,
+    buf: StreamBuffer,
+    current_section: str,
+    final_only: bool,
+) -> str:
+    """Emit a text token to the stream buffer or accumulate for final_only mode.
+
+    Args:
+        text: The text fragment to emit.
+        buf: The StreamBuffer to write to when not in final_only mode.
+        current_section: The accumulated text since the last tool call.
+        final_only: When True, accumulate in current_section; when False,
+            forward to buf.
+
+    Returns:
+        The updated current_section string.
+    """
+    if final_only:
+        return current_section + text
+    await buf.add(text)
+    return current_section
+
+
+async def emit_thinking(
+    *,
+    raw: object,
+    buf: StreamBuffer,
+    current_section: str,
+    thinking_enabled: bool,
+    final_only: bool,
+) -> str:
+    """Emit a thinking token to the stream buffer if the thinking event is enabled.
+
+    Args:
+        raw: The raw content field from a LangChain AIMessageChunk.
+        buf: The StreamBuffer to write to when not in final_only mode.
+        current_section: The accumulated text since the last tool call.
+        thinking_enabled: Whether the thinking display event is active.
+        final_only: When True, append to current_section; when False, push to buf.
+
+    Returns:
+        The updated current_section string.
+    """
+    if not thinking_enabled:
+        return current_section
+    thinking = _extract_thinking(raw)
+    if not thinking:
+        return current_section
+    wrapped = f"\n> *[thinking]* {thinking}\n"
+    if final_only:
+        return current_section + wrapped
+    await buf.add(wrapped)
+    return current_section
