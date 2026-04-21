@@ -9,10 +9,17 @@ Re-exported in ``atelier/agent_executor.py`` for backward compatibility.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Callable
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
-from atelier.streaming import REPLY_PLACEHOLDER
+from atelier.streaming import (
+    REPLY_PLACEHOLDER,
+    StreamBuffer,
+    TaskArgsTracker,
+    _EXECUTE_FAILURE_MARKER,
+    _has_tool_use_block,
+    _normalise_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +86,146 @@ def compute_reply_text(
             effective_section = REPLY_PLACEHOLDER
 
     return effective_section if final_only else effective_full
+
+
+async def handle_updates_chunk(
+    *,
+    ns: list[str],
+    data: dict,
+    source: str,
+    tracker: TaskArgsTracker,
+    progress_callback: Callable[[str, str], Awaitable[None]] | None,
+) -> None:
+    """Process an ``updates`` chunk: log step transitions and detect subagent launches.
+
+    Args:
+        ns: Namespace list from the chunk (empty = root, non-empty = subagent).
+        data: The ``data`` dict from the updates chunk (node_name → state).
+        source: Human-readable source label for logging.
+        tracker: The ``TaskArgsTracker`` accumulating subagent name info.
+        progress_callback: Optional async callable for progress events.
+    """
+    for node_name in data:
+        if node_name in ("model", "tools"):
+            logger.debug("[%s] step: %s", source, node_name)
+        if node_name == "model" and ns:
+            ns_id = ns[0]
+            if not tracker.has_ns(ns_id):
+                name = tracker.try_parse_name()
+                if name:
+                    tracker.register_ns(ns_id, name)
+            subagent_label = tracker.get_name_for_ns(ns_id)
+            logger.info("[SUBAGENT] launched — name=%s", subagent_label)
+            if progress_callback is not None:
+                await progress_callback("subagent_start", subagent_label)
+
+
+async def handle_tool_call_chunks(
+    *,
+    token: Any,
+    source: str,
+    state: StreamLoopState,
+    tracker: TaskArgsTracker,
+    final_only: bool,
+    progress_callback: Callable[[str, str], Awaitable[None]] | None,
+) -> StreamLoopState:
+    """Process tool call chunks from a messages token.
+
+    Args:
+        token: The LangChain message token (AIMessageChunk).
+        source: Human-readable source label for logging.
+        state: Current loop state (updated immutably — a new instance is returned).
+        tracker: The ``TaskArgsTracker`` for the current stream.
+        final_only: Whether the display is in final-only mode.
+        progress_callback: Optional async callable for progress events.
+
+    Returns:
+        Updated ``StreamLoopState`` with the new ``pending_tool_name``
+        and, when ``final_only=True``, reset ``current_section``.
+    """
+    tool_call_chunks = getattr(token, "tool_call_chunks", None)
+    synthetic_fallback = False
+    if not tool_call_chunks:
+        tool_use_name = _has_tool_use_block(getattr(token, "content", None))
+        if tool_use_name:
+            tool_call_chunks = [{"name": tool_use_name, "args": ""}]
+            synthetic_fallback = True
+            logger.debug("[%s] tool_use block detected via content fallback: %s", source, tool_use_name)
+    if not tool_call_chunks:
+        return state
+
+    pending_tool_name = state.pending_tool_name
+    current_section = state.current_section
+
+    for tc in tool_call_chunks:
+        if tc.get("name"):
+            pending_tool_name = tc["name"]
+            if pending_tool_name == "task":
+                tracker.reset()
+            logger.info("[%s] tool_call: %s", source, pending_tool_name)
+            if progress_callback is not None:
+                await progress_callback("tool_call", pending_tool_name)
+            if final_only:
+                current_section = ""
+            if synthetic_fallback:
+                break
+        if tc.get("args"):
+            args_fragment = str(tc["args"])
+            if pending_tool_name == "task":
+                tracker.accumulate(args_fragment)
+                if not tracker.name_logged:
+                    name = tracker.try_parse_name()
+                    if name:
+                        logger.info("[agent] subagent_delegate — name=%s", name)
+                        tracker.name_logged = True
+            logger.info("[%s] tool_call_args [%s]: %s", source, pending_tool_name, args_fragment[:200])
+
+    return StreamLoopState(
+        full_reply=state.full_reply,
+        last_tool_result=state.last_tool_result,
+        pending_tool_name=pending_tool_name,
+        current_section=current_section,
+    )
+
+
+async def handle_tool_result(
+    *,
+    token: Any,
+    source: str,
+    state: StreamLoopState,
+    guard: Any,
+    progress_callback: Callable[[str, str], Awaitable[None]] | None,
+) -> StreamLoopState:
+    """Process a tool result token (ToolMessage).
+
+    Records the result in the loop state, updates the ToolErrorGuard,
+    and fires the progress callback.
+
+    Args:
+        token: The LangChain ToolMessage token.
+        source: Human-readable source label for logging.
+        state: Current loop state.
+        guard: ``ToolErrorGuard`` tracking error counts.
+        progress_callback: Optional async callable for progress events.
+
+    Returns:
+        Updated ``StreamLoopState`` with the new ``last_tool_result``.
+    """
+    tool_name = getattr(token, "name", "?")
+    normalised = _normalise_content(token.content)
+    logger.info("[%s] tool_result [%s]: %s", source, tool_name, normalised[:300])
+    if progress_callback is not None:
+        await progress_callback("tool_result", f"{tool_name}: {normalised[:100]}")
+    is_logical_error = getattr(token, "status", None) == "error" or (
+        tool_name == "execute" and _EXECUTE_FAILURE_MARKER in normalised
+    )
+    guard.record(tool_name, is_logical_error)
+    return StreamLoopState(
+        full_reply=state.full_reply,
+        last_tool_result=normalised,
+        pending_tool_name=state.pending_tool_name,
+        current_section=state.current_section,
+    )
 
 
 def build_subagent_traces(

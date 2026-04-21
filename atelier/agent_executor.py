@@ -2,6 +2,15 @@
 
 Replaces SDKExecutor with a LangChain/DeepAgents agent that supports
 native streaming (token-by-token) and multi-provider models.
+
+Helper modules extracted to keep this file under 800 lines (all symbols
+re-exported here for backward compatibility):
+- ``atelier.profile_model`` — ``_resolve_profile_model``
+- ``atelier.diagnostic_trace`` — ``format_diagnostic_trace``, ``_render_diagnostic_trace``
+- ``atelier.prompts`` — system-prompt constants and builders
+- ``atelier.transient_errors`` — ``_is_transient_provider_error``
+- ``atelier.streaming`` — ``StreamBuffer``, ``TaskArgsTracker``, ``ChunkPayload``, ``decode_chunk``
+- ``atelier.stream_loop`` — ``StreamLoopState``, ``compute_reply_text``, ``build_subagent_traces``
 """
 
 from __future__ import annotations
@@ -32,6 +41,8 @@ from atelier.errors import AgentExecutionError, DiagnosticTrace, ExhaustedRetrie
 from atelier.streaming import (
     STREAM_BUFFER_CHARS,
     StreamBuffer,
+    TaskArgsTracker,
+    decode_chunk,
     _extract_thinking,
     _has_tool_use_block,
     _normalise_content,
@@ -53,6 +64,14 @@ from atelier.transient_errors import (
     _is_transient_provider_error,
 )
 from atelier.profile_model import _resolve_profile_model
+from atelier.stream_loop import (
+    StreamLoopState,
+    compute_reply_text,
+    build_subagent_traces,
+    handle_updates_chunk,
+    handle_tool_call_chunks,
+    handle_tool_result,
+)
 from atelier.diagnostic_trace import (
     _DIAGNOSTIC_MAX_CHARS,
     format_diagnostic_trace,
@@ -496,26 +515,10 @@ class AgentExecutor:
             *subagent_traces* is a tuple of per-subagent execution traces captured
             via LangChain callbacks (empty tuple when no subagents were invoked).
         """
-        full_reply = ""
-        last_tool_result: str = ""
-        pending_tool_name: str = ""
-        # Accumulates text tokens since the last tool call.
-        # When stream_final_only=True, only this section is streamed (and only
-        # after the loop ends), which prevents intermediate pre-tool narration
-        # from leaking to the user.
-        current_section: str = ""
-        # Subagent name tracking: maps DeepAgents namespace ID → declared subagent name.
-        # Populated by accumulating `task` tool call args and parsing `name` (or `subagent_type`).
-        ns_to_name: dict[str, str] = {}
-        # Buffer for accumulating `task` tool call arg tokens (streamed token-by-token).
-        task_args_buf: str = ""
-        # Set to True once we log the subagent name for the current task call,
-        # to avoid duplicate log lines as more arg tokens arrive.
-        task_name_logged: bool = False
-
+        state = StreamLoopState()
+        tracker = TaskArgsTracker()
         guard = ToolErrorGuard(max_consecutive=5, max_total=8)
 
-        # No-op buffer when streaming is disabled
         async def _noop_callback(chunk: str) -> None:  # pragma: no cover
             pass
 
@@ -523,191 +526,68 @@ class AgentExecutor:
             flush_threshold=STREAM_BUFFER_CHARS,
             callback=stream_callback if stream_callback is not None else _noop_callback,
         )
-
-        stream_kwargs: dict = {
-            "stream_mode": ["updates", "messages"],
-            "subgraphs": True,
-            "version": "v2",
-        }
+        stream_kwargs: dict = {"stream_mode": ["updates", "messages"], "subgraphs": True, "version": "v2"}
         if config is not None:
             stream_kwargs["config"] = config
 
         async with contextlib.aclosing(self._agent.astream(input_data, **stream_kwargs)) as stream:
-            async for chunk in stream:
-                if not (isinstance(chunk, dict) and "type" in chunk and "ns" in chunk and "data" in chunk):
-                    logger.warning("Unexpected astream chunk shape: %s", type(chunk))
+            async for raw_chunk in stream:
+                chunk = decode_chunk(raw_chunk)
+                if chunk is None:
+                    logger.warning("Unexpected astream chunk shape: %s", type(raw_chunk))
                     continue
-                chunk_type = chunk["type"]
-                ns = chunk["ns"]
-                data = chunk["data"]
-                source = f"subagent:{ns[0]}" if ns else "agent"
 
-                # ── Step transitions ─────────────────────────────────────────
-                if chunk_type == "updates":
-                    for node_name in data:
-                        if node_name in ("model", "tools"):
-                            logger.debug("[%s] step: %s", source, node_name)
-                        if node_name == "model" and ns:
-                            # Subagent (non-root namespace) is starting an LLM call.
-                            # Try to resolve declared name from accumulated task args.
-                            ns_id = ns[0]
-                            if ns_id not in ns_to_name and task_args_buf:
-                                try:
-                                    import json as _json
-                                    _parsed = _json.loads(task_args_buf)
-                                    _subagent_type = _parsed.get("name", "") or _parsed.get("subagent_type", "")
-                                    if _subagent_type:
-                                        ns_to_name[ns_id] = _subagent_type
-                                except Exception:
-                                    pass
-                            subagent_label = ns_to_name.get(ns_id, ns_id)
-                            logger.info("[SUBAGENT] launched — name=%s", subagent_label)
-                            if progress_callback is not None:
-                                await progress_callback("subagent_start", subagent_label)
-
-                # ── Message events ───────────────────────────────────────────
-                elif chunk_type == "messages":
-                    token, _metadata = data
-
-                    # Tool call chunks — only AIMessageChunk has this attribute.
-                    # Primary detection: token.tool_call_chunks (all providers).
-                    # Fallback: content block with type=="tool_use" (langchain_anthropic
-                    # extended-thinking mode emits both simultaneously; this catches
-                    # providers that populate only the structured content block).
-                    tool_call_chunks = getattr(token, "tool_call_chunks", None)
-                    synthetic_fallback = False
-                    if not tool_call_chunks:
-                        # Fallback: detect tool_use block in structured content
-                        tool_use_name = _has_tool_use_block(getattr(token, "content", None))
-                        if tool_use_name:
-                            tool_call_chunks = [{"name": tool_use_name, "args": ""}]
-                            synthetic_fallback = True
-                            logger.debug("[%s] tool_use block detected via content fallback: %s", source, tool_use_name)
-                    if tool_call_chunks:
-                        for tc in tool_call_chunks:
-                            if tc.get("name"):
-                                pending_tool_name = tc["name"]
-                                if pending_tool_name == "task":
-                                    task_args_buf = ""  # reset accumulator for new task call
-                                    task_name_logged = False
-                                logger.info("[%s] tool_call: %s", source, pending_tool_name)
-                                if progress_callback is not None:
-                                    await progress_callback("tool_call", pending_tool_name)
-                                # Discard pre-tool narration: reset the current section
-                                # so only the post-tool final reply is streamed.
-                                if self._display.final_only:
-                                    current_section = ""
-                                # The synthetic fallback list always has exactly one entry
-                                # (the first tool_use block name returned by
-                                # _has_tool_use_block).  Break explicitly so any future
-                                # mutation to that list cannot cause duplicate events.
-                                if synthetic_fallback:
-                                    break
-                            if tc.get("args"):
-                                args_fragment = str(tc["args"])
-                                if pending_tool_name == "task":
-                                    task_args_buf += args_fragment
-                                    if not task_name_logged:
-                                        try:
-                                            import json as _json
-                                            _parsed = _json.loads(task_args_buf)
-                                            _name = _parsed.get("name", "") or _parsed.get("subagent_type", "")
-                                            if _name:
-                                                logger.info("[agent] subagent_delegate — name=%s", _name)
-                                                task_name_logged = True
-                                        except Exception:
-                                            pass
-                                args_preview = args_fragment[:200]
-                                logger.info(
-                                    "[%s] tool_call_args [%s]: %s",
-                                    source,
-                                    pending_tool_name,
-                                    args_preview,
-                                )
-
-                    # Tool result
+                if chunk.chunk_type == "updates":
+                    await handle_updates_chunk(
+                        ns=chunk.ns, data=chunk.data, source=chunk.source,
+                        tracker=tracker, progress_callback=progress_callback,
+                    )
+                elif chunk.chunk_type == "messages":
+                    token, _metadata = chunk.data
+                    state = await handle_tool_call_chunks(
+                        token=token, source=chunk.source, state=state, tracker=tracker,
+                        final_only=self._display.final_only, progress_callback=progress_callback,
+                    )
                     if token.type == "tool":
-                        tool_name = getattr(token, "name", "?")
-                        normalised = _normalise_content(token.content)
-                        last_tool_result = normalised
-                        logger.info(
-                            "[%s] tool_result [%s]: %s",
-                            source,
-                            tool_name,
-                            normalised[:300],
+                        state = await handle_tool_result(
+                            token=token, source=chunk.source, state=state,
+                            guard=guard, progress_callback=progress_callback,
                         )
-                        if progress_callback is not None:
-                            await progress_callback(
-                                "tool_result",
-                                f"{tool_name}: {normalised[:100]}",
-                            )
-                        # Loop guard: abort on too many errors (consecutive or total).
-                        # DeepAgents marks execute ToolMessages with status="success" even when
-                        # the command exits with a non-zero code — the exit code is only embedded
-                        # in the text as "[Command failed with exit code N]". We detect that here
-                        # so the loop guard fires on systematic shell failures too.
-                        is_logical_error = getattr(token, "status", None) == "error" or (
-                            tool_name == "execute" and _EXECUTE_FAILURE_MARKER in normalised
-                        )
-                        guard.record(tool_name, is_logical_error)
-
-                    # Text tokens from the LLM.
-                    # AIMessageChunk.type is "AIMessageChunk" in streaming (not "ai"),
-                    # so we match any non-tool message that carries content.
-                    # Note: tool_call_chunks and text content can coexist in the same
-                    # AIMessageChunk (parallel tool call + narration), so we do NOT
-                    # gate on the absence of tool_call_chunks.
                     if token.type != "tool" and token.content:
                         text = _normalise_content(token.content)
                         if text:
-                            full_reply += text
-                            current_section = await self._emit_text(text, buf, current_section)
-
-                        current_section = await self._emit_thinking(token.content, buf, current_section)
+                            state = StreamLoopState(
+                                full_reply=state.full_reply + text,
+                                last_tool_result=state.last_tool_result,
+                                pending_tool_name=state.pending_tool_name,
+                                current_section=await self._emit_text(text, buf, state.current_section),
+                            )
+                        new_section = await self._emit_thinking(token.content, buf, state.current_section)
+                        if new_section is not state.current_section:
+                            state = StreamLoopState(
+                                full_reply=state.full_reply,
+                                last_tool_result=state.last_tool_result,
+                                pending_tool_name=state.pending_tool_name,
+                                current_section=new_section,
+                            )
 
         if stream_callback is not None:
             if self._display.final_only:
-                # Stream only the final section (text after the last tool call).
-                await buf.add(current_section)
+                await buf.add(state.current_section)
             await buf.flush()
 
-        # ── Fallback for models that do not emit a final AI text token ─────
-        # (e.g. nemotron-mini / Ollama models that treat tool results as the reply)
-        if not full_reply:
-            if last_tool_result:
-                logger.warning(
-                    "No AI text token emitted — using last tool result as reply "
-                    "(nemotron fallback). preview=%s",
-                    last_tool_result[:80],
-                )
-                full_reply = last_tool_result
-                current_section = last_tool_result
-            else:
-                logger.warning(
-                    "No AI text token and no tool result — returning placeholder reply."
-                )
-                full_reply = REPLY_PLACEHOLDER
-                current_section = REPLY_PLACEHOLDER
-
-        # When final_only mode is active, return only the post-last-tool-call
-        # text so that intermediate narration is excluded from the reply content.
-        reply_text = current_section if self._display.final_only else full_reply
-
-        # Build per-subagent traces from LangChain callback data.
-        subagent_traces: tuple[SubagentTrace, ...] = ()
-        if capture is not None and ns_to_name:
-            traces_list: list[SubagentTrace] = []
-            for ns_id, subagent_name in ns_to_name.items():
-                sa_data = capture.get_subagent_data(ns_id)
-                traces_list.append(SubagentTrace(
-                    subagent_name=subagent_name,
-                    skill_names=self._subagent_skill_map.get(subagent_name, []),
-                    tool_call_count=sa_data.tool_calls,
-                    tool_error_count=sa_data.tool_errors,
-                    messages_raw=serialize_messages(sa_data.messages),
-                ))
-            subagent_traces = tuple(traces_list)
-
+        reply_text = compute_reply_text(
+            full_reply=state.full_reply,
+            current_section=state.current_section,
+            last_tool_result=state.last_tool_result,
+            final_only=self._display.final_only,
+        )
+        subagent_traces = build_subagent_traces(
+            capture=capture,
+            ns_to_name=tracker.ns_to_name,
+            subagent_skill_map=self._subagent_skill_map,
+            serialize_messages_fn=serialize_messages,
+        )
         return reply_text, guard.total_calls, guard.total_errors, subagent_traces
 
 
