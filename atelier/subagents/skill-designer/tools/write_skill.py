@@ -18,7 +18,7 @@ from typing import Optional
 
 from langchain_core.tools import BaseTool
 
-from common.config_loader import resolve_skills_dir
+from common.config_loader import resolve_bundles_dir, resolve_skills_dir
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,19 @@ class WriteSkillTool(BaseTool):
             return f"ERROR: {error}"
 
         if skill_path is not None:
-            skill_dir = Path(skill_path)
+            resolved = Path(skill_path).expanduser().resolve()
+            allowed_roots = (
+                resolve_skills_dir().resolve(),
+                resolve_bundles_dir().resolve(),
+            )
+            if not any(resolved == r or resolved.is_relative_to(r) for r in allowed_roots):
+                msg = (
+                    f"skill_path '{skill_path}' is outside allowed directories "
+                    f"(skills or bundles). Write refused."
+                )
+                logger.warning("WriteSkillTool: %s", msg)
+                return f"ERROR: {msg}"
+            skill_dir = resolved
         else:
             skills_dir = resolve_skills_dir()
             skill_dir = skills_dir / skill_name

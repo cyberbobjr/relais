@@ -25,7 +25,8 @@ class ExecutionStore:
 
     Example usage::
 
-        store = ExecutionStore(db_path=Path("~/.relais/storage/horloger.db"))
+        from common.config_loader import get_relais_home
+        store = ExecutionStore(db_path=get_relais_home() / "storage" / "horloger.db")
         await store.init()
         await store.record(execution)
         last = await store.get_last_execution("my-job")
@@ -45,10 +46,10 @@ class ExecutionStore:
         so that SQLite can open the file on first connection.
 
         Args:
-            db_path: Absolute or relative path to the SQLite database file.
-                Typically ``~/.relais/storage/horloger.db``.
+            db_path: Absolute path to the SQLite database file; resolved via
+                ``get_relais_home()`` by the caller.
         """
-        self._db_path: Path = db_path
+        self._db_path: Path = db_path.expanduser().resolve()
         url = f"sqlite+aiosqlite:///{self._db_path}"
         self._engine = create_async_engine(url, echo=False)
         self._session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

@@ -69,7 +69,7 @@ def detect_image_path(text: str) -> Path | None:
     stripped = text.strip()
     if "\n" in stripped:
         return None
-    p = Path(stripped)
+    p = Path(stripped).expanduser()
     if p.suffix.lower() in IMAGE_EXTENSIONS and p.exists():
         return p
     return None
@@ -117,6 +117,7 @@ def grab_image_from_clipboard() -> ImagePayload | None:
         import subprocess
         import tempfile
 
+        tmp: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
                 tmp = Path(f.name)
@@ -139,7 +140,8 @@ def grab_image_from_clipboard() -> ImagePayload | None:
             pass
         finally:
             try:
-                tmp.unlink(missing_ok=True)
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
             except Exception:  # noqa: BLE001
                 pass
 

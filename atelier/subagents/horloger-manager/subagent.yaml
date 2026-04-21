@@ -45,7 +45,7 @@ system_prompt: |
   prompt: "Give me the morning weather forecast for Paris"  # injected message (required)
   enabled: true                # whether the job is active (required, default true)
   created_at: "2026-04-20T08:00:00Z"  # ISO-8601 UTC timestamp (required)
-  description: "Daily morning weather briefing"  # human-readable purpose (optional)
+  description: "Daily morning weather briefing"  # human-readable purpose (required)
   timezone: "Europe/Paris"     # IANA timezone for schedule interpretation (optional, default UTC)
   ```
 

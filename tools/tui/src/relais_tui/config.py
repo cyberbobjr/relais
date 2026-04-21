@@ -14,7 +14,18 @@ import yaml
 
 _ENV_API_KEY = "RELAIS_TUI_API_KEY"
 _ENV_RELAIS_HOME = "RELAIS_HOME"
-_FALLBACK_HOME = Path("~/.relais")
+
+
+def _get_relais_home() -> Path:
+    """Return the RELAIS home directory, respecting RELAIS_HOME env var.
+
+    Returns:
+        Resolved absolute path to the RELAIS home directory.
+    """
+    custom = os.environ.get(_ENV_RELAIS_HOME)
+    if custom:
+        return Path(custom).expanduser().resolve()
+    return Path.home() / ".relais"
 
 
 def _default_config_path() -> Path:
@@ -27,10 +38,7 @@ def _default_config_path() -> Path:
     Returns:
         Path to ``<relais_home>/config/tui/config.yaml``.
     """
-    home = os.environ.get(_ENV_RELAIS_HOME)
-    if home:
-        return Path(home) / "config" / "tui" / "config.yaml"
-    return _FALLBACK_HOME / "config" / "tui" / "config.yaml"
+    return _get_relais_home() / "config" / "tui" / "config.yaml"
 
 
 @dataclass(frozen=True)
@@ -73,7 +81,7 @@ class Config:
 
     api_url: str = "http://localhost:8080"
     api_key: str = ""
-    history_path: str = "~/.relais/storage/tui/history"
+    history_path: str = ""  # resolved at runtime via _get_relais_home()
     request_timeout: int = 120
     last_session_id: str = ""
     theme: ThemeConfig = field(default_factory=ThemeConfig)
@@ -95,15 +103,16 @@ def load_config(path: Path | None = None) -> Config:
     Returns:
         A frozen Config instance.
     """
-    resolved = (path or _default_config_path()).expanduser()
+    resolved = path.expanduser().resolve() if path else _default_config_path()
 
     if not resolved.exists():
-        cfg = Config()
+        cfg = _apply_defaults(Config())
         save_config(cfg, resolved)
         return _apply_env(cfg)
 
     raw = yaml.safe_load(resolved.read_text()) or {}
     cfg = _build_config(raw)
+    cfg = _apply_defaults(cfg)
     return _apply_env(cfg)
 
 
@@ -114,9 +123,9 @@ def save_config(config: Config, path: Path | None = None) -> None:
 
     Args:
         config: The Config instance to persist.
-        path: Destination path. Defaults to ``~/.relais/config/tui/config.yaml``.
+        path: Destination path. Defaults to ``<RELAIS_HOME>/config/tui/config.yaml``.
     """
-    resolved = (path or _default_config_path()).expanduser()
+    resolved = path.expanduser().resolve() if path else _default_config_path()
     resolved.parent.mkdir(parents=True, exist_ok=True)
 
     data = asdict(config)
@@ -166,6 +175,20 @@ def _build_config(raw: dict) -> Config:
             kwargs[key] = getattr(defaults, key)
 
     return Config(**kwargs)
+
+
+def _apply_defaults(cfg: Config) -> Config:
+    """Fill in runtime-computed defaults that cannot be stored as literals.
+
+    Args:
+        cfg: Config instance that may have empty computed fields.
+
+    Returns:
+        Config with ``history_path`` resolved via ``_get_relais_home()``.
+    """
+    if not cfg.history_path:
+        return replace(cfg, history_path=str(_get_relais_home() / "storage" / "tui" / "history"))
+    return cfg
 
 
 def _apply_env(cfg: Config) -> Config:

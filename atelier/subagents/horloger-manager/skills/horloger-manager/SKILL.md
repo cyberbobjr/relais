@@ -54,7 +54,7 @@ HORLOGER watches the jobs directory with `watchfiles` and hot-reloads within
 | `prompt` | string | yes | — | The message text HORLOGER injects as if the user sent it. |
 | `enabled` | boolean | yes | `true` | When `false`, HORLOGER skips this job entirely. |
 | `created_at` | string | yes | — | ISO-8601 UTC timestamp of job creation (e.g. `2026-04-20T08:00:00Z`). |
-| `description` | string | no | `null` | Human-readable purpose shown in listings. |
+| `description` | string | yes | — | Human-readable purpose shown in listings. |
 | `timezone` | string | no | `"UTC"` | IANA timezone for schedule interpretation (e.g. `Europe/Paris`, `America/New_York`). |
 
 ### Complete example

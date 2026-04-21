@@ -502,15 +502,10 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "bundle":
         _run_bundle_cli()
 
-    from relais_tui.config import _default_config_path  # noqa: PLC2701
+    from relais_tui.config import _default_config_path, _get_relais_home  # noqa: PLC2701
 
-    relais_home = os.environ.get("RELAIS_HOME")
-    config_path = _default_config_path().expanduser().resolve()
-    log_path = (
-        (Path(relais_home) / "logs" / "tui.log").resolve()
-        if relais_home
-        else Path("~/.relais/logs/tui.log").expanduser()
-    )
+    config_path = _default_config_path()
+    log_path = _get_relais_home() / "logs" / "tui.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     _log_file = log_path.open("a", buffering=1, encoding="utf-8")

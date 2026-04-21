@@ -113,13 +113,16 @@ class MarkdownStream:
         self._live.update(Markdown(window_text) if window_text else Text(""))
 
     def _commit_final(self, text: str) -> None:
-        """Stop the live display and print the full response permanently.
+        """Stop the live display and commit the remaining window permanently.
 
-        The transient Live block is erased on stop, so we print the entire
-        accumulated text (not just the remaining window) as final Markdown.
+        The transient Live block is erased on stop. Stable lines above the
+        window are already printed, so only the window lines need reprinting.
         """
         self._live.stop()
         self._live_active = False
 
         if text:
-            self._console.print(Markdown(text))
+            lines = self._render_lines(text)
+            remaining = "\n".join(lines[self._num_printed:])
+            if remaining:
+                self._console.print(Markdown(remaining))
