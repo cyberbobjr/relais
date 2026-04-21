@@ -12,6 +12,7 @@ import {
   setErrorBanner,
   setCopyFlash,
 } from "./lib/store.ts";
+import { handleClear } from "./lib/handle-clear.ts";
 import { writeToClipboard, matchesCopyKey } from "./lib/clipboard.ts";
 import type { RelaisClient } from "./lib/client.ts";
 import { logger } from "./lib/logger.ts";
@@ -75,7 +76,7 @@ export function App({ client, sessionId, onSessionId }: Props) {
 
   async function handleSubmit(text: string) {
     if (text === "/clear") {
-      clearMessages();
+      await handleClear({ client, sessionId, clearMessages, onSessionId, setErrorBanner, setCopyFlash });
       return;
     }
 

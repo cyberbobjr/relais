@@ -548,12 +548,12 @@ La configuration TUI est initialisée par `initialize_user_dir()` depuis `config
 Client terminal alternatif en TypeScript/Bun. Utilise **@opentui/solid** (rendu terminal SolidJS) comme moteur de rendu et **solid-js** pour la réactivité. Compilable en binaire autonome (`bun build --compile`).
 
 - **`src/main.tsx`** — point d'entrée : charge la config, instancie `RelaisClient`, rend `<App>` avec `@opentui/solid`, hydrate l'historique de session après le premier rendu.
-- **`src/app.tsx`** — composant racine `App` : layout (ChatHistory + InputArea + StatusBar), gestion sélection/copie via `useSelectionHandler` et `useKeyHandler`, dispatch des commandes `/clear`.
+- **`src/app.tsx`** — composant racine `App` : layout (ChatHistory + InputArea + StatusBar), gestion sélection/copie via `useSelectionHandler` et `useKeyHandler`, dispatch des commandes `/clear` via `handleClear`.
 - **`src/components/ChatHistory.tsx`** — `<scrollbox>` avec sticky-scroll auto-follow, affiche `<Banner>` + liste de `<MessageBubble>`.
 - **`src/components/InputArea.tsx`** — zone de saisie multi-ligne, Enter=submit, Shift+Enter=newline.
 - **`src/components/StatusBar.tsx`** — barre de statut (session ID, état envoi, flash copie, bannière d'erreur).
 - **`src/components/MessageBubble.tsx`** — bulle de message user/assistant avec rendu markdown.
-- **`src/lib/`** — `client.ts` (REST/SSE), `sse-parser.ts` (parseur SSE stateful), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + RELAIS_HOME resolution), `clipboard.ts`, `logger.ts`.
+- **`src/lib/`** — `client.ts` (REST/SSE), `sse-parser.ts` (parseur SSE stateful), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + RELAIS_HOME resolution), `clipboard.ts`, `logger.ts`, `handle-clear.ts` (logique `/clear` : vide l'UI immédiatement puis envoie `/clear` au backend pour purger l'historique Redis+SQLite, réinitialise le `sessionId`, affiche un flash de confirmation ou une bannière d'erreur).
 
 Dépendances : `@opentui/core`, `@opentui/solid`, `solid-js`, `yaml`. Runtime : Bun ≥ 1.3.
 
