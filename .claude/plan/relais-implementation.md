@@ -401,7 +401,6 @@ Souvenir gère maintenant **deux streams** :
   1. Lit `messages_raw` depuis `envelope.metadata["messages_raw"]` (blob sérialisé par Atelier via `serialize_messages()`)
   2. RPUSH blob complet → `relais:context:{session_id}`, LTRIM -20, EXPIRE 24h (un blob par tour)
   3. SQLite upsert sur `correlation_id` — champs `user_content` + `assistant_content` + `messages_raw JSON`
-  4. `memory_extractor.extract()` → faits utilisateur → SQLite `user_facts` (fire-and-forget)
 
 > ⚠️ Redis Streams n'a pas de wildcard consumer groups — Souvenir s'abonne aux canaux connus explicitement (liste depuis `config.yaml`)
 
@@ -413,12 +412,6 @@ Souvenir → LRANGE relais:context:{session_id} 0 19  (cache Redis)
         → XADD relais:memory:response {correlation_id, messages:[...]}
 Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 ```
-
-**`souvenir/memory_extractor.py`** — IMPLÉMENTÉ :
-- `MemoryExtractor(model="provider:model-id")` — ex: `MemoryExtractor(model="anthropic:claude-haiku-4-5")`
-- `async def extract(envelope: Envelope) -> list[dict]`
-- `init_chat_model(model, temperature=0.1, max_tokens=512)` + `ainvoke([SystemMessage, HumanMessage])`
-- Filtre confidence > 0.7, fire-and-forget (non-bloquant)
 
 ### 6.2 ✅ Architecture AIGUILLEUR configurable (2026-03-30) DONE
 
