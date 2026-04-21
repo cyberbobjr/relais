@@ -815,6 +815,43 @@ class Atelier(BrickBase):
                     corr, skills_used, agent_result.tool_call_count,
                 )
 
+            # 7b. Publish per-subagent skill traces for Forgeron
+            subagent_by_name = {s.get("name"): s for s in subagents if s.get("name")}
+            for sa_trace in agent_result.subagent_traces:
+                if sa_trace.tool_call_count == 0 or not sa_trace.skill_names:
+                    continue
+                sa_spec = subagent_by_name.get(sa_trace.subagent_name)
+                sa_skill_paths: dict[str, str] = {}
+                if sa_spec is not None:
+                    for skill_path in sa_spec.get("skills", []):
+                        p = Path(skill_path).resolve()
+                        if p.is_relative_to(_bundles_dir):
+                            sa_skill_paths[p.name] = skill_path
+                sa_trace_env = Envelope(
+                    content="",
+                    sender_id=f"atelier:{sender}",
+                    channel="internal",
+                    session_id=envelope.session_id,
+                    correlation_id=corr,
+                    action=ACTION_SKILL_TRACE,
+                    context={CTX_SKILL_TRACE: {
+                        "skill_names": sa_trace.skill_names,
+                        "tool_call_count": sa_trace.tool_call_count,
+                        "tool_error_count": sa_trace.tool_error_count,
+                        "messages_raw": sa_trace.messages_raw,
+                        "skill_paths": sa_skill_paths,
+                    }},
+                )
+                await redis_conn.xadd(
+                    STREAM_SKILL_TRACE, {"payload": sa_trace_env.to_json()}
+                )
+                logger.info(
+                    "[TASK] subagent skill trace published — corr=%s subagent=%s "
+                    "skills=%s calls=%d errors=%d",
+                    corr, sa_trace.subagent_name, sa_trace.skill_names,
+                    sa_trace.tool_call_count, sa_trace.tool_error_count,
+                )
+
             # 8. Build and publish response envelope
             response_env = Envelope.create_response_to(envelope, reply_text)
             response_env.action = ACTION_MESSAGE_OUTGOING_PENDING

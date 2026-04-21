@@ -170,7 +170,7 @@ async def test_force_subagent_found_routes_to_named_subagent() -> None:
 
     mock_executor_instance = AsyncMock()
     mock_executor_instance.execute = AsyncMock(
-        return_value=AgentResult(reply_text="skill created", messages_raw=[])
+        return_value=AgentResult(reply_text="skill created", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=())
     )
 
     async with _common_patches(atelier, redis_conn, envelope, mock_executor_instance) as MockExecutor:
@@ -213,7 +213,7 @@ async def test_force_subagent_not_found_falls_back_to_normal_agent() -> None:
 
     mock_executor_instance = AsyncMock()
     mock_executor_instance.execute = AsyncMock(
-        return_value=AgentResult(reply_text="fallback response", messages_raw=[])
+        return_value=AgentResult(reply_text="fallback response", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=())
     )
 
     async with _common_patches(atelier, redis_conn, envelope, mock_executor_instance) as MockExecutor:
@@ -255,7 +255,7 @@ async def test_no_force_subagent_leaves_subagents_unchanged() -> None:
 
     mock_executor_instance = AsyncMock()
     mock_executor_instance.execute = AsyncMock(
-        return_value=AgentResult(reply_text="normal reply", messages_raw=[])
+        return_value=AgentResult(reply_text="normal reply", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=())
     )
 
     async with _common_patches(atelier, redis_conn, envelope, mock_executor_instance) as MockExecutor:

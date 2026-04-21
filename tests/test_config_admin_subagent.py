@@ -588,7 +588,7 @@ async def _run_handle_message(allowed_subagents: list[str] | None) -> dict:
     ):
         mock_instance = AsyncMock()
         mock_instance.execute = AsyncMock(
-            return_value=AgentResult(reply_text="ok", messages_raw=[])
+            return_value=AgentResult(reply_text="ok", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=())
         )
         MockExecutor.return_value = mock_instance
 
