@@ -77,6 +77,8 @@ export function App({ client, sessionId, onSessionId }: Props) {
   async function handleSubmit(text: string) {
     if (text === "/clear") {
       await handleClear({ client, sessionId, clearMessages, onSessionId, setErrorBanner, setCopyFlash });
+      clearTimeout(copyFlashTimer);
+      copyFlashTimer = setTimeout(() => setCopyFlash(""), 1500);
       return;
     }
 

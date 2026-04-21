@@ -1,12 +1,28 @@
 import { render } from "@opentui/solid";
+import { TextBufferRenderable } from "@opentui/core";
 import { createSignal } from "solid-js";
 import { App } from "./app.tsx";
 import { loadConfig, saveConfig, withSessionId } from "./lib/config.ts";
 import { RelaisClient } from "./lib/client.ts";
 import { loadHistory, setHistoryLoading, setErrorBanner } from "./lib/store.ts";
+import { initTheme } from "./lib/theme.ts";
 import { logger } from "./lib/logger.ts";
 
+// onResize sets the viewport but never calls setWrapWidth, so word-wrap never
+// activates after Yoga assigns the final layout width to a text buffer node.
+{
+  const proto = TextBufferRenderable.prototype as any;
+  const orig: (w: number, h: number) => void = proto.onResize;
+  proto.onResize = function (width: number, height: number) {
+    orig.call(this, width, height);
+    if (this._wrapMode !== "none" && width > 0) {
+      this.textBufferView.setWrapWidth(width);
+    }
+  };
+}
+
 const config = loadConfig();
+initTheme(config.theme);
 logger.info(`tui-ts starting — logs: ${logger.path}`);
 
 const client = new RelaisClient(config);

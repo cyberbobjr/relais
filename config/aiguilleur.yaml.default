@@ -60,7 +60,7 @@ channels:
     type: native
     bind: "127.0.0.1"
     port: 8080
-    request_timeout: 30
+    request_timeout: 300
     cors_origins:
       - "*"
     include_traces: false
