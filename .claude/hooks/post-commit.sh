@@ -33,7 +33,9 @@ nohup "$CLAUDE_BIN" --dangerously-skip-permissions --add-dir "/Users/benjaminmar
 2. Update only the documentation files actually affected by those changes. Files to update as needed:
    - plans/RELAIS_ARCHITECTURE_COMPLETE_v12.md
    - README.md
+   - README_FR.md
    - docs/ARCHITECTURE.md
+   - docs/REDIS_BUS_API.md
    - .claude/plan/relais-implementation.md
    Focus on: new or modified bricks/services, changed Redis stream names or schemas, updated configuration keys (aiguilleur.yaml, atelier/profiles.yaml, atelier/mcp_servers.yaml, atelier.yaml), modified pipeline flows, new dependencies in pyproject.toml, changed Envelope fields or ACL rules. Do NOT rewrite accurate documentation.
 3. For each bricks in the app, update if necessary all docstring headers in main.py to reflect change in the brick's behavior, inputs, outputs, workflow, redis stream, redis pubsub or configuration. Bricks to check are those that were modified by the commit, or that have their behavior impacted by the commit (e.g. if a brick's input schema changed, check all bricks consuming that input).
