@@ -217,7 +217,7 @@ Chaque brique déclare ses flux via `stream_specs() -> list[StreamSpec]` et son 
 ### Horloger
 
 - **Producteur uniquement** : `stream_specs()` retourne `[]` ; BrickBase attend sur `shutdown_event` pendant que la `_tick_loop` tourne en tâche de fond.
-- Lit les specs de jobs YAML dans `~/.relais/config/horloger/jobs/*.yaml` (un fichier par job) ; rechargement automatique via watchfiles.
+- Lit les specs de jobs YAML dans `$RELAIS_HOME/config/horloger/jobs/*.yaml` (un fichier par job) ; rechargement automatique via watchfiles.
 - À chaque tick (`tick_interval_seconds`, défaut 30s) :
   1. `JobRegistry.reload()` + `Scheduler.sync_jobs()` — rechargement des jobs et purge de l'historique des jobs supprimés.
   2. `Scheduler.get_due_jobs()` — classifie les jobs en `to_trigger` / `to_skip` selon quatre gardes : guard futur, guard catch-up, guard désactivé, guard double-fire.
@@ -553,7 +553,7 @@ Client terminal alternatif en TypeScript/Bun. Utilise **@opentui/solid** (rendu 
 - **`src/components/InputArea.tsx`** — zone de saisie multi-ligne, Enter=submit, Shift+Enter=newline.
 - **`src/components/StatusBar.tsx`** — barre de statut (session ID, état envoi, flash copie, bannière d'erreur).
 - **`src/components/MessageBubble.tsx`** — bulle de message user/assistant avec rendu markdown.
-- **`src/lib/`** — `client.ts` (REST/SSE), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + lastSessionId), `clipboard.ts`, `logger.ts`.
+- **`src/lib/`** — `client.ts` (REST/SSE), `sse-parser.ts` (parseur SSE stateful), `store.ts` (état réactif SolidJS), `config.ts` (YAML config + RELAIS_HOME resolution), `clipboard.ts`, `logger.ts`.
 
 Dépendances : `@opentui/core`, `@opentui/solid`, `solid-js`, `yaml`. Runtime : Bun ≥ 1.3.
 

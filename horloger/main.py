@@ -2,7 +2,7 @@
 
 Functional role
 ---------------
-Reads YAML job files from ``~/.relais/config/horloger/jobs/``, checks on
+Reads YAML job files from ``$RELAIS_HOME/config/horloger/jobs/``, checks on
 every tick which jobs are due, and publishes trigger envelopes to
 ``relais:messages:incoming:horloger`` so the rest of the RELAIS pipeline
 can process them like normal user messages.
