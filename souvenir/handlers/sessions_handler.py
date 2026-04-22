@@ -76,9 +76,9 @@ class SessionsHandler(BaseActionHandler):
             A formatted string ready to send to the user.
         """
         if not sessions:
-            return "Aucune session trouvée."
+            return "No sessions found."
 
-        lines = ["Sessions disponibles :"]
+        lines = ["Available sessions:"]
         for i, s in enumerate(sessions, start=1):
             # Format date from epoch timestamp
             last_active: float = s.get("last_active") or 0.0
@@ -92,8 +92,8 @@ class SessionsHandler(BaseActionHandler):
             preview_display = (preview[:37] + "...") if len(preview) > 40 else preview
 
             lines.append(
-                f" {i}. [{date_str}] {turn_count} tours — \"{preview_display}\" (id: {session_id})"
+                f" {i}. [{date_str}] {turn_count} turns — \"{preview_display}\" (id: {session_id})"
             )
 
-        lines.append("Tape /resume <session_id> pour reprendre.")
+        lines.append("Type /resume <session_id> to resume.")
         return "\n".join(lines)

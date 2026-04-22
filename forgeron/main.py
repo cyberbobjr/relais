@@ -729,8 +729,8 @@ class Forgeron(BrickBase):
         notif = Envelope.create_response_to(envelope, "")
         notif.action = ACTION_MESSAGE_OUTGOING_PENDING
         notif.content = (
-            "Je travaille sur l'amélioration de mes compétences, "
-            "un nouveau skill est en cours de création..."
+            "I am working on improving my skills, "
+            "a new skill is being created..."
         )
         await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": notif.to_json()})
         logger.info(
