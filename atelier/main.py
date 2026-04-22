@@ -143,9 +143,13 @@ Message flow (one task at a time):
     │      _mcp_lock); apply ToolPolicy.filter_mcp_tools() per allowed_mcp_tools
     │  (5) resolve subagents + delegation prompt from SubagentRegistry,
     │      filtered by user's allowed_subagents patterns (fnmatch)
-    │  (6) AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
+    │  (6) Read streaming flag from context["aiguilleur"]["streaming"]; if True,
+    │      create per-request display_config = replace(_display_config, final_only=False)
+    │      so emit_text() flushes each token immediately instead of accumulating the
+    │      full reply.  Pass this override to both AgentExecutor and StreamPublisher.
+    │      AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
     │      backend=SouvenirBackend, checkpointer, subagents, delegation_prompt,
-    │      progress_callback=…)
+    │      display_config=display_config, progress_callback=…)
     │      ├── token chunks    ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ──► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count,

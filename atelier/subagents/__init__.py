@@ -61,6 +61,7 @@ from typing import Any
 
 import yaml
 
+from atelier.prompts import SUBAGENT_OPERATIONAL_RULES
 from common.config_loader import CONFIG_SEARCH_PATH, resolve_bundles_dir
 from common.pattern_matcher import matches as _matches_patterns
 from common.pattern_matcher import parse_patterns as _parse_subagent_patterns
@@ -694,11 +695,11 @@ class SubagentRegistry:
                 spec.skill_tokens, local_skills, spec.name
             )
 
-            enriched_prompt = (
-                f"{spec.system_prompt}\n\n{project_context}"
-                if project_context and project_context not in spec.system_prompt
-                else spec.system_prompt
-            )
+            enriched_prompt = spec.system_prompt
+            if project_context and project_context not in enriched_prompt:
+                enriched_prompt = f"{enriched_prompt}\n\n{project_context}"
+            if SUBAGENT_OPERATIONAL_RULES not in enriched_prompt:
+                enriched_prompt = f"{enriched_prompt}\n\n{SUBAGENT_OPERATIONAL_RULES}"
             entry: dict[str, Any] = {
                 "name": spec.name,
                 "description": spec.description,

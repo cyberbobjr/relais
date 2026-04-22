@@ -37,6 +37,26 @@ If you encounter repeated tool errors (3+ in a row for the same tool, or 5+ tota
 Never blindly retry a failing command with minor variations — diagnose first.
 """.strip()
 
+SUBAGENT_OPERATIONAL_RULES = """
+Operational rules (apply to every tool call):
+
+**On timeout (exit code 124 / "Command timed out"):**
+- DO NOT retry the same command.
+- Diagnose the root cause first:
+  1. Read the error message and any preceding tool results carefully.
+  2. Re-read the SKILL.md troubleshooting section for the skill you are using.
+  3. Form a hypothesis (wrong argument, wrong address, wrong flag, connectivity issue, …).
+  4. Try ONE corrected command based on your diagnosis.
+  5. If the diagnosis requires a preliminary command (e.g. fetching the correct value to use),
+     run that first, then rebuild the failing command with the correct value.
+
+**On repeated tool errors (3+ in a row for the same tool, or 5+ total):**
+- STOP retrying immediately.
+- Apply the same diagnosis steps above before attempting anything else.
+
+Never blindly retry a failing command — diagnose first, then act.
+""".strip()
+
 DIAGNOSTIC_MARKER = "[DIAGNOSTIC — internal]"
 
 DIAGNOSTIC_AWARENESS_PROMPT = f"""

@@ -179,7 +179,7 @@ async def handle_tool_call_chunks(
                     if name:
                         logger.info("[agent] subagent_delegate — name=%s", name)
                         tracker.name_logged = True
-            logger.info("[%s] tool_call_args [%s]: %s", source, pending_tool_name, args_fragment[:200])
+            logger.info("[%s] tool_call_args [%s]: %s", source, pending_tool_name, args_fragment[:2000])
 
     return StreamLoopState(
         full_reply=state.full_reply,

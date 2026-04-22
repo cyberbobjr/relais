@@ -280,7 +280,7 @@ class LongTermStore:
         from sqlalchemy import select
         from souvenir.models import ArchivedMessage
 
-        query = (
+        inner = (
             select(
                 ArchivedMessage.user_content,
                 ArchivedMessage.assistant_content,
@@ -288,7 +288,7 @@ class LongTermStore:
                 ArchivedMessage.correlation_id,
             )
             .where(ArchivedMessage.session_id == session_id)
-            .order_by(ArchivedMessage.created_at.asc())
+            .order_by(ArchivedMessage.created_at.desc())
             .limit(limit)
         )
 
@@ -296,9 +296,12 @@ class LongTermStore:
             safe_uid = (
                 user_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             )
-            query = query.where(
+            inner = inner.where(
                 ArchivedMessage.sender_id.like(f"%:{safe_uid}", escape="\\")
             )
+
+        subq = inner.subquery()
+        query = select(subq).order_by(subq.c.created_at.asc())
 
         async with self._session_factory() as session:
             result = await session.execute(query)

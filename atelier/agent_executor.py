@@ -348,6 +348,7 @@ class AgentExecutor:
         config = RunnableConfig(
             configurable={"thread_id": f"{user_id}:{envelope.session_id}"},
             callbacks=[capture],
+            recursion_limit=self._profile.max_turns * 3,
         )
         try:
             reply, tool_call_count, tool_error_count, subagent_traces = await self._stream(
