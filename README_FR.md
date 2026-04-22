@@ -15,7 +15,7 @@ Les briques actives du repo sont :
 - `commandant` : commandes slash hors LLM
 - `souvenir` : mémoire court terme Redis + archivage SQLite
 - `archiviste` : logs et observation partielle du pipeline
-- `forgeron` : amélioration autonome des skills (changelog + consolidation périodique) et création automatique de skills depuis les archives
+- `forgeron` : amélioration autonome des skills (réécriture directe via SkillEditor) et création automatique de skills depuis les archives
 - `horloger` : planificateur CRON — déclenche des prompts programmés comme messages utilisateurs virtuels à travers le pipeline complet
 
 Adaptateurs de canaux réellement livrés :
@@ -28,7 +28,7 @@ La configuration de canaux prévoit aussi `telegram` et `slack`, mais leur prés
 
 Outils livrés dans le dépôt :
 
-- `tools/tui/` : client terminal autonome (Textual) pour RELAIS, installable indépendamment (`uv pip install -e tools/tui`). Se connecte exclusivement via l'API REST SSE — aucune dépendance sur les internes RELAIS. Voir [plans/TUI.md](plans/TUI.md).
+- `tools/tui-ts/` : client terminal TypeScript (Bun + SolidJS + @opentui/core) — TUI avec streaming SSE natif. Lancer avec `bun run src/main.tsx`.
 
 ---
 
@@ -138,6 +138,7 @@ flowchart TD
 | `relais:tasks:failed` | Atelier | observateurs / diagnostics |
 | `relais:admin:pending_users` | Portail | revue manuelle |
 | `relais:skill:trace` | Atelier | Forgeron |
+| `relais:memory:response:{correlation_id}` | Souvenir | Forgeron (BRPOP) |
 | `relais:events:system` | Forgeron | Archiviste |
 | `relais:logs` | toutes les briques | Archiviste |
 
@@ -146,27 +147,25 @@ flowchart TD
 - `Portail` consomme `relais:messages:incoming`, résout l'utilisateur via `UserRegistry`, écrit `context["portail"]["user_record"]`, `context["portail"]["user_id"]` et `context["portail"]["llm_profile"]` (depuis `channel_profile` ou `"default"`), puis publie sur `relais:security`.
 - `Sentinelle` consomme `relais:security`, applique les ACL, route les messages normaux vers `relais:tasks` et les slash commands vers `relais:commands`. Les commandes inconnues ou non autorisées génèrent une réponse inline directe sur `relais:messages:outgoing:{channel}`.
 - `Commandant` consomme `relais:commands`. `/help` répond avec la liste des commandes disponibles. `/clear` publie une requête `clear` sur `relais:memory:request`. `/sessions` liste les sessions récentes de l'utilisateur. `/resume <session_id>` reprend une session précédente en chargeant son historique complet.
-- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte une architecture 2-tier de sous-agents : sous-agents utilisateur dans `$RELAIS_HOME/config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels), et sous-agents natifs dans `atelier/subagents/<nom>/` (livrés avec le code source). Sous-agents natifs livrés : `relais-config` (configuration CRUD canaux/profils) et `skill-designer` (création interactive de SKILL.md depuis une correction utilisateur). L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns). Hot-reload supporté pour les modifications en temps réel.
+- `Atelier` consomme `relais:tasks`, gère l'historique conversationnel via le checkpointer LangGraph persistant (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), publie éventuellement le streaming sur `relais:messages:streaming:{channel}:{correlation_id}`, les événements de progression sur `relais:messages:outgoing:{channel}`, puis la réponse finale sur `relais:messages:outgoing_pending`. Atelier supporte une architecture 2-tier de sous-agents : sous-agents utilisateur dans `$RELAIS_HOME/config/atelier/subagents/<nom>/` (répertoire par sous-agent, avec `subagent.yaml`, `tools/*.py` optionnels), et sous-agents natifs dans `atelier/subagents/<nom>/` (livrés avec le code source). Sous-agents natifs livrés : `relais-config` (configuration CRUD canaux/profils), `horloger-manager` (CRUD des fichiers YAML de jobs Horloger, accessible via `/horloger` ou `/schedule`) et `skill-designer` (création interactive de SKILL.md depuis une correction utilisateur). L'accès par rôle est contrôlé via `allowed_subagents` dans `portail.yaml` (fnmatch patterns). Hot-reload supporté pour les modifications en temps réel.
 - `Souvenir` consomme `relais:memory:request` (actions : `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`). L'action `archive` est publiée par Atelier avec le contenu complet du tour et les `messages_raw` pour archivage dans SQLite. Les actions `sessions` et `resume` retournent les données à l'utilisateur via `relais:messages:outgoing:{channel}` (avec ownership enforcement). Les actions de fichier sont déclenchées par les agents via `SouvenirBackend`. L'historique court terme est géré par le checkpointer LangGraph d'Atelier (keyed par `user_id:session_id`).
 - `Archiviste` observe `relais:logs`, `relais:events:*` et une liste partielle de streams pipeline. Il n'observe pas littéralement tous les streams.
 - `Forgeron` dispose de trois pipelines autonomes :
 
-  **Pipeline 1 — Amélioration des skills existants** (changelog + consolidation)
+  **Pipeline 1 — Amélioration des skills existants** (réécriture directe)
 
-  Consomme `relais:skill:trace` (`forgeron_group`). Pour chaque trace, Forgeron évalue quatre conditions de déclenchement par skill. L'analyse se déclenche dès qu'**au moins une** est vraie (et que `annotation_mode` est activé) :
+  Consomme `relais:skill:trace` (`forgeron_group`). Pour chaque trace, Forgeron évalue quatre conditions de déclenchement par skill. L'analyse se déclenche dès qu'**au moins une** est vraie (et que `edit_mode` est activé) :
 
   | Condition | Seuil | Ce qui est capturé |
   |-----------|-------|--------------------|
-  | **Erreurs d'outils** | `tool_error_count >= 1` | Turns où l'agent a échoué |
+  | **Erreurs d'outils** | `tool_error_count >= edit_min_tool_errors` (défaut 1) | Turns où l'agent a échoué |
   | **Turn avorté (DLQ)** | `tool_error_count == -1` | Turns avortés par `ToolErrorGuard` — `messages_raw` contient la conversation partielle |
   | **Success after failure** | Turn courant 0 erreurs, turn précédent (même skill) avait des erreurs | Le "turn de correction" — là où l'agent a trouvé la bonne approche |
-  | **Seuil d'usage** | `annotation_call_threshold` appels cumulés (défaut 5) | Patterns d'utilisation normaux, même sans erreur |
+  | **Seuil d'usage** | `edit_call_threshold` appels cumulés (défaut 10) | Patterns d'utilisation normaux, même sans erreur |
 
-  Un **cooldown Redis** par skill (`annotation_cooldown_seconds`, défaut 300 s) empêche le spam d'annotations.
+  Un **cooldown Redis** par skill (`edit_cooldown_seconds`, défaut 300 s) empêche le spam d'éditions.
 
-  L'amélioration se fait en deux phases :
-  - **Phase 1 — Changelog** : `ChangelogWriter` (LLM rapide) extrait 1–3 observations depuis le SKILL.md actuel + la conversation, et les ajoute à `CHANGELOG.md`. Le SKILL.md n'est **jamais modifié** en Phase 1.
-  - **Phase 2 — Consolidation** : quand `CHANGELOG.md` dépasse `consolidation_line_threshold` lignes (défaut 80) et que le cooldown de consolidation a expiré (défaut 30 min), `SkillConsolidator` (LLM precise) réécrit le SKILL.md en absorbant les observations, produit un `CHANGELOG_DIGEST.md` (audit trail) et vide le changelog. Notification optionnelle à l'utilisateur.
+  `SkillEditor` reçoit le SKILL.md actuel + la trace de conversation scopée au skill cible (`scope_messages_to_skill`), appelle le LLM une seule fois (`edit_profile`, défaut `precise`) avec `with_structured_output`, et réécrit directement le SKILL.md si `changed=True`. Aucun fichier intermédiaire (changelog) n'est produit.
 
   **Pipeline 2 — Création automatique de skills**
 
@@ -197,6 +196,7 @@ Les commandes slash sont traitées hors LLM par le **Commandant**. Elles démarr
 | `/clear` | Efface l'historique de la session courante (Redis + SQLite). |
 | `/sessions` | Liste vos sessions récentes avec leur identifiant. |
 | `/resume <id>` | Reprend une session précédente et charge son historique. |
+| `/bundle install <zip> \| uninstall <name> \| list` | Gère les bundles de skills/outils (installation depuis un ZIP, désinstallation, ou liste des bundles installés). |
 
 **Contrôle d'accès** : les commandes autorisées par rôle sont déclarées dans `roles.*.actions` de `portail.yaml`. `["*"]` donne accès à toutes les commandes, `[]` en interdit l'accès.
 
@@ -222,7 +222,50 @@ Les commandes inconnues ou non autorisées génèrent une réponse inline direct
 - Python `>=3.11`
 - `uv`
 - `supervisord` si vous voulez utiliser le lancement supervisé
-- Redis local si vous démarrez le système complet
+- Serveur Redis (voir installation ci-dessous)
+
+#### Installer Redis
+
+RELAIS utilise un **socket Unix** Redis (`./.relais/redis.sock`). Windows natif ne supporte pas les sockets Unix — utilisez WSL2 ou Docker à la place.
+
+**macOS**
+```bash
+brew install redis
+# Optionnel : démarrer Redis comme service en arrière-plan
+brew services start redis
+```
+
+**Linux — Debian / Ubuntu**
+```bash
+sudo apt update && sudo apt install redis-server
+sudo systemctl enable --now redis-server
+```
+
+**Linux — RHEL / Fedora / CentOS**
+```bash
+sudo dnf install redis
+sudo systemctl enable --now redis
+```
+
+**Linux — Arch**
+```bash
+sudo pacman -S redis
+sudo systemctl enable --now redis
+```
+
+**Windows**
+Redis ne dispose pas de build natif officiel pour Windows. Deux options supportées :
+
+- **WSL2** (recommandé) : installez Ubuntu via WSL2, puis suivez les étapes Debian/Ubuntu ci-dessus.
+- **Docker** :
+  ```bash
+  docker run -d --name relais-redis \
+    -v "$PWD/.relais:/data" \
+    redis redis-server /data/redis.conf
+  ```
+  Vérifiez que `config/redis.conf` est correctement monté et que le chemin du socket est accessible depuis l'hôte.
+
+Une fois Redis installé, RELAIS le démarre automatiquement via `supervisord` en utilisant `config/redis.conf` — pas besoin de le démarrer manuellement si vous utilisez `./supervisor.sh`.
 
 ### Chemin recommandé
 
@@ -247,7 +290,6 @@ alembic upgrade head
 - `config/portail.yaml`, `config/sentinelle.yaml`
 - `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - `config/aiguilleur.yaml`
-- `config/tui/config.yaml`
 - `config/HEARTBEAT.md`
 - les prompts livrés (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
@@ -274,12 +316,11 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 │   ├── atelier.yaml
 │   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
-│   ├── tui/
-│   │   └── config.yaml
 │   └── atelier/
 │       ├── profiles.yaml
 │       ├── mcp_servers.yaml
 │       └── subagents/          ← sous-agents custom (vide par défaut)
+├── bundles/                    ← bundles ZIP installés
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -293,7 +334,8 @@ Après initialisation, l'arborescence utilisateur ressemble à ceci :
 ├── logs/
 ├── backup/
 └── storage/
-    └── memory.db
+    ├── memory.db
+    └── horloger.db
 ```
 
 `audit.db` n'est pas une base actuellement gérée par le code. L'Archiviste écrit surtout dans `logs/events.jsonl` et dans les logs de processus.
@@ -514,6 +556,19 @@ Points importants :
 
 > L'installation et la configuration du canal WhatsApp (install de la passerelle baileys-api, création de la clé API, pairing QR) sont prises en charge de bout en bout par le sous-agent `relais-config` via les skills `channel-setup` et `whatsapp`. Voir [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) pour le guide pas-à-pas manuel.
 
+### `config/horloger.yaml`
+
+Contrôle le planificateur CRON. Les specs de jobs sont stockées sous forme de fichiers YAML individuels dans `jobs_dir` (un fichier par job).
+
+```yaml
+tick_interval_seconds: 30       # fréquence de vérification des jobs à déclencher
+catch_up_window_seconds: 120    # jobs plus anciens que cette fenêtre sont ignorés (pas de déclenchement en masse) après un downtime
+jobs_dir: "config/horloger/jobs"
+db_path: "storage/horloger.db"
+```
+
+Les jobs sont gérés via le sous-agent natif `horloger-manager` (accessible via `/horloger` ou `/schedule`) ou en créant manuellement des fichiers YAML dans `jobs_dir`.
+
 ---
 
 ## Prompts
@@ -540,7 +595,7 @@ Les fichiers `prompts/policies/*.md` (ex : `vacation.md`, `in_meeting.md`) sont 
 
 ## Variables d'environnement
 
-Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/ENV.md). Les plus importantes :
+Les variables utiles au runtime actuel sont détaillées dans [docs/ENV.md](docs/ENV.md). Les plus importantes :
 
 - `RELAIS_HOME`
 - `REDIS_SOCKET_PATH`

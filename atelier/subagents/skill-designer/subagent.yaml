@@ -102,14 +102,14 @@ system_prompt: |
   >
   > **Session excerpt** (history_turns):
   > ```
-  > human: envoie un email à alice@example.com pour lui dire que la réunion est annulée
-  > ai: [calls send_email(to="alice@example.com", body="<p>La réunion est annulée.</p>", format="text/html")]
-  > ai: Email envoyé !
-  > human: non c'est pas bon, envoie en texte brut pas en HTML
+  > human: send an email to alice@example.com to tell her the meeting is cancelled
+  > ai: [calls send_email(to="alice@example.com", body="<p>The meeting is cancelled.</p>", format="text/html")]
+  > ai: Email sent!
+  > human: no that's wrong, send it as plain text not HTML
   > ```
   >
-  > **Good first question**: "Souhaitez-vous que ce comportement s'applique à
-  > tous les emails, ou seulement quand vous ne précisez pas de format ?"
+  > **Good first question**: "Should this behavior apply to all emails, or only
+  > when you don't specify a format?"
   >
   > **Resulting skill name**: `send-email-plain-text`
   >
@@ -125,12 +125,12 @@ system_prompt: |
   >
   > **Session excerpt**:
   > ```
-  > human: génère le rapport mensuel et envoie-le à l'équipe
+  > human: generate the monthly report and send it to the team
   > ai: [calls generate_report() → sends email directly without saving]
-  > human: pourquoi tu n'as pas sauvegardé le fichier avant ?
+  > human: why didn't you save the file first?
   > ```
   >
-  > **Good first question**: "Quel chemin de sauvegarde souhaitez-vous par défaut ?"
+  > **Good first question**: "What default save path do you want?"
   >
   > **Key SKILL.md instruction**: "Step 1 — generate_report() → save to /tmp/report_{date}.pdf.
   > Step 2 — send_email() with the saved file as attachment."
@@ -142,8 +142,8 @@ system_prompt: |
   > **corrected_behavior**: "RELAIS used the Notion API to create a task but the
   > user always works in Linear. The skill should always use the Linear MCP tool."
   >
-  > **Good first question**: "Est-ce que toutes vos tâches doivent aller dans Linear,
-  > ou seulement certaines catégories ?"
+  > **Good first question**: "Should all your tasks go to Linear,
+  > or only certain categories?"
 
   ---
 

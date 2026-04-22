@@ -28,8 +28,7 @@ The channel configuration also covers `telegram` and `slack`, but their presence
 
 Tools shipped in the repo:
 
-- `tools/tui/`: standalone terminal client (prompt_toolkit) for RELAIS, installable independently (`uv pip install -e tools/tui`). Connects exclusively via the REST SSE API — no dependency on RELAIS internals. See [plans/TUI.md](plans/TUI.md).
-- `tools/tui-ts/`: TypeScript terminal client (Bun + SolidJS + @opentui/core) — alternative TUI with native SSE streaming. Run with `bun run src/main.tsx`.
+- `tools/tui-ts/`: TypeScript terminal client (Bun + SolidJS + @opentui/core) — TUI with native SSE streaming. Run with `bun run src/main.tsx`.
 
 ---
 
@@ -139,6 +138,7 @@ flowchart TD
 | `relais:tasks:failed` | Atelier | observers / diagnostics |
 | `relais:admin:pending_users` | Portail | manual review |
 | `relais:skill:trace` | Atelier | Forgeron |
+| `relais:memory:response:{correlation_id}` | Souvenir | Forgeron (BRPOP) |
 | `relais:events:system` | Forgeron | Archiviste |
 | `relais:logs` | all bricks | Archiviste |
 
@@ -196,6 +196,7 @@ Slash commands are handled outside the LLM by **Commandant**. They all start wit
 | `/clear` | Clears the current session history (Redis + SQLite). |
 | `/sessions` | Lists your recent sessions with their identifiers. |
 | `/resume <id>` | Resumes a previous session and loads its history. |
+| `/bundle install <zip> \| uninstall <name> \| list` | Manages skill/tool bundles (install from ZIP, uninstall, or list installed bundles). |
 
 **Access control**: commands authorized per role are declared in `roles.*.actions` in `portail.yaml`. `["*"]` grants access to all commands, `[]` denies all.
 
@@ -221,7 +222,50 @@ Unknown or unauthorized commands generate a direct inline response (without goin
 - Python `>=3.11`
 - `uv`
 - `supervisord` if you want supervised launching
-- Local Redis if you start the full system
+- Redis server (see installation below)
+
+#### Installing Redis
+
+RELAIS uses a Redis **Unix socket** (`./.relais/redis.sock`). Native Windows does not support Unix sockets — use WSL2 or Docker instead.
+
+**macOS**
+```bash
+brew install redis
+# Optional: start Redis as a background service
+brew services start redis
+```
+
+**Linux — Debian / Ubuntu**
+```bash
+sudo apt update && sudo apt install redis-server
+sudo systemctl enable --now redis-server
+```
+
+**Linux — RHEL / Fedora / CentOS**
+```bash
+sudo dnf install redis
+sudo systemctl enable --now redis
+```
+
+**Linux — Arch**
+```bash
+sudo pacman -S redis
+sudo systemctl enable --now redis
+```
+
+**Windows**
+Redis has no official native Windows build. Two supported paths:
+
+- **WSL2** (recommended): install Ubuntu via WSL2, then follow the Debian/Ubuntu steps above.
+- **Docker**:
+  ```bash
+  docker run -d --name relais-redis \
+    -v "$PWD/.relais:/data" \
+    redis redis-server /data/redis.conf
+  ```
+  Make sure `config/redis.conf` bind-mounts correctly and that the socket path is reachable from the host.
+
+After installing Redis, RELAIS starts it automatically via `supervisord` using `config/redis.conf` — you do not need to start it manually when using `./supervisor.sh`.
 
 ### Recommended path
 
@@ -246,7 +290,6 @@ alembic upgrade head
 - `config/portail.yaml`, `config/sentinelle.yaml`
 - `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - `config/aiguilleur.yaml`
-- `config/tui/config.yaml`
 - `config/HEARTBEAT.md`
 - shipped prompts (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
@@ -273,12 +316,11 @@ After initialization, the user directory looks like this:
 │   ├── atelier.yaml
 │   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
-│   ├── tui/
-│   │   └── config.yaml
 │   └── atelier/
 │       ├── profiles.yaml
 │       ├── mcp_servers.yaml
 │       └── subagents/          ← custom sub-agents (empty by default)
+├── bundles/                    ← installed ZIP bundles
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -292,7 +334,8 @@ After initialization, the user directory looks like this:
 ├── logs/
 ├── backup/
 └── storage/
-    └── memory.db
+    ├── memory.db
+    └── horloger.db
 ```
 
 `audit.db` is not a database currently managed by the code. Archiviste writes mainly to `logs/events.jsonl` and process logs.
@@ -512,6 +555,19 @@ Key points:
 - `type: external`, `command`, `args`, `class_path` and `max_restarts` are supported by the adapter supervisor
 
 > WhatsApp channel installation and configuration (baileys-api gateway install, API key creation, QR pairing) are handled end-to-end by the `relais-config` sub-agent via the `channel-setup` and `whatsapp` skills. See [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) for the manual step-by-step guide.
+
+### `config/horloger.yaml`
+
+Controls the CRON scheduler. Job specs are stored as individual YAML files in `jobs_dir` (one file per job).
+
+```yaml
+tick_interval_seconds: 30       # how often the scheduler checks for due jobs
+catch_up_window_seconds: 120    # jobs older than this are skipped (not bulk-fired) after downtime
+jobs_dir: "config/horloger/jobs"
+db_path: "storage/horloger.db"
+```
+
+Jobs are managed via the `horloger-manager` native sub-agent (accessible via `/horloger` or `/schedule` slash command) or by manually creating YAML files in `jobs_dir`.
 
 ---
 

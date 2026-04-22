@@ -75,6 +75,9 @@ class ProfileConfig:
         parallel_tool_calls: When False, disables parallel tool calls via the
             OpenAI-compatible API parameter. When None (default), the parameter
             is not forwarded and the provider default applies.
+        compact_keep: Number of recent messages to preserve when compacting
+            session history via /compact. Messages older than the keep window
+            are replaced by a summary. Default 6.
     """
 
     model: str
@@ -88,6 +91,7 @@ class ProfileConfig:
     mcp_timeout: int = 10
     mcp_max_tools: int = 20
     parallel_tool_calls: bool | None = None
+    compact_keep: int = 6
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +175,7 @@ def load_profiles(
             mcp_timeout=int(cfg.get("mcp_timeout", 10)),
             mcp_max_tools=int(cfg.get("mcp_max_tools", 20)),
             parallel_tool_calls=parallel_tool_calls,
+            compact_keep=int(cfg.get("compact_keep", 6)),
         )
 
     return result

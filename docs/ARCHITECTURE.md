@@ -531,23 +531,6 @@ Voir `docs/BUNDLES.md` pour la spécification complète du format.
 
 ## Outils clients (`tools/`)
 
-### TUI Python (`tools/tui/`)
-
-Client terminal interactif pour le canal REST. Paquet Python indépendant (`relais-tui`), point d'entrée `relais` (script console défini dans `pyproject.toml`). Implémenté avec **prompt_toolkit** (pas Textual).
-
-- **`relais_tui/app.py`** — application principale `RelaisApp` (prompt_toolkit) : layout HSplit (banner + chat + input), key bindings (Enter=send, Escape+Enter/Ctrl+J=newline, Ctrl+C/D=quit), boucle SSE asynchrone, rendu markdown streamé.
-- **`relais_tui/chat_state.py`** — `ChatState` : gestion de l'état de la conversation (messages user/assistant/tool_call/tool_result), append immutable, formatage pour l'affichage.
-- **`relais_tui/md_stream.py`** — rendu markdown incrémental token-par-token avec `MdStreamRenderer` ; buffer de tokens, flush sur newline, conversion rich → prompt_toolkit `FormattedText`.
-- **`relais_tui/paste_handler.py`** — détection de grande colle (`is_large_paste`), capture d'image depuis le presse-papier (`grab_image_from_clipboard`), résumé de colle texte (`summarize_paste`).
-- **`relais_tui/attachments.py`** — dataclasses `ImagePayload` et `PasteBlock` pour les pièces jointes injectées dans le message.
-- **`relais_tui/config.py`** — chargement de la configuration depuis `<relais_home>/config/tui/config.yaml` (cascade RELAIS_HOME / `~/.relais`). Historique TUI par défaut dans `~/.relais/storage/tui/history`.
-- **`relais_tui/client.py`** — client REST/SSE asynchrone : `POST /v1/messages` puis lecture du stream SSE.
-- **`relais_tui/sse_parser.py`** — parseur SSE stateful ; `SSEEvent = TokenEvent | DoneEvent | ProgressEvent | ErrorEvent | Keepalive`.
-- **`relais_tui/bundles.py`** — opérations bundle locales (list/install/uninstall) utilisées par l'onglet Bundles.
-- **`relais_tui/screens/bundles_screen.py`** — écran Bundles (DataTable + Install/Uninstall).
-
-La configuration TUI est initialisée par `initialize_user_dir()` depuis `config/tui/config.yaml.default`.
-
 ### TUI TypeScript (`tools/tui-ts/`)
 
 Client terminal alternatif en TypeScript/Bun. Utilise **@opentui/solid** (rendu terminal SolidJS) comme moteur de rendu et **solid-js** pour la réactivité. Compilable en binaire autonome (`bun build --compile`).
@@ -566,6 +549,6 @@ Dépendances : `@opentui/core`, `@opentui/solid`, `solid-js`, `yaml`. Runtime : 
 
 ## Références utiles
 
-- [README.md](/Users/benjaminmarchand/IdeaProjects/relais/README.md)
-- [docs/ENV.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/ENV.md)
-- [tests/test_smoke_e2e.py](/Users/benjaminmarchand/IdeaProjects/relais/tests/test_smoke_e2e.py)
+- [README.md](../README.md)
+- [docs/ENV.md](ENV.md)
+- [tests/test_smoke_e2e.py](../tests/test_smoke_e2e.py)

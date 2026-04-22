@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Awaitable, cast
@@ -47,6 +48,7 @@ from atelier.prompts import (
 )
 from atelier.transient_errors import _is_transient_provider_error
 from atelier.profile_model import _resolve_profile_model
+from deepagents.middleware.summarization import _DeepAgentsSummarizationMiddleware
 from atelier.stream_loop import (
     StreamLoopState,
     compute_reply_text,
@@ -129,6 +131,23 @@ class AgentResult:
     tool_call_count: int
     tool_error_count: int
     subagent_traces: tuple[SubagentTrace, ...]
+
+
+@dataclass(frozen=True)
+class CompactResult:
+    """Immutable result of a manual compaction operation.
+
+    Attributes:
+        messages_before: Number of messages in the thread before compaction.
+        messages_after: Number of messages in the thread after compaction
+            (``compact_keep`` recent messages + 1 injected summary message).
+        cutoff_index: Index at which history was cut; messages before this
+            index were summarised and replaced.
+    """
+
+    messages_before: int
+    messages_after: int
+    cutoff_index: int
 
 
 class AgentExecutor:
@@ -439,6 +458,82 @@ class AgentExecutor:
                 exc,
             )
             return False
+
+    async def compact_session(
+        self,
+        session_id: str,
+        user_id: str,
+        compact_keep: int,
+    ) -> "CompactResult | None":
+        """Summarise old messages in a thread and replace them with a summary.
+
+        Reads the current LangGraph checkpoint for ``user_id:session_id``,
+        summarises all messages before the ``compact_keep`` most recent ones
+        using ``_DeepAgentsSummarizationMiddleware``, and writes back a
+        ``_summarization_event`` state update so that DeepAgents' built-in
+        event-application logic replaces the old messages on the next turn.
+
+        Args:
+            session_id: The session identifier (from the envelope).
+            user_id: The stable user identifier (from Portail context).
+            compact_keep: Number of recent messages to preserve; messages
+                before this threshold are summarised and dropped.
+
+        Returns:
+            A ``CompactResult`` with before/after counts on success, or
+            ``None`` when the session has no history, when the message count
+            is already within ``compact_keep``, or on any unexpected error
+            (all handled non-fatally).
+        """
+        config = RunnableConfig(
+            configurable={"thread_id": f"{user_id}:{session_id}"}
+        )
+        try:
+            state = await self._agent.aget_state(config)
+            if not state or not state.values.get("messages"):
+                logger.debug(
+                    "compact_session: empty state, skipping — session=%s", session_id
+                )
+                return None
+            messages = list(state.values["messages"])
+            if len(messages) <= compact_keep:
+                logger.debug(
+                    "compact_session: %d messages <= keep=%d, skipping — session=%s",
+                    len(messages), compact_keep, session_id,
+                )
+                return None
+            cutoff_idx = len(messages) - compact_keep
+            to_summarize = messages[:cutoff_idx]
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                summ_mw = _DeepAgentsSummarizationMiddleware(
+                    model=_resolve_profile_model(self._profile),
+                    backend=LocalShellBackend(root_dir=tmp_dir),
+                    keep=("messages", compact_keep),
+                )
+                summary_text = await summ_mw._acreate_summary(to_summarize)
+                summary_msg = summ_mw._build_new_messages_with_path(summary_text, None)[0]
+
+            new_event = {
+                "cutoff_index": cutoff_idx,
+                "summary_message": summary_msg,
+                "file_path": None,
+            }
+            await self._agent.aupdate_state(config, {"_summarization_event": new_event})
+            logger.info(
+                "compact_session: compacted %d→%d messages — session=%s",
+                len(messages), compact_keep + 1, session_id,
+            )
+            return CompactResult(
+                messages_before=len(messages),
+                messages_after=compact_keep + 1,
+                cutoff_index=cutoff_idx,
+            )
+        except Exception as exc:
+            logger.warning(
+                "compact_session: failed — session=%s error=%s", session_id, exc
+            )
+            return None
 
     async def _stream(
         self,

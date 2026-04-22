@@ -14,7 +14,6 @@ DEFAULT_FILES = [
     ("config/atelier.yaml",                   "config/atelier.yaml.default"),
     ("config/aiguilleur.yaml",                 "config/aiguilleur.yaml.default"),
     ("config/horloger.yaml",                  "config/horloger.yaml.default"),
-    ("config/tui/config.yaml",               "config/tui/config.yaml.default"),
     ("config/HEARTBEAT.md",                   "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
     ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),
@@ -48,7 +47,6 @@ def initialize_user_dir(system_install_path: Path | None = None):
         "config/atelier",
         "config/atelier/subagents",
         "config/horloger/jobs",
-        "config/tui",
         "prompts/soul/variants",
         "prompts/channels",
         "prompts/policies",

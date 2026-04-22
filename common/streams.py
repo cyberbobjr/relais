@@ -64,6 +64,10 @@ STREAM_OUTGOING_FAILED: str = "relais:messages:outgoing:failed"
 STREAM_INCOMING_HORLOGER: str = "relais:messages:incoming:horloger"
 """Scheduled job triggers fired by Horloger (CRON scheduler brick)."""
 
+STREAM_ATELIER_CONTROL: str = "relais:atelier:control"
+"""Control operations directed at Atelier (Commandant → Atelier).
+Used for out-of-band operations such as session compaction (/compact)."""
+
 KEY_WHATSAPP_PAIRING: str = "relais:whatsapp:pairing"
 """Redis key storing the active WhatsApp QR pairing context (JSON, TTL 300s)."""
 

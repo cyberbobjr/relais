@@ -221,6 +221,7 @@ from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
 from common.streams import (
+    STREAM_ATELIER_CONTROL,
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
@@ -230,6 +231,7 @@ from common.streams import (
 from common.contexts import (
     CTX_AIGUILLEUR,
     CTX_ATELIER,
+    CTX_ATELIER_CONTROL,
     CTX_FORGERON,
     CTX_PORTAIL,
     CTX_SKILL_TRACE,
@@ -238,14 +240,14 @@ from common.contexts import (
     PortailCtx,
     ensure_ctx,
 )
-from common.envelope_actions import ACTION_MEMORY_ARCHIVE, ACTION_MESSAGE_OUTGOING_PENDING, ACTION_SKILL_TRACE
+from common.envelope_actions import ACTION_ATELIER_COMPACT, ACTION_MEMORY_ARCHIVE, ACTION_MESSAGE_OUTGOING_PENDING, ACTION_SKILL_TRACE
 from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
 from common.config_reload import watch_and_reload
 from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
-from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, build_project_context_prompt, format_diagnostic_trace, _render_diagnostic_trace
+from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, CompactResult, build_project_context_prompt, format_diagnostic_trace, _render_diagnostic_trace
 from atelier.error_synthesizer import ErrorSynthesizer
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
@@ -335,6 +337,11 @@ class Atelier(BrickBase):
         self._mcp_tools: list = []
         self._mcp_lock = asyncio.Lock()
 
+        # Cached minimal executor for compact operations — avoids recompiling the
+        # LangGraph graph on every /compact call. Reset to None on config reload so
+        # the next compact picks up the updated profile (e.g. different model).
+        self._compact_executor: AgentExecutor | None = None
+
     # ------------------------------------------------------------------
     # BrickBase abstract interface implementation
     # ------------------------------------------------------------------
@@ -379,7 +386,16 @@ class Atelier(BrickBase):
                 ack_mode="on_success",
                 block_ms=2000,
                 count=5,
-            )
+            ),
+            StreamSpec(
+                stream=STREAM_ATELIER_CONTROL,
+                group="atelier_control_group",
+                consumer=self.consumer_name,
+                handler=self._handle_control,
+                ack_mode="on_success",
+                block_ms=2000,
+                count=5,
+            ),
         ]
 
     # ------------------------------------------------------------------
@@ -480,6 +496,7 @@ class Atelier(BrickBase):
         self._display_config = cfg["display"]
         if "subagent_registry" in cfg:
             self._subagent_registry = cfg["subagent_registry"]
+        self._compact_executor = None  # force rebuild on next compact (profile may have changed)
         logger.info("Atelier: configuration applied")
 
         # Schedule MCP singleton restart if server config changed.
@@ -665,6 +682,85 @@ class Atelier(BrickBase):
         return ToolPolicy(base_dir=self._skills_base_dir)
 
     # ------------------------------------------------------------------
+    # Control stream handler
+    # ------------------------------------------------------------------
+
+    async def _handle_control(self, envelope: Envelope, redis_conn: Any) -> bool:
+        """Handle a control envelope from ``relais:atelier:control``.
+
+        Currently supports a single operation: ``op="compact"`` — triggers a
+        conversation history compaction for the given session.
+
+        Args:
+            envelope: Control envelope published by Commandant.
+            redis_conn: Active Redis connection.
+
+        Returns:
+            Always ``True`` to ACK the control message (non-fatal failures
+            are logged but never left in the PEL).
+        """
+        ctrl_ctx: dict = envelope.context.get(CTX_ATELIER_CONTROL, {})
+        op: str = ctrl_ctx.get("op", "")
+        user_id: str = ctrl_ctx.get("user_id", envelope.sender_id)
+
+        if op != "compact":
+            logger.warning(
+                "[CONTROL] unknown op=%r — corr=%s", op, envelope.correlation_id
+            )
+            return True
+
+        logger.info(
+            "[CONTROL] compact requested — session=%s user=%s corr=%s",
+            envelope.session_id, user_id, envelope.correlation_id,
+        )
+
+        profile = self._profiles.get("default", next(iter(self._profiles.values()), None))
+        compact_keep: int = getattr(profile, "compact_keep", 6)
+
+        if self._compact_executor is None:
+            self._compact_executor = AgentExecutor(
+                profile=profile,
+                soul_prompt="",
+                tools=[],
+                checkpointer=self._checkpointer,
+            )
+        result: CompactResult | None = await self._compact_executor.compact_session(
+            session_id=envelope.session_id,
+            user_id=user_id,
+            compact_keep=compact_keep,
+        )
+
+        if result is not None:
+            reply_text = (
+                f"Conversation compacted: {result.messages_before} → "
+                f"{result.messages_after} messages "
+                f"(kept {compact_keep} recent + 1 summary)."
+            )
+        else:
+            reply_text = "Nothing to compact (session is empty or already within limits)."
+
+        # Publish reply to the original channel so the user receives feedback.
+        try:
+            envelope_json = ctrl_ctx.get("envelope_json", "")
+            source_env = Envelope.from_json(envelope_json) if envelope_json else envelope
+        except Exception:
+            source_env = envelope
+        try:
+            reply = Envelope.create_response_to(source_env, reply_text)
+            reply.action = ACTION_MESSAGE_OUTGOING_PENDING
+            await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": reply.to_json()})
+            logger.info(
+                "[CONTROL] compact reply published — corr=%s", envelope.correlation_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "[CONTROL] failed to publish compact reply — corr=%s error=%s",
+                envelope.correlation_id, exc,
+            )
+
+        return True
+
+    # ------------------------------------------------------------------
     # Core message handler
     # ------------------------------------------------------------------
 
@@ -713,7 +809,7 @@ class Atelier(BrickBase):
             soul_prompt = assembly.prompt
             if assembly.is_degraded:
                 logger.warning(
-                    "[TASK] soul prompt dégradé — corr=%s issues=%s",
+                    "[TASK] soul prompt degraded — corr=%s issues=%s",
                     corr, assembly.issues,
                 )
             logger.info(
