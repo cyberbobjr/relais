@@ -99,10 +99,12 @@ def _make_atelier() -> object:
     active = {}
     for target, retval in patches.items():
         p = patch(target, return_value=retval)
-        active[target] = p.start()
+        active[target] = p
+        p.start()
 
     p = patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls)
-    active["saver"] = p.start()
+    active["saver"] = p
+    p.start()
 
     try:
         atelier = Atelier()
