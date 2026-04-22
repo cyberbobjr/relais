@@ -113,7 +113,7 @@ export class RelaisClient {
     }
   }
 
-  async fetchHistory(sessionId: string, limit = 20): Promise<Array<{ user_content: string; assistant_content: string }>> {
+  async fetchHistory(sessionId: string, limit = 50): Promise<Array<{ user_content: string; assistant_content: string }>> {
     const url = new URL(HISTORY_PATH, this.baseUrl);
     url.searchParams.set("session_id", sessionId);
     url.searchParams.set("limit", String(limit));

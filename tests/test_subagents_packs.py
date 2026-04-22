@@ -9,6 +9,7 @@ Tests validate:
 - Skill discovery from skills/ subdirectories
 - Multiple broken modules still load others
 - Tool name collision across modules logs WARNING
+- 2-tier native/user subagent architecture
 """
 
 from __future__ import annotations
@@ -21,6 +22,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+
+from tests.conftest import isolated_search_path as _isolated_search_path
+
+
+@pytest.fixture(autouse=True)
+def _no_real_bundles(tmp_path: Path):
+    """Prevent bundle-tier scan from picking up real ~/.relais/bundles/ during unit tests."""
+    with patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_no_bundles_"):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +319,7 @@ def test_specs_for_user_resolves_local_tool_token(tmp_path: Path) -> None:
         """
     )
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-    ):
+    with _isolated_search_path(tmp_path):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
@@ -334,13 +340,9 @@ def test_specs_for_user_unknown_local_tool_token_dropped(tmp_path: Path, caplog)
         yaml_extra={"tool_tokens": ["local:nonexistent"]},
     )
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-        caplog.at_level(logging.WARNING),
-    ):
-        reg = SubagentRegistry.load(_make_fake_tool_registry())
+    with _isolated_search_path(tmp_path):
+        with caplog.at_level(logging.WARNING):
+            reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
 
@@ -366,11 +368,7 @@ def test_specs_for_user_resolves_local_skill_token(tmp_path: Path) -> None:
     )
     skill_dir = _write_skill_dir(pack_dir, "my-skill")
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-    ):
+    with _isolated_search_path(tmp_path):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
@@ -394,13 +392,9 @@ def test_specs_for_user_skill_missing_dir_dropped(tmp_path: Path, caplog) -> Non
         yaml_extra={"skill_tokens": ["local:missing-skill"]},
     )
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-        caplog.at_level(logging.WARNING),
-    ):
-        reg = SubagentRegistry.load(_make_fake_tool_registry())
+    with _isolated_search_path(tmp_path):
+        with caplog.at_level(logging.WARNING):
+            reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
 
@@ -426,11 +420,7 @@ def test_specs_for_user_multiple_skills_all_resolved(tmp_path: Path) -> None:
     alpha_dir = _write_skill_dir(pack_dir, "alpha")
     beta_dir = _write_skill_dir(pack_dir, "beta")
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-    ):
+    with _isolated_search_path(tmp_path):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
@@ -465,13 +455,9 @@ def test_path_traversal_skill_token_dropped_by_specs_for_user(
     # Create a valid skill so we know the skills/ dir exists
     _write_skill_dir(pack_dir, "real-skill")
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-        caplog.at_level(logging.WARNING),
-    ):
-        reg = SubagentRegistry.load(_make_fake_tool_registry())
+    with _isolated_search_path(tmp_path):
+        with caplog.at_level(logging.WARNING):
+            reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
 
@@ -500,13 +486,9 @@ def test_empty_local_skill_token_dropped_by_specs_for_user(
         yaml_extra={"skill_tokens": ["local:"]},
     )
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-        caplog.at_level(logging.WARNING),
-    ):
-        reg = SubagentRegistry.load(_make_fake_tool_registry())
+    with _isolated_search_path(tmp_path):
+        with caplog.at_level(logging.WARNING):
+            reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     specs = reg.specs_for_user({"allowed_subagents": ["*"]}, request_tools=[])
 
@@ -530,10 +512,7 @@ def test_load_discovers_skills_in_skills_dir(tmp_path: Path) -> None:
     _write_skill_dir(pack_dir, "skill-a")
     _write_skill_dir(pack_dir, "skill-b")
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-    ):
+    with _isolated_search_path(tmp_path):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     # Check internal registry has both skills discovered
@@ -550,10 +529,7 @@ def test_load_skills_not_discovered_without_skills_dir(tmp_path: Path) -> None:
     subagents_dir = tmp_path / "config" / "atelier" / "subagents"
     _write_pack(subagents_dir, "no-skill-pack")
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-    ):
+    with _isolated_search_path(tmp_path):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     internal_skills = reg._local_skills_by_subagent.get("no-skill-pack", {})
@@ -583,12 +559,9 @@ def test_broken_pack_does_not_block_other_packs(tmp_path: Path, caplog) -> None:
     # Valid pack
     _write_pack(subagents_dir, "ok-agent")
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        caplog.at_level(logging.ERROR),
-    ):
-        reg = SubagentRegistry.load(_make_fake_tool_registry())
+    with _isolated_search_path(tmp_path):
+        with caplog.at_level(logging.ERROR):
+            reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     assert "ok-agent" in reg.all_names
     assert "broken-agent" not in reg.all_names
@@ -611,12 +584,9 @@ def test_pack_dir_name_mismatch_skipped(tmp_path: Path, caplog) -> None:
         "system_prompt": "Test prompt.",
     }))
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        caplog.at_level(logging.ERROR),
-    ):
-        reg = SubagentRegistry.load(_make_fake_tool_registry())
+    with _isolated_search_path(tmp_path):
+        with caplog.at_level(logging.ERROR):
+            reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     assert "dir-a" not in reg.all_names
     assert "other-name" not in reg.all_names
@@ -672,12 +642,147 @@ def test_flat_yaml_file_in_subagents_dir_ignored(tmp_path: Path) -> None:
         "system_prompt": "Old prompt.",
     }))
 
-    with (
-        patch("atelier.subagents.CONFIG_SEARCH_PATH", [tmp_path]),
-        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", tmp_path / "_nonexistent_native_"),
-        patch("atelier.subagents.resolve_bundles_dir", return_value=tmp_path / "_nonexistent_bundles_"),
-    ):
+    with _isolated_search_path(tmp_path):
         reg = SubagentRegistry.load(_make_fake_tool_registry())
 
     assert "my-agent" not in reg.all_names
     assert len(reg._specs) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — 2-tier native/user subagent architecture
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_no_opt_relais_in_config_search_path() -> None:
+    """CONFIG_SEARCH_PATH must not include /opt/relais.
+
+    The /opt/relais path was a legacy system-installation path that was never
+    intended by the user.  Only the RELAIS_HOME (user dir) should be in the
+    search path.
+    """
+    from common.config_loader import CONFIG_SEARCH_PATH
+
+    assert Path("/opt/relais") not in CONFIG_SEARCH_PATH, (
+        "Path('/opt/relais') must not appear in CONFIG_SEARCH_PATH — "
+        "it was removed in the 2-tier architecture refactor"
+    )
+
+
+@pytest.mark.unit
+def test_init_does_not_copy_relais_config_to_user_dir() -> None:
+    """DEFAULT_FILES must contain no entry for the relais-config subagent pack.
+
+    Native RELAIS subagents live in atelier/subagents/ (source tree) and must
+    never be copied to the user's RELAIS_HOME.
+    """
+    from common.init import DEFAULT_FILES
+
+    relais_config_entries = [
+        (dest, src)
+        for dest, src in DEFAULT_FILES
+        if "relais-config" in dest or "relais-config" in src
+    ]
+    assert relais_config_entries == [], (
+        f"DEFAULT_FILES must not copy any relais-config files to user dir. "
+        f"Found: {relais_config_entries}"
+    )
+
+
+@pytest.mark.unit
+def test_native_subagents_path_constant_exists() -> None:
+    """atelier.subagents must export a NATIVE_SUBAGENTS_PATH constant.
+
+    This constant points to atelier/subagents/ inside the source tree — the
+    home for all native/shipped subagents (e.g. relais-config).
+    """
+    import atelier.subagents as subagents_module
+
+    assert hasattr(subagents_module, "NATIVE_SUBAGENTS_PATH"), (
+        "atelier.subagents must define NATIVE_SUBAGENTS_PATH"
+    )
+    assert isinstance(subagents_module.NATIVE_SUBAGENTS_PATH, Path), (
+        "NATIVE_SUBAGENTS_PATH must be a Path instance"
+    )
+
+
+@pytest.mark.unit
+def test_registry_loads_native_subagents_from_native_path(tmp_path: Path) -> None:
+    """SubagentRegistry.load() picks up packs from NATIVE_SUBAGENTS_PATH.
+
+    When CONFIG_SEARCH_PATH contains no user dir with subagents but
+    NATIVE_SUBAGENTS_PATH has a valid pack, that pack is loaded.
+    """
+    from atelier.subagents import SubagentRegistry
+
+    # Create a valid pack inside a fake native subagents directory
+    native_dir = tmp_path / "native_subagents"
+    native_dir.mkdir()
+    pack_dir = native_dir / "test-native"
+    pack_dir.mkdir()
+    (pack_dir / "subagent.yaml").write_text(yaml.dump({
+        "name": "test-native",
+        "description": "A native subagent for testing.",
+        "system_prompt": "You are a native test subagent.",
+    }))
+
+    # User config cascade has no subagents at all
+    empty_user_dir = tmp_path / "user_home"
+    empty_user_dir.mkdir()
+
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [empty_user_dir]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", native_dir),
+    ):
+        reg = SubagentRegistry.load(_make_fake_tool_registry())
+
+    assert "test-native" in reg.all_names, (
+        "Native subagent pack should be loaded from NATIVE_SUBAGENTS_PATH"
+    )
+
+
+@pytest.mark.unit
+def test_user_subagent_overrides_native(tmp_path: Path) -> None:
+    """A user-dir pack with the same name as a native pack takes priority.
+
+    First-match-wins: user > native.  The user's version of the pack should
+    be loaded; the native version should be silently skipped.
+    """
+    from atelier.subagents import SubagentRegistry
+
+    native_dir = tmp_path / "native_subagents"
+    native_dir.mkdir()
+    native_pack = native_dir / "shared-agent"
+    native_pack.mkdir()
+    (native_pack / "subagent.yaml").write_text(yaml.dump({
+        "name": "shared-agent",
+        "description": "Native version.",
+        "system_prompt": "I am the native agent.",
+    }))
+
+    user_root = tmp_path / "user_home"
+    user_subagents_dir = user_root / "config" / "atelier" / "subagents"
+    user_subagents_dir.mkdir(parents=True)
+    user_pack = user_subagents_dir / "shared-agent"
+    user_pack.mkdir()
+    (user_pack / "subagent.yaml").write_text(yaml.dump({
+        "name": "shared-agent",
+        "description": "User-customised version.",
+        "system_prompt": "I am the user-customised agent.",
+    }))
+
+    with (
+        patch("atelier.subagents.CONFIG_SEARCH_PATH", [user_root]),
+        patch("atelier.subagents.NATIVE_SUBAGENTS_PATH", native_dir),
+    ):
+        reg = SubagentRegistry.load(_make_fake_tool_registry())
+
+    assert "shared-agent" in reg.all_names
+    # There should be exactly one spec for shared-agent (no duplicates)
+    matching_specs = [s for s in reg._specs if s.name == "shared-agent"]
+    assert len(matching_specs) == 1, "Must not load both native and user versions"
+    # The user's version wins — system_prompt differs
+    assert matching_specs[0].system_prompt == "I am the user-customised agent.", (
+        "User version must take priority over native version"
+    )

@@ -54,8 +54,43 @@ Key classes:
 * ``ToolErrorGuard`` (atelier.agent_executor) — tracks consecutive and total
   tool errors during the agentic loop; raises ``AgentExecutionError`` when
   limits are exceeded to prevent runaway loops.
-* ``StreamBuffer`` (atelier.agent_executor) — accumulates text tokens and
+* ``StreamBuffer`` (atelier.streaming) — accumulates text tokens and
   flushes to a callback when a character threshold is reached.
+* ``SubagentMessageCapture`` (atelier.subagent_capture) — LangChain
+  ``BaseCallbackHandler`` injected into the parent ``RunnableConfig`` so
+  LangGraph propagates it to all child invocations including subagents.
+  Captures ``on_chat_model_start`` / ``on_llm_end`` / ``on_tool_start`` /
+  ``on_tool_end`` events keyed by ``langgraph_namespace`` so Atelier can
+  build per-subagent ``SubagentTrace`` objects after the turn completes.
+* ``SubagentTrace`` (atelier.agent_executor) — frozen dataclass carrying
+  ``subagent_name``, ``skill_names``, ``tool_call_count``,
+  ``tool_error_count``, and ``messages_raw`` for a single subagent
+  invocation.  Collected into ``AgentResult.subagent_traces`` (a tuple,
+  empty when no subagents ran).
+* ``DiagnosticTrace`` (atelier.errors) — structured dataclass produced by
+  ``format_diagnostic_trace()`` capturing ``messages_count``,
+  ``tool_count``, ``tool_errors``, ``last_tool``, ``last_error``, and
+  ``tool_error_details``; rendered to plain text by
+  ``_render_diagnostic_trace()`` before injection into conversation history.
+
+Helper modules extracted from agent_executor.py (re-exported for compat):
+* ``atelier.profile_model`` — ``_resolve_profile_model()`` builds
+  ``BaseChatModel | str`` from a ``ProfileConfig``.
+* ``atelier.prompts`` — system-prompt constants and builders
+  (``LONG_TERM_MEMORY_PROMPT``, ``SELF_DIAGNOSIS_PROMPT``,
+  ``build_project_context_prompt``, ``_build_execution_context``,
+  ``_enrich_system_prompt``, …).
+* ``atelier.transient_errors`` — provider-agnostic transient-error detection
+  (``_is_transient_provider_error``, ``_TRANSIENT_ERROR_NAMES``, …).
+* ``atelier.diagnostic_trace`` — diagnostic trace formatting helpers
+  (``format_diagnostic_trace``, ``_render_diagnostic_trace``,
+  ``_DIAGNOSTIC_MAX_CHARS``); re-exported from ``agent_executor`` for compat.
+* ``atelier.stream_loop`` — stream-loop state and pure helpers:
+  ``StreamLoopState`` (mutable accumulator for a ``_stream()`` call),
+  ``compute_reply_text`` (final reply selection with nemotron-mini fallback
+  to ``last_tool_result`` and ``REPLY_PLACEHOLDER``),
+  ``build_subagent_traces`` (builds ``SubagentTrace`` objects from
+  LangChain callback data); re-exported from ``agent_executor`` for compat.
 
 Redis channels
 --------------
@@ -108,16 +143,26 @@ Message flow (one task at a time):
     │      _mcp_lock); apply ToolPolicy.filter_mcp_tools() per allowed_mcp_tools
     │  (5) resolve subagents + delegation prompt from SubagentRegistry,
     │      filtered by user's allowed_subagents patterns (fnmatch)
-    │  (6) AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
+    │  (6) Read streaming flag from context["aiguilleur"]["streaming"]; if True,
+    │      create per-request display_config = replace(_display_config, final_only=False)
+    │      so emit_text() flushes each token immediately instead of accumulating the
+    │      full reply.  Pass this override to both AgentExecutor and StreamPublisher.
+    │      AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
     │      backend=SouvenirBackend, checkpointer, subagents, delegation_prompt,
-    │      progress_callback=…)
+    │      display_config=display_config, progress_callback=…)
     │      ├── token chunks    ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ──► relais:messages:streaming + relais:messages:outgoing:{channel}
-    │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count)
-    │          ← full turn captured via aget_state()
+    │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count,
+    │                       subagent_traces)
+    │          ← full turn captured via aget_state(); subagent_traces built from
+    │            SubagentMessageCapture callbacks (empty tuple when no subagents ran)
     │  (7) if skills_used and tool_call_count > 0 → publish ACTION_SKILL_TRACE envelope
     │      to relais:skill:trace (fire-and-forget → Forgeron stores the trace)
     │      └── Forgeron handles changelog + consolidation autonomously
+    │  (7b) for each SubagentTrace in AgentResult.subagent_traces where
+    │       tool_call_count > 0 AND skill_names non-empty → publish a separate
+    │       ACTION_SKILL_TRACE envelope to relais:skill:trace so Forgeron tracks
+    │       skill performance at the subagent level independently
     │  (8) build response Envelope, stamp response_env.action = ACTION_MESSAGE_OUTGOING_PENDING
     │      (required: Envelope.to_json() raises if action is unset), stamp
     │      context["atelier"]["skills_used"] if any; publish archive to relais:memory:request
@@ -170,6 +215,7 @@ import json
 import logging
 import time
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -199,7 +245,7 @@ from common.config_reload import watch_and_reload
 from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
-from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, build_project_context_prompt, format_diagnostic_trace
+from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, build_project_context_prompt, format_diagnostic_trace, _render_diagnostic_trace
 from atelier.error_synthesizer import ErrorSynthesizer
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
@@ -658,12 +704,18 @@ class Atelier(BrickBase):
             )
 
             # 2. Assemble soul system prompt
-            soul_prompt = assemble_system_prompt(
+            assembly = assemble_system_prompt(
                 prompts_dir=_PROMPTS_DIR,
                 role_prompt_path=ur.get("role_prompt_path"),
                 user_prompt_path=ur.get("prompt_path"),
                 channel_prompt_path=portail_ctx.get("channel_prompt_path"),
             )
+            soul_prompt = assembly.prompt
+            if assembly.is_degraded:
+                logger.warning(
+                    "[TASK] soul prompt dégradé — corr=%s issues=%s",
+                    corr, assembly.issues,
+                )
             logger.info(
                 "[TASK] soul prompt assembled — corr=%s len=%d role=%s",
                 corr, len(soul_prompt), ur.get("role_prompt_path", "none"),
@@ -737,6 +789,13 @@ class Atelier(BrickBase):
                         force_subagent_name, corr,
                     )
 
+            # 6. Execute
+            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
+            streaming = aig_ctx.get("streaming", False)
+            # When streaming to the client, tokens must be emitted token-by-token
+            # rather than accumulated; override final_only so emit_text() flushes
+            # each chunk immediately instead of batching the full reply.
+            display_config = replace(self._display_config, final_only=False) if streaming else self._display_config
             agent_executor = AgentExecutor(
                 profile=profile,
                 soul_prompt=soul_prompt,
@@ -746,18 +805,14 @@ class Atelier(BrickBase):
                 checkpointer=self._checkpointer,
                 subagents=subagents,
                 delegation_prompt=delegation_prompt,
-                display_config=self._display_config,
+                display_config=display_config,
             )
-
-            # 6. Execute
-            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
-            streaming = aig_ctx.get("streaming", False)
             stream_pub = StreamPublisher(
                 redis_conn,
                 channel=envelope.channel,
                 correlation_id=corr,
                 source_envelope=envelope,
-                display_config=self._display_config,
+                display_config=display_config,
             )
             if streaming:
                 await redis_conn.publish(
@@ -813,6 +868,43 @@ class Atelier(BrickBase):
                     "[TASK] skill trace SKIP — corr=%s skills_used=%s "
                     "tool_calls=%d",
                     corr, skills_used, agent_result.tool_call_count,
+                )
+
+            # 7b. Publish per-subagent skill traces for Forgeron
+            subagent_by_name = {s.get("name"): s for s in subagents if s.get("name")}
+            for sa_trace in agent_result.subagent_traces:
+                if sa_trace.tool_call_count == 0 or not sa_trace.skill_names:
+                    continue
+                sa_spec = subagent_by_name.get(sa_trace.subagent_name)
+                sa_skill_paths: dict[str, str] = {}
+                if sa_spec is not None:
+                    for skill_path in sa_spec.get("skills", []):
+                        p = Path(skill_path).resolve()
+                        if p.is_relative_to(_bundles_dir):
+                            sa_skill_paths[p.name] = skill_path
+                sa_trace_env = Envelope(
+                    content="",
+                    sender_id=f"atelier:{sender}",
+                    channel="internal",
+                    session_id=envelope.session_id,
+                    correlation_id=corr,
+                    action=ACTION_SKILL_TRACE,
+                    context={CTX_SKILL_TRACE: {
+                        "skill_names": sa_trace.skill_names,
+                        "tool_call_count": sa_trace.tool_call_count,
+                        "tool_error_count": sa_trace.tool_error_count,
+                        "messages_raw": sa_trace.messages_raw,
+                        "skill_paths": sa_skill_paths,
+                    }},
+                )
+                await redis_conn.xadd(
+                    STREAM_SKILL_TRACE, {"payload": sa_trace_env.to_json()}
+                )
+                logger.info(
+                    "[TASK] subagent skill trace published — corr=%s subagent=%s "
+                    "skills=%s calls=%d errors=%d",
+                    corr, sa_trace.subagent_name, sa_trace.skill_names,
+                    sa_trace.tool_call_count, sa_trace.tool_error_count,
                 )
 
             # 8. Build and publish response envelope
@@ -908,11 +1000,15 @@ class Atelier(BrickBase):
                     corr, synth_exc,
                 )
 
-            diag_text = format_diagnostic_trace(
+            diag_trace = format_diagnostic_trace(
                 error=str(exc),
                 messages_raw=exc.messages_raw,
                 tool_call_count=exc.tool_call_count,
                 tool_error_count=exc.tool_error_count,
+            )
+            diag_text = _render_diagnostic_trace(
+                diag_trace,
+                error=str(exc),
             )
             await agent_executor.inject_diagnostic_message(envelope, diag_text)
 

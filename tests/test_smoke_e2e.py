@@ -122,7 +122,7 @@ async def test_discord_message_full_pipeline(redis_conn, tmp_path):
         MockMcpMgr.return_value = mock_mgr
 
         mock_executor = AsyncMock()
-        mock_executor.execute.return_value = AgentResult(reply_text="Je suis RELAIS, comment puis-je t'aider ?", messages_raw=[])
+        mock_executor.execute.return_value = AgentResult(reply_text="Je suis RELAIS, comment puis-je t'aider ?", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=())
         MockAgent.return_value = mock_executor
 
         atelier = Atelier()

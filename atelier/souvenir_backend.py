@@ -99,6 +99,8 @@ class SouvenirBackend(BackendProtocol):
             default_socket = str(get_relais_home() / "redis.sock")
             socket_path = os.environ.get("REDIS_SOCKET_PATH", default_socket)
             password = os.environ.get("REDIS_PASS_ATELIER") or os.environ.get("REDIS_PASSWORD")
+            if not password:
+                logger.warning("Redis auth disabled: REDIS_PASS_ATELIER not set — anonymous connection")
             self._redis = redis_sync.Redis(
                 unix_socket_path=socket_path,
                 username="atelier",
@@ -163,6 +165,7 @@ class SouvenirBackend(BackendProtocol):
             action,
             self._user_id,
             corr,
+            extra={"correlation_id": corr},
         )
         return {"ok": False, "error": "timeout"}
 

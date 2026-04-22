@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from atelier.mcp_session_manager import McpSessionManager
+from atelier.soul_assembler import AssemblyResult
 from common.profile_loader import ProfileConfig
 
 
@@ -484,12 +485,12 @@ async def test_handle_envelope_uses_singleton_mcp_tools() -> None:
     redis_conn.publish = AsyncMock()
 
     with patch("atelier.main.AgentExecutor") as MockExec, \
-         patch("atelier.main.assemble_system_prompt", return_value="soul"), \
+         patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)), \
          patch("atelier.main.resolve_profile", return_value=MagicMock(model="m", max_turns=5, mcp_timeout=5.0, mcp_max_tools=0)), \
          patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
 
         mock_exec_instance = AsyncMock()
-        mock_exec_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
+        mock_exec_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=()))
         MockExec.return_value = mock_exec_instance
 
         result = await atelier._handle_envelope(envelope, redis_conn)
@@ -535,12 +536,12 @@ async def test_handle_envelope_does_not_instantiate_mcp_manager_per_request() ->
 
     with patch("atelier.main.McpSessionManager", SpyMcpSessionManager), \
          patch("atelier.main.AgentExecutor") as MockExec, \
-         patch("atelier.main.assemble_system_prompt", return_value="soul"), \
+         patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)), \
          patch("atelier.main.resolve_profile", return_value=MagicMock(model="m", max_turns=5, mcp_timeout=5.0, mcp_max_tools=0)), \
          patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
 
         mock_exec_instance = AsyncMock()
-        mock_exec_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[]))
+        mock_exec_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=()))
         MockExec.return_value = mock_exec_instance
 
         await atelier._handle_envelope(envelope, redis_conn)

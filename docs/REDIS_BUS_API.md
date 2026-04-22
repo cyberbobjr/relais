@@ -530,6 +530,10 @@ if result:
 
 Published by Atelier after each completed agent turn where skills were used **and** `tool_call_count > 0`.  Turns where skills are loaded but no tool was invoked are not published (avoids polluting the trace stream with skill-less turns).
 
+Atelier may publish **multiple** `XADD` calls per turn:
+- One for the **main agent** (step 7 of the pipeline).
+- One **per subagent** that used tools (`tool_call_count > 0`) and had skills assigned (step 7b).  These are published independently so Forgeron can track skill performance at the subagent level.  Per-subagent traces are built from `SubagentMessageCapture` LangChain callbacks injected into the parent `RunnableConfig`; the `messages_raw` field contains only the messages captured in that subagent's LangGraph namespace.
+
 ```
 XADD relais:skill:trace * payload <Envelope JSON>
 ```
@@ -539,9 +543,10 @@ XADD relais:skill:trace * payload <Envelope JSON>
 | Key | Type | Description |
 |-----|------|-------------|
 | `skill_names` | `list[str]` | Directory names of skills used in the turn (e.g. `["mail-agent"]`) |
-| `tool_call_count` | `int` | Total tool invocations in the agent turn |
+| `tool_call_count` | `int` | Total tool invocations in the agent turn (`-1` sentinel on aborted DLQ turns) |
 | `tool_error_count` | `int` | Tool invocations that returned an error |
 | `messages_raw` | `list[dict]` | Serialized LangChain message list for the turn (for LLM analysis by Forgeron) |
+| `skill_paths` | `dict[str, str]` | Mapping of skill basename → absolute path for bundle skills; empty `{}` for standard skills.  Used by Forgeron to resolve the correct SKILL.md location for bundle-installed skills. |
 
 ---
 

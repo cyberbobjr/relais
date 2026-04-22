@@ -719,7 +719,7 @@ def test_resolve_profile_model_calls_init_chat_model_with_base_url(tmp_path: Pat
         api_key_env=None,
     )
 
-    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+    with patch("atelier.profile_model.init_chat_model") as mock_init:
         _resolve_profile_model(profile)
 
     mock_init.assert_called_once_with("openai:my-local-model", base_url="http://localhost:1234/v1")
@@ -748,7 +748,7 @@ def test_resolve_profile_model_reads_api_key_from_env(monkeypatch: pytest.Monkey
         api_key_env="MY_PROVIDER_KEY",
     )
 
-    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+    with patch("atelier.profile_model.init_chat_model") as mock_init:
         _resolve_profile_model(profile)
 
     mock_init.assert_called_once_with("anthropic:claude-haiku-4-5", api_key="sk-test-secret")
@@ -901,7 +901,7 @@ def test_resolve_profile_model_passes_model_kwargs_when_parallel_tool_calls_set(
         parallel_tool_calls=False,
     )
 
-    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+    with patch("atelier.profile_model.init_chat_model") as mock_init:
         _resolve_profile_model(profile)
 
     mock_init.assert_called_once_with(
@@ -934,7 +934,7 @@ def test_resolve_profile_model_calls_init_when_only_parallel_tool_calls_set() ->
         parallel_tool_calls=False,
     )
 
-    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+    with patch("atelier.profile_model.init_chat_model") as mock_init:
         _resolve_profile_model(profile)
 
     mock_init.assert_called_once_with(
@@ -970,7 +970,7 @@ def test_resolve_profile_model_no_model_kwargs_when_parallel_tool_calls_none(
         parallel_tool_calls=None,
     )
 
-    with patch("atelier.agent_executor.init_chat_model") as mock_init:
+    with patch("atelier.profile_model.init_chat_model") as mock_init:
         _resolve_profile_model(profile)
 
     mock_init.assert_called_once_with(

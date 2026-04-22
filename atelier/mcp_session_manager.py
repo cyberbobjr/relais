@@ -277,6 +277,63 @@ class McpSessionManager:
         return tools
 
     # ------------------------------------------------------------------
+    # Tool dispatch helpers
+    # ------------------------------------------------------------------
+
+    def _select_session(self, tool_name: str) -> tuple[str, object]:
+        """Select the MCP session that exposes the given prefixed tool name.
+
+        Ensures a per-server lock exists (created defensively if absent).
+
+        Args:
+            tool_name: Prefixed name in the form ``{server}__{real_tool}``.
+
+        Returns:
+            A ``(server_name, session)`` tuple where ``session`` is ``None``
+            when the server is not found or inactive.
+        """
+        server_name, _, _ = tool_name.partition("__")
+        session = self._sessions.get(server_name)
+        if session is not None and server_name not in self._session_locks:
+            # Shouldn't happen in normal operation; create one defensively.
+            self._session_locks[server_name] = asyncio.Lock()
+        return server_name, session
+
+    async def _apply_timeout(self, coro: object, timeout: float) -> object:
+        """Wrap a coroutine with asyncio.wait_for using the given timeout.
+
+        Args:
+            coro: The coroutine to execute.
+            timeout: Maximum number of seconds to wait.
+
+        Returns:
+            The coroutine's return value.
+
+        Raises:
+            asyncio.TimeoutError: When the coroutine exceeds ``timeout`` seconds.
+        """
+        return await asyncio.wait_for(coro, timeout=timeout)
+
+    def _format_result(self, raw_result: object) -> str:
+        """Format a raw MCP tool result into a string for the model.
+
+        Concatenates the ``text`` field from every content item that exposes one,
+        skipping items without a ``text`` attribute or with falsy text.
+
+        Args:
+            raw_result: The result object returned by ``session.call_tool()``.
+
+        Returns:
+            Concatenated text from all eligible content items, or an empty
+            string when none carry text.
+        """
+        return "".join(
+            item.text
+            for item in raw_result.content
+            if hasattr(item, "text") and item.text
+        )
+
+    # ------------------------------------------------------------------
     # Tool dispatch
     # ------------------------------------------------------------------
 
@@ -300,28 +357,21 @@ class McpSessionManager:
             Concatenated text from the result content, or an error description
             when the call fails.
         """
-        server_name, _, real_name = tool_name.partition("__")
-        session = self._sessions.get(server_name)
+        _, real_name = tool_name.rsplit("__", 1) if "__" in tool_name else (tool_name, tool_name)
+        server_name, session = self._select_session(tool_name)
+
         if session is None:
             return f"Error: MCP server '{server_name}' not found or inactive."
 
-        lock = self._session_locks.get(server_name)
-        if lock is None:
-            # Shouldn't happen in normal operation; create one defensively.
-            lock = asyncio.Lock()
-            self._session_locks[server_name] = lock
+        lock = self._session_locks[server_name]
 
         async with lock:
             try:
-                result = await asyncio.wait_for(
+                result = await self._apply_timeout(
                     session.call_tool(real_name, tool_input),
-                    timeout=self._profile.mcp_timeout,
+                    self._profile.mcp_timeout,
                 )
-                return "".join(
-                    item.text
-                    for item in result.content
-                    if hasattr(item, "text") and item.text
-                )
+                return self._format_result(result)
             except asyncio.TimeoutError:
                 logger.warning(
                     "MCP tool '%s' timed out after %ss",

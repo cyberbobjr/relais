@@ -4,6 +4,7 @@ import { ChatHistory } from "./components/ChatHistory.tsx";
 import { InputArea } from "./components/InputArea.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import {
+  state,
   addUserMessage,
   beginAssistantMessage,
   applySSEEvent,
@@ -76,7 +77,9 @@ export function App({ client, sessionId, onSessionId }: Props) {
 
   async function handleSubmit(text: string) {
     if (text === "/clear") {
-      await handleClear({ client, sessionId, clearMessages, onSessionId, setErrorBanner, setCopyFlash });
+      await handleClear({ client, sessionId: state.sessionId, clearMessages, onSessionId, setErrorBanner, setCopyFlash });
+      clearTimeout(copyFlashTimer);
+      copyFlashTimer = setTimeout(() => setCopyFlash(""), 1500);
       return;
     }
 
@@ -87,7 +90,7 @@ export function App({ client, sessionId, onSessionId }: Props) {
 
     logger.info(`submit: ${text.slice(0, 80)}`);
     try {
-      for await (const ev of client.streamMessage(text, { sessionId: sessionId || undefined })) {
+      for await (const ev of client.streamMessage(text, { sessionId: state.sessionId || undefined })) {
         if (ev.type === "error") logger.error(`sse error: ${ev.error}`);
         else if (ev.type === "done") logger.info(`done session=${ev.sessionId}`);
         applySSEEvent(assistantId, ev);

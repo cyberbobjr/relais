@@ -24,7 +24,7 @@ export interface Config {
   theme: ThemeConfig;
 }
 
-const DEFAULT_THEME: ThemeConfig = {
+export const DEFAULT_THEME: ThemeConfig = {
   background: "#1a1a2e",
   userText: "#8be9fd",
   assistantText: "#f8f8f2",

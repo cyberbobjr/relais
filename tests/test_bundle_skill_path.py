@@ -181,15 +181,18 @@ class TestWriteSkillToolWithSkillPath:
 
     def test_run_uses_explicit_skill_path(self, tmp_path: Path) -> None:
         tool = _ws_mod.WriteSkillTool()
-        bundle_skill_dir = tmp_path / "bundle" / "skills" / "my-skill"
+        bundles_root = tmp_path / "bundle"
+        bundle_skill_dir = bundles_root / "skills" / "my-skill"
         bundle_skill_dir.mkdir(parents=True)
 
-        result = tool._run(
-            skill_name="my-skill",
-            content="# My Skill\nBundle content.",
-            overwrite=True,
-            skill_path=str(bundle_skill_dir),
-        )
+        with patch.object(_ws_mod, "resolve_bundles_dir", return_value=bundles_root), \
+             patch.object(_ws_mod, "resolve_skills_dir", return_value=tmp_path / "skills"):
+            result = tool._run(
+                skill_name="my-skill",
+                content="# My Skill\nBundle content.",
+                overwrite=True,
+                skill_path=str(bundle_skill_dir),
+            )
 
         assert "ERROR" not in result, f"Expected success but got: {result}"
         expected = bundle_skill_dir / "SKILL.md"

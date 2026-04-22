@@ -9,12 +9,13 @@ Extracted from ``atelier.subagents`` to keep that file under the 800-line limit.
 
 from __future__ import annotations
 
-import fnmatch
 import importlib.util
 import logging
 import types
 from pathlib import Path
 from typing import Any
+
+from common.pattern_matcher import matches as _fnmatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,183 @@ def validate_module_token(module_path: str, spec_name: str) -> str | None:
     return None
 
 
+def _add_tool(tool: object, resolved: list, seen_names: set[str]) -> None:
+    """Add *tool* to *resolved* if its name has not been seen yet.
+
+    Mutates *resolved* and *seen_names* in-place.  Used as the shared
+    deduplication helper across all five resolver functions below.
+
+    Args:
+        tool: Tool instance to add (duck-typed: needs a ``name`` attribute).
+        resolved: Accumulator list of resolved tool instances.
+        seen_names: Set of tool names already present in *resolved*.
+    """
+    name = getattr(tool, "name", None) or str(id(tool))
+    if name not in seen_names:
+        seen_names.add(name)
+        resolved.append(tool)
+
+
+def _resolve_inherit_tokens(
+    request_tools: list,
+    resolved: list,
+    seen_names: set[str],
+) -> None:
+    """Resolve an ``inherit`` token — add all *request_tools* to *resolved*.
+
+    Mutates *resolved* and *seen_names* in-place.  Never raises.
+
+    Args:
+        request_tools: Per-request MCP tool pool (already ToolPolicy-filtered).
+        resolved: Accumulator list of resolved tool instances.
+        seen_names: Set of tool names already added (deduplication guard).
+    """
+    for t in request_tools:
+        _add_tool(t, resolved, seen_names)
+
+
+def _resolve_local_token(
+    tool_name: str,
+    local_tools: dict[str, Any],
+    spec_name: str,
+    resolved: list,
+    failed_tokens: list[str],
+    seen_names: set[str],
+) -> None:
+    """Resolve a ``local:<name>`` token against the pack's local tools dict.
+
+    Mutates *resolved*, *failed_tokens*, and *seen_names* in-place.
+    Logs a WARNING and appends ``"local:<tool_name>"`` to *failed_tokens*
+    when the tool is not found.  Never raises.
+
+    Args:
+        tool_name: Name extracted from the ``local:`` prefix.
+        local_tools: Dict mapping tool name to tool instance for this subagent.
+        spec_name: Subagent name, used in log messages.
+        resolved: Accumulator list of resolved tool instances.
+        failed_tokens: Accumulator list of token strings that could not be
+            resolved.
+        seen_names: Set of tool names already added (deduplication guard).
+    """
+    tool = local_tools.get(tool_name)
+    if tool is None:
+        logger.warning(
+            "SubagentRegistry: subagent '%s' references unknown local "
+            "tool '%s' — dropping (not found in pack's tools/ dir)",
+            spec_name, tool_name,
+        )
+        failed_tokens.append(f"local:{tool_name}")
+    else:
+        _add_tool(tool, resolved, seen_names)
+
+
+def _resolve_mcp_token(
+    glob: str,
+    request_tools: list,
+    resolved: list,
+    seen_names: set[str],
+) -> None:
+    """Resolve an ``mcp:<glob>`` token by filtering *request_tools* by name.
+
+    Uses ``common.pattern_matcher.matches`` for fnmatch filtering.  A
+    glob that matches no tools is silently a no-op (not a failure), since
+    the MCP pool is dynamic per-request.  Never raises.
+
+    Args:
+        glob: fnmatch-style pattern extracted from the ``mcp:`` prefix.
+        request_tools: Per-request MCP tool pool (already ToolPolicy-filtered).
+        resolved: Accumulator list of resolved tool instances.
+        seen_names: Set of tool names already added (deduplication guard).
+    """
+    for t in request_tools:
+        if _fnmatch_matches(t.name, (glob,)):
+            _add_tool(t, resolved, seen_names)
+
+
+def _resolve_module_token(
+    module_path: str,
+    spec_name: str,
+    resolved: list,
+    failed_tokens: list[str],
+    seen_names: set[str],
+) -> None:
+    """Resolve a ``module:<dotted.path>`` token by importing the module.
+
+    Calls ``_load_tools_from_import`` to perform the actual import and
+    collect ``BaseTool`` instances.  Logs a WARNING and appends the full
+    token string to *failed_tokens* when the module exports zero tools
+    (either rejected by security prefix check or import error).  Never
+    raises.
+
+    Args:
+        module_path: Dotted Python module path extracted from the token
+            (e.g. ``atelier.tools.my_tool``).
+        spec_name: Subagent name, used in log messages.
+        resolved: Accumulator list of resolved tool instances.
+        failed_tokens: Accumulator list of token strings that could not be
+            resolved.
+        seen_names: Set of tool names already added (deduplication guard).
+    """
+    imported_tools = _load_tools_from_import(module_path, spec_name)
+    if not imported_tools:
+        logger.warning(
+            "SubagentRegistry: subagent '%s' — module: token '%s' "
+            "resolved to zero tools at runtime — dropping",
+            spec_name, f"module:{module_path}",
+        )
+        failed_tokens.append(f"module:{module_path}")
+    else:
+        for t in imported_tools.values():
+            _add_tool(t, resolved, seen_names)
+
+
+def _resolve_static_token(
+    token: str,
+    tool_registry: Any,
+    local_tools: dict[str, Any],
+    spec_name: str,
+    resolved: list,
+    failed_tokens: list[str],
+    seen_names: set[str],
+) -> None:
+    """Resolve a bare static tool name — first via ToolRegistry, then local fallback.
+
+    Logs a WARNING and appends *token* to *failed_tokens* when neither
+    source contains the tool.  Logs DEBUG when the local fallback is used.
+    Never raises.
+
+    Args:
+        token: Bare tool name (no prefix).
+        tool_registry: Static ``ToolRegistry`` instance; must support
+            ``get(name) -> tool | None``.
+        local_tools: Dict mapping tool name to tool instance for this subagent.
+        spec_name: Subagent name, used in log messages.
+        resolved: Accumulator list of resolved tool instances.
+        failed_tokens: Accumulator list of token strings that could not be
+            resolved.
+        seen_names: Set of tool names already added (deduplication guard).
+    """
+    tool = tool_registry.get(token)
+    if tool is None:
+        tool = local_tools.get(token)
+        if tool is None:
+            logger.warning(
+                "SubagentRegistry: subagent '%s' references unknown static "
+                "tool '%s' — dropping (tool not found in ToolRegistry or local pack)",
+                spec_name, token,
+            )
+            failed_tokens.append(token)
+        else:
+            logger.debug(
+                "SubagentRegistry: subagent '%s' — bare token '%s' resolved via "
+                "local pack fallback",
+                spec_name, token,
+            )
+            _add_tool(tool, resolved, seen_names)
+    else:
+        _add_tool(tool, resolved, seen_names)
+
+
 def _resolve_tool_tokens(
     tokens: tuple[str, ...],
     request_tools: list,
@@ -167,12 +345,14 @@ def _resolve_tool_tokens(
 ) -> tuple[list, list[str]]:
     """Resolve raw YAML tool_tokens into callable/BaseTool instances.
 
-    Token forms:
-    - ``local:<name>`` — tool loaded from pack's tools/ dir
-    - ``mcp:<glob>`` — fnmatch filter on request_tools (MCP pool)
-    - ``inherit`` — all request_tools
-    - ``module:<dotted.path>`` — import a Python module and collect BaseTool instances
-    - ``<name>`` (no prefix) — lookup in static tool_registry
+    Dispatcher that routes each token to one of the five dedicated resolver
+    functions based on its form:
+
+    - ``inherit`` → :func:`_resolve_inherit_tokens`
+    - ``local:<name>`` → :func:`_resolve_local_token`
+    - ``mcp:<glob>`` → :func:`_resolve_mcp_token`
+    - ``module:<dotted.path>`` → :func:`_resolve_module_token`
+    - ``<name>`` (no prefix) → :func:`_resolve_static_token`
 
     Unknown / unresolvable tokens are logged as WARNING and dropped
     (fail-closed; never raises).
@@ -199,67 +379,25 @@ def _resolve_tool_tokens(
     failed_tokens: list[str] = []
     seen_names: set[str] = set()
 
-    def _add(tool: object) -> None:
-        name = getattr(tool, "name", None) or str(id(tool))
-        if name not in seen_names:
-            seen_names.add(name)
-            resolved.append(tool)
-
     for token in tokens:
         if token == "inherit":
-            for t in request_tools:
-                _add(t)
+            _resolve_inherit_tokens(request_tools, resolved, seen_names)
         elif token.startswith("local:"):
-            tool_name = token[len("local:"):]
-            tool = local_tools.get(tool_name)
-            if tool is None:
-                logger.warning(
-                    "SubagentRegistry: subagent '%s' references unknown local "
-                    "tool '%s' — dropping (not found in pack's tools/ dir)",
-                    spec_name, tool_name,
-                )
-                failed_tokens.append(token)
-            else:
-                _add(tool)
+            _resolve_local_token(
+                token[len("local:"):], local_tools, spec_name, resolved, failed_tokens, seen_names
+            )
         elif token.startswith("mcp:"):
-            glob = token[len("mcp:"):]
-            matched = [t for t in request_tools if fnmatch.fnmatch(t.name, glob)]
-            for t in matched:
-                _add(t)
+            _resolve_mcp_token(
+                token[len("mcp:"):], request_tools, resolved, seen_names
+            )
         elif token.startswith("module:"):
-            module_path = token[len("module:"):]
-            imported_tools = _load_tools_from_import(module_path, spec_name)
-            if not imported_tools:
-                logger.warning(
-                    "SubagentRegistry: subagent '%s' — module: token '%s' "
-                    "resolved to zero tools at runtime — dropping",
-                    spec_name, token,
-                )
-                failed_tokens.append(token)
-            else:
-                for t in imported_tools.values():
-                    _add(t)
+            _resolve_module_token(
+                token[len("module:"):], spec_name, resolved, failed_tokens, seen_names
+            )
         else:
-            # Bare static tool name — global ToolRegistry, then local fallback
-            tool = tool_registry.get(token)
-            if tool is None:
-                tool = local_tools.get(token)
-                if tool is None:
-                    logger.warning(
-                        "SubagentRegistry: subagent '%s' references unknown static "
-                        "tool '%s' — dropping (tool not found in ToolRegistry or local pack)",
-                        spec_name, token,
-                    )
-                    failed_tokens.append(token)
-                else:
-                    logger.debug(
-                        "SubagentRegistry: subagent '%s' — bare token '%s' resolved via "
-                        "local pack fallback",
-                        spec_name, token,
-                    )
-                    _add(tool)
-            else:
-                _add(tool)
+            _resolve_static_token(
+                token, tool_registry, local_tools, spec_name, resolved, failed_tokens, seen_names
+            )
 
     return resolved, failed_tokens
 

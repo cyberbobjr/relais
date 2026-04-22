@@ -1,7 +1,8 @@
 """Tests for Phase 2 diagnostic injection in AgentExecutor.
 
 Covers:
-- format_diagnostic_trace() output structure
+- format_diagnostic_trace() returns a DiagnosticTrace dataclass
+- _render_diagnostic_trace() produces the expected plain-text string
 - inject_diagnostic_message() checkpointer integration
 - _enrich_system_prompt() DIAGNOSTIC_AWARENESS_PROMPT inclusion
 """
@@ -29,9 +30,10 @@ def _make_envelope(session_id: str = "sess1", sender_id: str = "usr_admin") -> M
 
 
 @pytest.mark.unit
-def test_format_diagnostic_trace_contains_error_and_counts() -> None:
-    """format_diagnostic_trace() includes exception text and counters."""
+def test_format_diagnostic_trace_returns_diagnostic_trace() -> None:
+    """format_diagnostic_trace() returns a DiagnosticTrace dataclass."""
     from atelier.agent_executor import format_diagnostic_trace
+    from atelier.errors import DiagnosticTrace
 
     result = format_diagnostic_trace(
         error="AgentExecutionError: max total errors",
@@ -39,15 +41,17 @@ def test_format_diagnostic_trace_contains_error_and_counts() -> None:
         tool_call_count=8,
         tool_error_count=5,
     )
-    assert "[DIAGNOSTIC — internal]" in result
-    assert "max total errors" in result
-    assert "8 total" in result
-    assert "5 errors" in result
+    assert isinstance(result, DiagnosticTrace)
+    assert result.tool_count == 8
+    assert result.tool_errors == 5
+    assert result.messages_count == 0
+    assert result.last_tool is None
+    assert result.last_error is None
 
 
 @pytest.mark.unit
-def test_format_diagnostic_trace_lists_failing_tools() -> None:
-    """format_diagnostic_trace() includes names of tools that failed."""
+def test_format_diagnostic_trace_captures_last_failing_tool() -> None:
+    """format_diagnostic_trace() populates last_tool and last_error from the last error entry."""
     from atelier.agent_executor import format_diagnostic_trace
 
     messages_raw = [
@@ -60,42 +64,103 @@ def test_format_diagnostic_trace_lists_failing_tools() -> None:
         tool_call_count=3,
         tool_error_count=1,
     )
-    assert "himalaya" in result
-    assert "read_file" not in result  # non-error tool must be absent
+    assert result.last_tool == "himalaya"
+    assert result.last_error is not None
+    assert "connection refused" in result.last_error
 
 
 @pytest.mark.unit
-def test_format_diagnostic_trace_respects_max_chars() -> None:
-    """format_diagnostic_trace() truncates output at max_chars."""
+def test_format_diagnostic_trace_messages_count() -> None:
+    """format_diagnostic_trace() sets messages_count to the length of messages_raw."""
     from atelier.agent_executor import format_diagnostic_trace
 
+    messages_raw = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     result = format_diagnostic_trace(
-        error="x" * 2000,
-        messages_raw=[],
+        error="err",
+        messages_raw=messages_raw,
+        tool_call_count=0,
+        tool_error_count=0,
+    )
+    assert result.messages_count == 2
+
+
+@pytest.mark.unit
+def test_render_diagnostic_trace_contains_error_and_counts() -> None:
+    """_render_diagnostic_trace() includes exception text and counters."""
+    from atelier.agent_executor import format_diagnostic_trace, _render_diagnostic_trace
+
+    messages_raw: list[dict] = []
+    trace = format_diagnostic_trace(
+        error="AgentExecutionError: max total errors",
+        messages_raw=messages_raw,
+        tool_call_count=8,
+        tool_error_count=5,
+    )
+    text = _render_diagnostic_trace(trace, "AgentExecutionError: max total errors")
+    assert "[DIAGNOSTIC — internal]" in text
+    assert "max total errors" in text
+    assert "8 total" in text
+    assert "5 errors" in text
+
+
+@pytest.mark.unit
+def test_render_diagnostic_trace_lists_failing_tools() -> None:
+    """_render_diagnostic_trace() includes names of tools that failed."""
+    from atelier.agent_executor import format_diagnostic_trace, _render_diagnostic_trace
+
+    messages_raw = [
+        {"role": "tool", "name": "himalaya", "content": "Error: connection refused"},
+        {"role": "tool", "name": "read_file", "content": "file.txt contents"},
+    ]
+    error = "AgentExecutionError"
+    trace = format_diagnostic_trace(
+        error=error,
+        messages_raw=messages_raw,
+        tool_call_count=3,
+        tool_error_count=1,
+    )
+    text = _render_diagnostic_trace(trace, error)
+    assert "himalaya" in text
+    assert "read_file" not in text  # non-error tool must be absent
+
+
+@pytest.mark.unit
+def test_render_diagnostic_trace_respects_max_chars() -> None:
+    """_render_diagnostic_trace() truncates output at max_chars."""
+    from atelier.agent_executor import format_diagnostic_trace, _render_diagnostic_trace
+
+    long_error = "x" * 2000
+    messages_raw: list[dict] = []
+    trace = format_diagnostic_trace(
+        error=long_error,
+        messages_raw=messages_raw,
         tool_call_count=0,
         tool_error_count=0,
         max_chars=100,
     )
-    assert len(result) <= 100
+    text = _render_diagnostic_trace(trace, long_error, max_chars=100)
+    assert len(text) <= 100
 
 
 @pytest.mark.unit
-def test_format_diagnostic_trace_default_max_chars() -> None:
-    """format_diagnostic_trace() default cap is 2000 chars."""
-    from atelier.agent_executor import format_diagnostic_trace, _DIAGNOSTIC_MAX_CHARS
+def test_render_diagnostic_trace_default_max_chars() -> None:
+    """_render_diagnostic_trace() default cap is 2000 chars."""
+    from atelier.agent_executor import format_diagnostic_trace, _render_diagnostic_trace, _DIAGNOSTIC_MAX_CHARS
 
     assert _DIAGNOSTIC_MAX_CHARS == 2000
     messages_raw = [
         {"role": "tool", "name": f"t{i}", "content": "Error: " + "y" * 400}
         for i in range(5)
     ]
-    result = format_diagnostic_trace(
-        error="AgentExecutionError",
+    error = "AgentExecutionError"
+    trace = format_diagnostic_trace(
+        error=error,
         messages_raw=messages_raw,
         tool_call_count=5,
         tool_error_count=5,
     )
-    assert len(result) <= _DIAGNOSTIC_MAX_CHARS
+    text = _render_diagnostic_trace(trace, error)
+    assert len(text) <= _DIAGNOSTIC_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------

@@ -726,3 +726,174 @@ async def test_run_once_messages_raw_empty_when_state_unavailable() -> None:
             await executor.execute(_make_envelope("send an email"))
 
     assert exc_info.value.messages_raw == []
+
+
+# ---------------------------------------------------------------------------
+# Phase N — SubagentTrace + AgentResult.subagent_traces (Option B)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_subagent_trace_is_importable() -> None:
+    """SubagentTrace must be importable from atelier.agent_executor."""
+    from atelier.agent_executor import SubagentTrace  # noqa: F401
+
+
+@pytest.mark.unit
+def test_subagent_trace_is_frozen_dataclass() -> None:
+    """SubagentTrace must be a frozen dataclass with all required fields."""
+    from atelier.agent_executor import SubagentTrace
+    from dataclasses import fields
+
+    trace = SubagentTrace(
+        subagent_name="mail-agent",
+        skill_names=["mail-ops"],
+        tool_call_count=3,
+        tool_error_count=1,
+        messages_raw=[{"role": "user", "content": "send"}],
+    )
+    assert trace.subagent_name == "mail-agent"
+    assert trace.skill_names == ["mail-ops"]
+    assert trace.tool_call_count == 3
+    assert trace.tool_error_count == 1
+    assert len(trace.messages_raw) == 1
+
+    # Must be immutable
+    with pytest.raises(Exception):
+        trace.subagent_name = "other"  # type: ignore[misc]
+
+    # Must have exactly these 5 fields
+    field_names = {f.name for f in fields(trace)}
+    assert field_names == {
+        "subagent_name",
+        "skill_names",
+        "tool_call_count",
+        "tool_error_count",
+        "messages_raw",
+    }
+
+
+@pytest.mark.unit
+def test_agent_result_has_subagent_traces_field() -> None:
+    """AgentResult must expose a subagent_traces field as a required argument."""
+    from atelier.agent_executor import AgentResult, SubagentTrace
+
+    trace = SubagentTrace(
+        subagent_name="mail-agent",
+        skill_names=["mail-ops"],
+        tool_call_count=2,
+        tool_error_count=0,
+        messages_raw=[],
+    )
+    result = AgentResult(
+        reply_text="done",
+        messages_raw=[],
+        tool_call_count=2,
+        tool_error_count=0,
+        subagent_traces=(trace,),
+    )
+    assert len(result.subagent_traces) == 1
+    assert result.subagent_traces[0].subagent_name == "mail-agent"
+
+
+@pytest.mark.unit
+def test_agent_result_subagent_traces_no_default() -> None:
+    """AgentResult.subagent_traces must be a required field (no default)."""
+    import inspect
+    from atelier.agent_executor import AgentResult
+
+    sig = inspect.signature(AgentResult.__init__)
+    param = sig.parameters.get("subagent_traces")
+    assert param is not None
+    assert param.default is inspect.Parameter.empty, (
+        "subagent_traces must not have a default value"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase N+1 — _stream() injects SubagentMessageCapture via RunnableConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_subagent_traces_populated_from_ns_to_name() -> None:
+    """When a subagent is detected via task tool chunks, subagent_traces is populated.
+
+    Verifies end-to-end:
+    - task tool args accumulate correctly to populate ns_to_name
+    - An updates chunk with non-empty ns triggers ns_to_name entry
+    - AgentResult.subagent_traces has one SubagentTrace with correct subagent_name
+    - skill_names are extracted from the subagents= init param (basename of path)
+    """
+    from atelier.agent_executor import AgentExecutor, SubagentTrace
+
+    def _task_tok(name_fragment: str = "", args_fragment: str = "") -> MagicMock:
+        tok = MagicMock()
+        tok.type = "ai"
+        tok.content = ""
+        chunks = []
+        if name_fragment:
+            chunks.append({"name": name_fragment, "args": ""})
+        elif args_fragment:
+            chunks.append({"name": "", "args": args_fragment})
+        tok.tool_call_chunks = chunks
+        return tok
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        # 1. task tool name token
+        yield _v2_chunk("messages", (), (_task_tok(name_fragment="task"), {}))
+        # 2. task args accumulate (JSON parseable)
+        yield _v2_chunk("messages", (), (_task_tok(args_fragment='{"name": "mail-agent"}'), {}))
+        # 3. subagent updates chunk — triggers ns_to_name population
+        yield {"type": "updates", "ns": ("ns-abc",), "data": {"model": {}}}
+        # 4. AI reply
+        yield _v2_chunk("messages", (), (_ai_token("done"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(
+            profile=_make_profile(),
+            soul_prompt="...",
+            tools=[],
+            subagents=[{
+                "name": "mail-agent",
+                "description": "Sends emails",
+                "system_prompt": "You send emails.",
+                "skills": ["/abs/path/mail-ops"],
+            }],
+        )
+        result = await executor.execute(_make_envelope("Send email"))
+
+    assert isinstance(result.subagent_traces, tuple)
+    assert len(result.subagent_traces) == 1
+    trace = result.subagent_traces[0]
+    assert isinstance(trace, SubagentTrace)
+    assert trace.subagent_name == "mail-agent"
+    assert trace.skill_names == ["mail-ops"]
+    assert isinstance(trace.tool_call_count, int)
+    assert isinstance(trace.tool_error_count, int)
+    assert isinstance(trace.messages_raw, list)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_subagent_traces_empty_when_no_subagent_detected() -> None:
+    """When no subagent is invoked, subagent_traces is an empty tuple."""
+    from atelier.agent_executor import AgentExecutor
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token("hello"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        result = await executor.execute(_make_envelope("Hi"))
+
+    assert result.subagent_traces == ()

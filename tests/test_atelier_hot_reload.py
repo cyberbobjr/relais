@@ -14,6 +14,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from atelier.display_config import DisplayConfig
+from atelier.soul_assembler import AssemblyResult
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -148,7 +151,7 @@ async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> 
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_display_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=DisplayConfig()),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
@@ -206,7 +209,7 @@ async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> 
         patch("atelier.main.McpSessionManager"),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=profile_mock),
-        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()
@@ -240,7 +243,7 @@ async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false()
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_display_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=DisplayConfig()),
         patch("atelier.main.resolve_skills_dir", return_value=Path("/tmp/skills")),
         patch("atelier.main.SubagentRegistry") as mock_registry_cls,
         patch("atelier.main.AsyncSqliteSaver"),
@@ -298,7 +301,7 @@ async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false()
         patch("atelier.main.McpSessionManager"),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=profile_mock),
-        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()
@@ -335,7 +338,7 @@ async def test_atelier_reload_config_returns_true_on_success() -> None:
     with (
         patch("atelier.main.load_profiles", return_value={}),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_display_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=DisplayConfig()),
     ):
         result = await atelier.reload_config()
 
@@ -352,7 +355,7 @@ async def test_atelier_reload_config_applies_new_profiles() -> None:
     with (
         patch("atelier.main.load_profiles", return_value=fresh_profiles),
         patch("atelier.main.load_for_sdk", return_value={}),
-        patch("atelier.main.load_display_config", return_value=MagicMock()),
+        patch("atelier.main.load_display_config", return_value=DisplayConfig()),
     ):
         await atelier.reload_config()
 

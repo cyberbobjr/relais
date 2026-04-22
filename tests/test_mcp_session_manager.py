@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -155,3 +156,122 @@ async def test_start_all_returns_empty_when_no_servers() -> None:
             tools = await manager.start_all(stack)
 
     assert tools == []
+
+
+# ---------------------------------------------------------------------------
+# _select_session — session selection helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_select_session_returns_session_and_name() -> None:
+    """_select_session returns (server_name, session) for a known prefixed tool name."""
+    from atelier.mcp_session_manager import McpSessionManager
+
+    manager = _make_manager()
+    mock_session = AsyncMock()
+    manager._sessions = {"my_srv": mock_session}
+    manager._session_locks = {"my_srv": asyncio.Lock()}
+
+    server_name, session = manager._select_session("my_srv__real_tool")
+    assert server_name == "my_srv"
+    assert session is mock_session
+
+
+@pytest.mark.unit
+def test_select_session_returns_none_when_server_missing() -> None:
+    """_select_session returns (server_name, None) when server is absent from sessions."""
+    manager = _make_manager()
+    server_name, session = manager._select_session("missing__tool")
+    assert server_name == "missing"
+    assert session is None
+
+
+# ---------------------------------------------------------------------------
+# _apply_timeout — timeout wrapper helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_apply_timeout_passes_timeout_value() -> None:
+    """_apply_timeout forwards the timeout value to asyncio.wait_for."""
+    import asyncio as _asyncio
+
+    manager = _make_manager(profile=_make_profile(mcp_timeout=5))
+
+    async def _coro():
+        return "done"
+
+    mock_wf = AsyncMock(return_value="done")
+    with patch("atelier.mcp_session_manager.asyncio.wait_for", mock_wf):
+        await manager._apply_timeout(_coro(), 5)
+
+    mock_wf.assert_called_once()
+    assert mock_wf.call_args.kwargs.get("timeout") == 5 or mock_wf.call_args.args[1] == 5
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_apply_timeout_raises_on_timeout() -> None:
+    """_apply_timeout propagates asyncio.TimeoutError from asyncio.wait_for."""
+    import asyncio as _asyncio
+
+    manager = _make_manager()
+
+    async def _coro():
+        pass
+
+    with patch(
+        "atelier.mcp_session_manager.asyncio.wait_for",
+        AsyncMock(side_effect=_asyncio.TimeoutError()),
+    ):
+        with pytest.raises(_asyncio.TimeoutError):
+            await manager._apply_timeout(_coro(), 1)
+
+
+# ---------------------------------------------------------------------------
+# _format_result — result formatting helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_format_result_joins_text_items() -> None:
+    """_format_result concatenates text from all content items that have text."""
+    manager = _make_manager()
+
+    item1 = MagicMock()
+    item1.text = "hello "
+    item2 = MagicMock()
+    item2.text = "world"
+    raw = MagicMock()
+    raw.content = [item1, item2]
+
+    assert manager._format_result(raw) == "hello world"
+
+
+@pytest.mark.unit
+def test_format_result_skips_items_without_text() -> None:
+    """_format_result skips content items that have no text attribute."""
+    manager = _make_manager()
+
+    item_with_text = MagicMock()
+    item_with_text.text = "data"
+    item_no_text = MagicMock(spec=[])  # no 'text' attribute
+
+    raw = MagicMock()
+    raw.content = [item_with_text, item_no_text]
+
+    assert manager._format_result(raw) == "data"
+
+
+@pytest.mark.unit
+def test_format_result_returns_empty_string_when_no_text() -> None:
+    """_format_result returns empty string when no content item has text."""
+    manager = _make_manager()
+
+    raw = MagicMock()
+    raw.content = []
+
+    assert manager._format_result(raw) == ""

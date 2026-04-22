@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from common.profile_loader import ResilienceConfig
+from atelier.soul_assembler import AssemblyResult
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +152,7 @@ async def test_dlq_trace_includes_messages_raw_from_exception() -> None:
         patch("atelier.main.McpSessionManager") as MockMcpMgr,
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=profile_mock),
-        patch("atelier.main.assemble_system_prompt", return_value="soul"),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.ErrorSynthesizer") as MockSynth,
     ):

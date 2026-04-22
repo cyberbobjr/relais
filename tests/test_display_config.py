@@ -362,3 +362,52 @@ def test_load_display_config_invalid_yaml_value_returns_defaults(
     assert result.enabled is True
     assert result.detail_max_length == 100
     assert any("invalid" in r.message.lower() for r in caplog.records)
+    # The warning must name the specific field
+    assert any("detail_max_length" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 10. Per-field validation — bad field falls back; valid fields are applied
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_display_config_per_field_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Invalid field falls back to default while sibling valid fields are applied.
+
+    A non-bool ``enabled`` triggers a WARNING for that field only; the valid
+    ``detail_max_length: 42`` is still applied correctly.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+        monkeypatch: Pytest fixture for safe attribute patching.
+        caplog: Pytest log capture fixture.
+    """
+    import logging
+
+    atelier_yaml = tmp_path / "atelier.yaml"
+    atelier_yaml.write_text(
+        "display:\n"
+        "  enabled: not_a_bool\n"
+        "  detail_max_length: 42\n"
+    )
+
+    import atelier.display_config as _mod
+
+    monkeypatch.setattr(_mod, "resolve_config_path", lambda _: atelier_yaml)
+
+    from atelier.display_config import load_display_config
+
+    with caplog.at_level(logging.WARNING, logger="atelier.display_config"):
+        result = load_display_config()
+
+    # Invalid field falls back to its default
+    assert result.enabled is True
+    # Valid sibling field is still applied
+    assert result.detail_max_length == 42
+    # Warning names the specific invalid field
+    assert any("enabled" in r.message for r in caplog.records)
