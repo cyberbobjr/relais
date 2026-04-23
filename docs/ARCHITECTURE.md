@@ -443,7 +443,7 @@ This constraint prevents an envelope without a declared intent from traversing t
 
 - main file: `<RELAIS_HOME>/storage/memory.db`
 - used by `LongTermStore` and `FileStore`
-- recommended initialisation: `alembic upgrade head`
+- schema initialised automatically at startup via `SQLModel.metadata.create_all`
 
 There is no `audit.db` managed by Archiviste in the current implementation.
 

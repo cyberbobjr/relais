@@ -155,10 +155,6 @@ Type in any RELAIS chat channel:
 /bundle install /path/to/my-bundle.zip
 ```
 
-### Method 3 — TUI
-
-Open the **Bundles** tab in the RELAIS TUI and use the file picker to select a `.zip` file, then click **Install**.
-
 After installation completes, `watchfiles` detects the new directory and triggers an automatic hot-reload of the affected registries. No service restart is required.
 
 ---
@@ -178,10 +174,6 @@ relais bundle uninstall my-bundle
 ```
 /bundle uninstall my-bundle
 ```
-
-### TUI
-
-Open the **Bundles** tab, locate the bundle in the list, and click **Uninstall**.
 
 ---
 

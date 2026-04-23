@@ -47,8 +47,7 @@ class LongTermStore:
     async def _create_tables(self) -> None:
         """Create all tables declared in SQLModel.metadata.
 
-        Reserved for tests and non-Alembic initialisation. In production,
-        use ``alembic upgrade head``.
+        Idempotent — safe to call at every startup.
 
         Returns:
             None

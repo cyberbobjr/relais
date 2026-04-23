@@ -147,10 +147,6 @@ class Souvenir(BrickBase):
         Args:
             redis: Live async Redis connection (unused by Souvenir's startup).
         """
-        await self.log.warning(
-            "Initialising SQLite schema via _create_tables() — "
-            "run 'alembic upgrade head' in production instead."
-        )
         await self._long_term._create_tables()
         await self._file_store._create_tables()
 

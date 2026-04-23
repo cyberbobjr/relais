@@ -278,8 +278,6 @@ uv sync
 cp .env.example .env
 
 python -c "from common.init import initialize_user_dir; initialize_user_dir()"
-
-alembic upgrade head
 ```
 
 ### Ce que fait l'initialisation
