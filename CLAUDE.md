@@ -450,10 +450,9 @@ author: "..."
 
 #### Installing a bundle
 
-Three entry points:
+Two entry points:
 1. **CLI**: `relais bundle install /path/to/my-bundle.zip`
 2. **Slash command**: `/bundle install /path/to/my-bundle.zip` (via chat)
-3. **TUI**: Bundles tab → paste ZIP path → Install button (Ctrl+B to switch tab)
 
 Install destination: `~/.relais/bundles/<bundle-name>/`
 
@@ -461,7 +460,6 @@ Install destination: `~/.relais/bundles/<bundle-name>/`
 
 1. **CLI**: `relais bundle uninstall my-bundle`
 2. **Slash command**: `/bundle uninstall my-bundle`
-3. **TUI**: Bundles tab → select bundle → Uninstall button
 
 Uninstall removes the bundle directory; hot-reload picks up the change automatically.
 
