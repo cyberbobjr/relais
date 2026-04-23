@@ -13,9 +13,12 @@ Atomic writes use a ``.tmp`` file + ``os.replace()`` (POSIX-atomic).
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import os
 import textwrap
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -24,11 +27,19 @@ from pydantic import BaseModel, Field
 
 from common.profile_loader import ProfileConfig
 from forgeron.llm_factory import build_chat_model
+from forgeron.models import EditHistoryEntry
 
 if TYPE_CHECKING:
     from forgeron.config import ForgeonConfig
 
 logger = logging.getLogger(__name__)
+
+EDIT_HISTORY_FILENAME = "edit_history.jsonl"
+MAX_HISTORY_ENTRIES = 50
+
+_REASON_LLM_FAILURE = "llm_failure"
+_REASON_NO_NEW_LESSONS = "no new lessons"
+_REASON_CONTENT_IDENTICAL = "content identical after strip"
 
 # ---------------------------------------------------------------------------
 # Structured output schema
@@ -137,6 +148,46 @@ _SYSTEM_PROMPT_TEMPLATE = textwrap.dedent("""\
 """)
 
 
+def _append_edit_history(skill_md: Path, entry: EditHistoryEntry) -> None:
+    """Append one entry to the skill's edit_history.jsonl, rotating if needed.
+
+    The file sits next to SKILL.md.  Rotation rewrites via a tmp file so the
+    file is never left in a half-written state.
+
+    Args:
+        skill_md: Absolute path to SKILL.md (used to locate the journal).
+        entry: Immutable entry to append.
+    """
+    history_path = skill_md.parent / EDIT_HISTORY_FILENAME
+    line = json.dumps(dataclasses.asdict(entry), ensure_ascii=False)
+
+    existing: list[str] = []
+    try:
+        existing = [l for l in history_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not read %s: %s", history_path, exc)
+
+    existing.append(line)
+
+    if len(existing) > MAX_HISTORY_ENTRIES:
+        existing = existing[-MAX_HISTORY_ENTRIES:]
+        tmp_path = history_path.with_suffix(".tmp")
+        try:
+            tmp_path.write_text("\n".join(existing) + "\n", encoding="utf-8")
+            os.replace(str(tmp_path), str(history_path))
+        except OSError as exc:
+            logger.warning("History rotation failed for %s: %s", history_path, exc)
+        return
+
+    try:
+        with history_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", history_path, exc)
+
+
 class SkillEditor:
     """Rewrite SKILL.md directly from conversation traces, scoped to one skill.
 
@@ -159,6 +210,7 @@ class SkillEditor:
         trigger_reason: str = "",
         force: bool = False,
         skill_path: Path | None = None,
+        correlation_id: str = "",
     ) -> bool:
         """Rewrite SKILL.md using scoped conversation traces.
 
@@ -170,6 +222,7 @@ class SkillEditor:
             trigger_reason: Human-readable reason string for logging.
             force: Skip cooldown check (e.g. for usage-threshold triggers).
             skill_path: Explicit skill directory path override.
+            correlation_id: Originating turn correlation_id (written to journal).
 
         Returns:
             ``True`` if SKILL.md was rewritten, ``False`` otherwise.
@@ -197,8 +250,15 @@ class SkillEditor:
 
         scoped = scope_messages_to_skill(messages_raw, skill_name)
 
+        def _record(reason: str, changed: bool) -> None:
+            _append_edit_history(
+                skill_md,
+                EditHistoryEntry(ts=time.time(), trigger=trigger_reason, reason=reason, changed=changed, corr=correlation_id),
+            )
+
         result = await self._call_llm(skill_name, current_content, scoped)
         if result is None:
+            _record(_REASON_LLM_FAILURE, False)
             return False
 
         updated = result.updated_skill.strip()
@@ -208,6 +268,7 @@ class SkillEditor:
                 skill_name,
                 result.reason or "LLM found nothing new",
             )
+            _record(result.reason or _REASON_NO_NEW_LESSONS, False)
             return False
 
         if updated == current_content.strip():
@@ -215,6 +276,7 @@ class SkillEditor:
                 "Skill '%s' content unchanged after strip — skipping write.",
                 skill_name,
             )
+            _record(result.reason or _REASON_CONTENT_IDENTICAL, False)
             return False
 
         tmp_path = skill_md.with_suffix(".tmp")
@@ -226,6 +288,8 @@ class SkillEditor:
             return False
 
         await redis_conn.setex(cooldown_key, config.edit_cooldown_seconds, "1")
+
+        _record(result.reason, True)
 
         logger.info(
             "[FORGERON] edited skill '%s' (trigger=%s): %s",

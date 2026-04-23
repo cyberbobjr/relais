@@ -2,8 +2,28 @@
 
 import time
 import uuid
+from dataclasses import dataclass
 
 from sqlmodel import Field, SQLModel
+
+
+@dataclass(frozen=True)
+class EditHistoryEntry:
+    """One entry written to a skill's edit_history.jsonl after each edit attempt.
+
+    Args:
+        ts: Unix timestamp of the attempt.
+        trigger: Human-readable trigger reason (e.g. "3 errors", "aborted").
+        reason: LLM's explanation of what changed, or failure reason.
+        changed: True if SKILL.md was rewritten.
+        corr: correlation_id of the originating turn.
+    """
+
+    ts: float
+    trigger: str
+    reason: str
+    changed: bool
+    corr: str
 
 
 class SkillTrace(SQLModel, table=True):

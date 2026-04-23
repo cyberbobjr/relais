@@ -48,6 +48,12 @@ with ``with_structured_output`` to produce a rewritten SKILL.md and a
 ``changed`` flag.  SKILL.md is only written when ``changed=True`` and the
 content differs from the current file.
 
+Every attempt — success or failure — is appended to ``edit_history.jsonl``
+(next to ``SKILL.md``), recording: Unix timestamp, trigger reason, LLM reason,
+``changed`` flag, and the originating ``correlation_id``.  The journal is
+capped at ``MAX_HISTORY_ENTRIES`` (50) entries; older lines are pruned via an
+atomic tmp-replace write.
+
 Skill auto-creation — trigger rules
 -------------------------------------
 Forgeron consumes ``relais:memory:request`` via a dedicated consumer group
@@ -456,6 +462,7 @@ class Forgeron(BrickBase):
                 trigger_reason=reason,
                 force=threshold_reached,
                 skill_path=skill_dir_override,
+                correlation_id=correlation_id,
             )
             logger.info(
                 "[TRACE] edit result — skill='%s' edited=%s corr=%s",
