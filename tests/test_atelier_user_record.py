@@ -173,7 +173,7 @@ async def test_atelier_reads_llm_profile_from_top_level_metadata() -> None:
         patch("atelier.main.McpSessionManager"),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", side_effect=capture_resolve_profile),
-        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()
@@ -224,7 +224,7 @@ async def test_atelier_reads_role_prompt_path_from_user_record_for_soul_assembly
         asyncio.CancelledError(),
     ])
 
-    mock_sp = MagicMock(return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False))
+    mock_sp = MagicMock(return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False))
 
     with (
         patch("atelier.main.AgentExecutor") as MockExec,
@@ -281,7 +281,7 @@ async def test_atelier_reads_prompt_path_from_user_record() -> None:
         asyncio.CancelledError(),
     ])
 
-    mock_sp = MagicMock(return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False))
+    mock_sp = MagicMock(return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False))
 
     with (
         patch("atelier.main.AgentExecutor") as MockExec,
@@ -357,7 +357,7 @@ async def test_atelier_reads_skills_dirs_from_user_record(tmp_path: Path) -> Non
             patch("atelier.main.McpSessionManager"),
             patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
             patch("atelier.main.resolve_profile", return_value=_default_profile_mock()),
-            patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
+            patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)),
             patch("atelier.main.load_for_sdk", return_value={}),
         ):
             try:
@@ -392,7 +392,7 @@ async def test_atelier_role_prompt_path_none_when_user_record_absent() -> None:
         asyncio.CancelledError(),
     ])
 
-    mock_sp = MagicMock(return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False))
+    mock_sp = MagicMock(return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False))
 
     with (
         patch("atelier.main.AgentExecutor") as MockExec,

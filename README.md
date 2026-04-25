@@ -15,7 +15,7 @@ Active bricks in the repo:
 - `commandant`: slash commands outside the LLM
 - `souvenir`: Redis short-term memory + SQLite archiving
 - `archiviste`: logs and partial pipeline observation
-- `forgeron`: autonomous skill improvement (direct SkillEditor rewrite) and automatic skill creation from archives
+- `forgeron`: autonomous skill improvement via direct SKILL.md editing and automatic skill creation from archives, with resilient async SQLite storage and retry-based history fetching
 - `horloger`: CRON scheduler — fires scheduled prompts as virtual user messages through the full pipeline
 
 Channel adapters actually shipped:
@@ -165,7 +165,7 @@ flowchart TD
 
   A **Redis cooldown** per skill (`edit_cooldown_seconds`, default 300 s) prevents edit spam.
 
-  `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (`scope_messages_to_skill`), calls the LLM once (`edit_profile`, default `precise`) with `with_structured_output`, and rewrites SKILL.md directly if `changed=True`. For bundle skills, `skill_paths` in the trace context provides the absolute directory path.
+  `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (`scope_messages_to_skill`), calls the LLM once (`edit_profile`, default `precise`) with `with_structured_output`, and rewrites SKILL.md directly if `changed=True`. Every edit attempt is logged to `edit_history.jsonl` (capped at 50 entries). For bundle skills, `skill_paths` in the trace context provides the absolute directory path.
 
   **Pipeline 2 — Automatic skill creation**
 
@@ -180,9 +180,10 @@ flowchart TD
   **Pipeline 3 — User correction → `skill-designer`**
 
   Also consumes `relais:memory:request` (`forgeron_archive_group`). The `IntentLabeler` can detect that a session is an **explicit user correction** (`is_correction=True`) rather than normal usage. In that case (and if `correction_mode` is enabled):
-  1. Forgeron fetches the full session history from Souvenir via `relais:memory:response:{correlation_id}` (BRPOP).
+  1. Forgeron publishes a `history_read` request to `relais:memory:request` so Souvenir serves the full history.
   2. A notification is sent to the user informing them that a correction was detected.
-  3. An `ACTION_MESSAGE_TASK` message is published to `relais:tasks` with `force_subagent = "skill-designer"` in the context. Atelier then delegates directly to `skill-designer`, which engages a dialogue with the user to create an appropriate `SKILL.md`.
+  3. Forgeron waits for the reply via `relais:memory:response:{correlation_id}` (BRPOP with exponential backoff retry — max 2 retries, 1s and 2s delays — to handle Souvenir being slow).
+  4. If history arrives, an `ACTION_MESSAGE_TASK` message is published to `relais:tasks` with `force_subagent = "skill-designer"` in the context. Atelier then delegates directly to `skill-designer`, which engages a dialogue with the user to create an appropriate `SKILL.md`.
 
 ---
 

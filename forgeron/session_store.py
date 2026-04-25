@@ -11,17 +11,16 @@ import logging
 import time
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, col, select
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from common.config_loader import resolve_storage_dir
+from forgeron.base_store import BaseAsyncStore
 from forgeron.models import SessionSummary, SkillProposal
 
 logger = logging.getLogger(__name__)
 
 
-class SessionStore:
+class SessionStore(BaseAsyncStore):
     """Persist and query session intent patterns for skill auto-creation.
 
     Shares the forgeron.db SQLite file with SkillTraceStore and SkillPatchStore
@@ -34,12 +33,7 @@ class SessionStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or (resolve_storage_dir() / "forgeron.db")
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        url = f"sqlite+aiosqlite:///{self._db_path}"
-        self._engine = create_async_engine(url, echo=False)
-        self._session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-            self._engine, class_=AsyncSession, expire_on_commit=False
-        )
+        super().__init__(self._db_path)
 
     async def _create_tables(self) -> None:
         """Create all SQLModel tables in the database (idempotent).
@@ -210,6 +204,3 @@ class SessionStore:
                 proposal.created_skill_name = skill_name
                 await session.commit()
 
-    async def close(self) -> None:
-        """Dispose the async engine and release all connections."""
-        await self._engine.dispose()

@@ -730,14 +730,14 @@ async def _handle_sse(
         last_id = "0"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request_timeout
+        seen_final = False
 
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
 
-            # Check if future is done (final message arrived)
-            if future.done():
+            if seen_final:
                 break
 
             try:
@@ -747,6 +747,8 @@ async def _handle_sse(
                 )
             except asyncio.TimeoutError:
                 await response.write(HEARTBEAT)
+                if future.done():
+                    break
                 continue
             except Exception as exc:
                 logger.warning("SSE xread error corr=%s: %s", correlation_id[:8], exc)
@@ -755,6 +757,8 @@ async def _handle_sse(
 
             if not results:
                 await response.write(HEARTBEAT)
+                if future.done():
+                    break
                 continue
 
             for _, messages in results:
@@ -762,6 +766,13 @@ async def _handle_sse(
                     last_id = msg_id
                     # Any activity = extend deadline
                     deadline = loop.time() + request_timeout
+
+                    is_final_raw = data.get(b"is_final") or data.get("is_final") or b"0"
+                    if isinstance(is_final_raw, bytes):
+                        is_final_raw = is_final_raw.decode()
+                    if is_final_raw == "1":
+                        seen_final = True
+                        break
 
                     entry_type = data.get(b"type") or data.get("type") or b""
                     if isinstance(entry_type, bytes):
@@ -789,6 +800,8 @@ async def _handle_sse(
                             detail = detail.decode()
                         frame = format_sse("progress", json.dumps({"event": event, "detail": detail}))
                         await response.write(frame)
+                if seen_final:
+                    break
 
         # Send final event
         if future.done() and not future.cancelled():

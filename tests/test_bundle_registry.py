@@ -90,9 +90,7 @@ def test_resolve_bundles_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         monkeypatch: pytest monkeypatch fixture.
     """
     monkeypatch.setenv("RELAIS_HOME", str(tmp_path))
-    from importlib import reload
     import common.config_loader as cl
-    reload(cl)
 
     result = cl.resolve_bundles_dir()
     assert result == tmp_path / "bundles"

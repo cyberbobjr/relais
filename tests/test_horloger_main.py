@@ -196,7 +196,11 @@ async def test_tick_skips_disabled_jobs(horloger_instance) -> None:
     so operators can see that the job was deliberately skipped rather than
     silently ignored.
     """
-    skipped_due = _make_due_job(enabled=False)
+    skipped_due = DueJob(
+        spec=_make_job_spec(job_id="test-job", enabled=False),
+        scheduled_for=time.time() - 60.0,
+        skip_reason="skipped_disabled",
+    )
     horloger_instance._scheduler.get_due_jobs.return_value = ([], [skipped_due])
     horloger_instance._registry.reload.return_value = {
         skipped_due.spec.id: skipped_due.spec

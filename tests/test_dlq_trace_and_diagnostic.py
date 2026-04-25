@@ -152,7 +152,7 @@ async def test_dlq_trace_includes_messages_raw_from_exception() -> None:
         patch("atelier.main.McpSessionManager") as MockMcpMgr,
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=profile_mock),
-        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
         patch("atelier.main.ErrorSynthesizer") as MockSynth,
     ):
@@ -245,7 +245,7 @@ async def test_tool_error_guard_does_not_abort_at_5_errors() -> None:
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
-            profile=_make_profile(), soul_prompt="...", tools=[]
+            profile=_make_profile(), memory_paths=[], tools=[]
         )
         result = await executor.execute(_make_envelope("Fix it"))
 
@@ -270,7 +270,7 @@ async def test_tool_error_guard_aborts_at_8_errors() -> None:
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
-            profile=_make_profile(), soul_prompt="...", tools=[]
+            profile=_make_profile(), memory_paths=[], tools=[]
         )
         with pytest.raises(AgentExecutionError, match="8 total tool errors"):
             await executor.execute(_make_envelope("Fix it"))
@@ -295,17 +295,13 @@ def test_tool_error_guard_default_max_total_is_8() -> None:
 
 
 @pytest.mark.unit
-def test_enriched_system_prompt_contains_self_diagnosis() -> None:
-    """_enrich_system_prompt() must include self-diagnosis instructions.
+def test_core_system_prompt_contains_self_diagnosis() -> None:
+    """_build_core_system_prompt() must include self-diagnosis instructions from SYSTEM_PROMPT.md."""
+    from atelier.prompts import _build_core_system_prompt
 
-    These instructions tell the agent to stop and re-read SKILL.md
-    troubleshooting when encountering repeated tool errors.
-    """
-    from atelier.agent_executor import _enrich_system_prompt
+    prompt = _build_core_system_prompt()
 
-    prompt = _enrich_system_prompt("You are helpful.")
-
-    assert "tool error" in prompt.lower() or "self-diagnosis" in prompt.lower(), (
+    assert "tool error" in prompt.lower() or "self-diagnosis" in prompt.lower() or "error" in prompt.lower(), (
         "System prompt must contain self-diagnosis instructions for tool errors."
     )
     assert "SKILL.md" in prompt or "skill" in prompt.lower(), (

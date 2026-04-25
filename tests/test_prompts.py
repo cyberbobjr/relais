@@ -1,10 +1,10 @@
-"""Unit tests for atelier.prompts — TDD RED first.
+"""Unit tests for atelier.prompts.
 
 Tests validate:
-- Constants are importable from atelier.prompts
+- DIAGNOSTIC_MARKER constant is importable
 - build_project_context_prompt produces expected anchors
 - _build_execution_context renders envelope metadata correctly
-- _enrich_system_prompt appends mandatory sections without duplication
+- _build_core_system_prompt reads SYSTEM_PROMPT.md and appends dynamic sections
 """
 
 from __future__ import annotations
@@ -20,14 +20,9 @@ import pytest
 
 
 @pytest.mark.unit
-def test_prompts_constants_importable() -> None:
-    """All prompt constants must be importable from atelier.prompts."""
-    from atelier.prompts import (  # noqa: F401
-        LONG_TERM_MEMORY_PROMPT,
-        SELF_DIAGNOSIS_PROMPT,
-        DIAGNOSTIC_AWARENESS_PROMPT,
-        DIAGNOSTIC_MARKER,
-    )
+def test_diagnostic_marker_importable() -> None:
+    """DIAGNOSTIC_MARKER must be importable from atelier.prompts."""
+    from atelier.prompts import DIAGNOSTIC_MARKER  # noqa: F401
 
 
 @pytest.mark.unit
@@ -36,32 +31,6 @@ def test_diagnostic_marker_value() -> None:
     from atelier.prompts import DIAGNOSTIC_MARKER
 
     assert DIAGNOSTIC_MARKER == "[DIAGNOSTIC — internal]"
-
-
-@pytest.mark.unit
-def test_long_term_memory_prompt_nonempty() -> None:
-    """LONG_TERM_MEMORY_PROMPT must be a non-empty string."""
-    from atelier.prompts import LONG_TERM_MEMORY_PROMPT
-
-    assert isinstance(LONG_TERM_MEMORY_PROMPT, str)
-    assert len(LONG_TERM_MEMORY_PROMPT) > 0
-
-
-@pytest.mark.unit
-def test_self_diagnosis_prompt_nonempty() -> None:
-    """SELF_DIAGNOSIS_PROMPT must be a non-empty string."""
-    from atelier.prompts import SELF_DIAGNOSIS_PROMPT
-
-    assert isinstance(SELF_DIAGNOSIS_PROMPT, str)
-    assert len(SELF_DIAGNOSIS_PROMPT) > 0
-
-
-@pytest.mark.unit
-def test_diagnostic_awareness_prompt_contains_marker() -> None:
-    """DIAGNOSTIC_AWARENESS_PROMPT must reference DIAGNOSTIC_MARKER."""
-    from atelier.prompts import DIAGNOSTIC_AWARENESS_PROMPT, DIAGNOSTIC_MARKER
-
-    assert DIAGNOSTIC_MARKER in DIAGNOSTIC_AWARENESS_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -192,71 +161,64 @@ def test_build_execution_context_wrapped_in_tags() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _enrich_system_prompt
+# _build_core_system_prompt
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_appends_long_term_memory() -> None:
-    """_enrich_system_prompt appends LONG_TERM_MEMORY_PROMPT when absent."""
-    from atelier.prompts import _enrich_system_prompt, LONG_TERM_MEMORY_PROMPT
+def test_build_core_system_prompt_is_nonempty() -> None:
+    """_build_core_system_prompt returns a non-empty string from SYSTEM_PROMPT.md."""
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("You are helpful.")
-    assert LONG_TERM_MEMORY_PROMPT in result
-
-
-@pytest.mark.unit
-def test_enrich_system_prompt_no_duplicate_long_term_memory() -> None:
-    """_enrich_system_prompt does not duplicate LONG_TERM_MEMORY_PROMPT if present."""
-    from atelier.prompts import _enrich_system_prompt, LONG_TERM_MEMORY_PROMPT
-
-    base = f"You are helpful.\n\n{LONG_TERM_MEMORY_PROMPT}"
-    result = _enrich_system_prompt(base)
-    assert result.count(LONG_TERM_MEMORY_PROMPT) == 1
+    result = _build_core_system_prompt()
+    assert isinstance(result, str)
+    assert len(result) > 0
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_appends_self_diagnosis() -> None:
-    """_enrich_system_prompt appends SELF_DIAGNOSIS_PROMPT when absent."""
-    from atelier.prompts import _enrich_system_prompt, SELF_DIAGNOSIS_PROMPT
+def test_build_core_system_prompt_contains_diagnostic_marker() -> None:
+    """_build_core_system_prompt includes DIAGNOSTIC_MARKER from SYSTEM_PROMPT.md."""
+    from atelier.prompts import _build_core_system_prompt, DIAGNOSTIC_MARKER
 
-    result = _enrich_system_prompt("base")
-    assert SELF_DIAGNOSIS_PROMPT in result
+    result = _build_core_system_prompt()
+    assert DIAGNOSTIC_MARKER in result
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_appends_delegation_prompt() -> None:
-    """_enrich_system_prompt appends delegation_prompt when provided."""
-    from atelier.prompts import _enrich_system_prompt
+def test_build_core_system_prompt_appends_delegation_prompt() -> None:
+    """_build_core_system_prompt appends delegation_prompt when provided."""
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("base", delegation_prompt="Delegate to mail-agent.")
+    result = _build_core_system_prompt(delegation_prompt="Delegate to mail-agent.")
     assert "Delegate to mail-agent." in result
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_no_delegation_when_empty() -> None:
-    """_enrich_system_prompt does not append anything extra when delegation_prompt is empty."""
-    from atelier.prompts import _enrich_system_prompt
+def test_build_core_system_prompt_no_delegation_when_empty() -> None:
+    """_build_core_system_prompt does not append extra text when delegation_prompt is empty."""
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("base", delegation_prompt="")
-    # Delegation section should not be an extra blank section
-    assert "Delegate" not in result
+    result_without = _build_core_system_prompt(delegation_prompt="")
+    result_with = _build_core_system_prompt(delegation_prompt="Delegate.")
+    assert "Delegate." not in result_without
+    assert "Delegate." in result_with
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_appends_project_context() -> None:
-    """_enrich_system_prompt appends project_context when non-empty."""
-    from atelier.prompts import _enrich_system_prompt
+def test_build_core_system_prompt_appends_project_context() -> None:
+    """_build_core_system_prompt appends project_context when non-empty."""
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("base", project_context="RELAIS_HOME=/foo")
+    result = _build_core_system_prompt(project_context="RELAIS_HOME=/foo")
     assert "RELAIS_HOME=/foo" in result
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_skips_empty_project_context() -> None:
-    """_enrich_system_prompt does not inject empty project_context."""
-    from atelier.prompts import _enrich_system_prompt
+def test_build_core_system_prompt_skips_empty_project_context() -> None:
+    """_build_core_system_prompt does not inject empty project_context."""
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("base", project_context="")
-    # Should not add a blank section for project_context
-    assert result.strip() != ""
+    result_without = _build_core_system_prompt(project_context="")
+    result_with = _build_core_system_prompt(project_context="RELAIS_HOME=/bar")
+    assert "RELAIS_HOME=/bar" not in result_without
+    assert "RELAIS_HOME=/bar" in result_with

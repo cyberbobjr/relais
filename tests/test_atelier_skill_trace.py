@@ -63,7 +63,7 @@ async def test_subagent_skill_trace_published_when_tool_calls_present() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             # Make skills_used empty so parent trace is skipped —
                             # we isolate the subagent trace publication
@@ -132,7 +132,7 @@ async def test_subagent_skill_trace_not_published_when_no_tool_calls() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             with patch.object(atelier._tool_policy, "resolve_skills", return_value=[]):
                                 try:
@@ -190,7 +190,7 @@ async def test_subagent_skill_trace_not_published_when_skill_names_empty() -> No
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             with patch.object(atelier._tool_policy, "resolve_skills", return_value=[]):
                                 try:

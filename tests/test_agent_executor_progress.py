@@ -131,7 +131,7 @@ async def test_stream_emits_progress_on_tool_call() -> None:
         progress_calls.append((event, detail))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         await executor.execute(
             _make_envelope("Hi"),
             
@@ -167,7 +167,7 @@ async def test_stream_emits_progress_on_tool_result() -> None:
         progress_calls.append((event, detail))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         await executor.execute(
             _make_envelope("Hi"),
             
@@ -204,7 +204,7 @@ async def test_stream_emits_progress_tool_result_truncated_at_100() -> None:
         progress_calls.append((event, detail))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         await executor.execute(
             _make_envelope("Hi"),
             
@@ -248,7 +248,7 @@ async def test_stream_emits_progress_on_subagent_start() -> None:
         progress_calls.append((event, detail))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         await executor.execute(
             _make_envelope("Hi"),
             
@@ -287,7 +287,7 @@ async def test_stream_no_progress_on_main_agent_model_request() -> None:
         progress_calls.append((event, detail))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         await executor.execute(
             _make_envelope("Hi"),
             
@@ -324,7 +324,7 @@ async def test_stream_progress_callback_none_no_error() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(
             _make_envelope("Hi"),
             
@@ -364,7 +364,7 @@ async def test_stream_fallback_last_tool_result_when_reply_empty() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("What is 2+2?"))
 
     assert result.reply_text == "4"
@@ -401,7 +401,7 @@ async def test_stream_fallback_tool_result_list_content() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("Do it"))
 
     assert result.reply_text == "Part one. Part two."
@@ -428,7 +428,7 @@ async def test_stream_placeholder_when_all_empty() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("silence"))
 
     assert result.reply_text == PLACEHOLDER
@@ -459,7 +459,7 @@ async def test_stream_fallback_overridden_by_ai_text() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("search relais"))
 
     assert result.reply_text == "Here is the answer."
@@ -496,7 +496,7 @@ async def test_stream_text_tokens_accumulated() -> None:
         received.append(chunk)
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(
             _make_envelope("Hi"), stream_callback=stream_callback
         )
@@ -520,7 +520,7 @@ async def test_stream_error_wrapping_preserved() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         with pytest.raises(AgentExecutionError):
             await executor.execute(_make_envelope("Hi"))
 
@@ -558,7 +558,7 @@ async def test_stream_text_preserved_when_tool_call_chunks_coexist() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("find relais"))
 
     assert "Searching for you…" in result.reply_text
@@ -593,7 +593,7 @@ async def test_tool_result_list_with_str_items_not_dropped() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("calc"))
 
     # Both the str element and the dict text block must appear in the fallback
@@ -646,7 +646,7 @@ async def test_tool_use_content_fallback_emits_exactly_one_progress_event() -> N
         progress_calls.append((event, detail))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         await executor.execute(
             _make_envelope("Hi"),
             progress_callback=progress_callback,

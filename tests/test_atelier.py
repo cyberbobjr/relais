@@ -113,7 +113,7 @@ async def test_xack_sent_after_successful_sdk_call() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -149,7 +149,7 @@ async def test_xack_sent_and_dlq_on_sdk_execution_error() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -191,7 +191,7 @@ async def test_xack_not_sent_on_generic_exception() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -236,7 +236,7 @@ async def test_handle_message_resolves_profile_from_envelope_metadata() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=fast_profile) as mock_resolve:
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -271,7 +271,7 @@ async def test_handle_message_injects_user_message_in_response_metadata() -> Non
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -314,7 +314,7 @@ async def test_handle_message_acks_on_success() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -360,7 +360,7 @@ async def test_streaming_signal_published_for_telegram_channel() -> None:
                     MockStreamPublisher.return_value = mock_pub
 
                     with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
                                     await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -404,7 +404,7 @@ async def test_streaming_signal_not_published_for_non_streaming_channel() -> Non
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -454,7 +454,7 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
                     MockStreamPublisher.return_value = mock_pub
 
                     with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
                                     await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -501,7 +501,7 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
                     MockStreamPublisher.return_value = mock_pub
 
                     with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
                                     await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -564,7 +564,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
                     MockStreamPublisher.return_value = mock_pub
 
                     with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 try:
                                     await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -610,7 +610,7 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -652,7 +652,7 @@ async def test_process_stream_passes_role_prompt_path_to_assemble_system_prompt(
         asyncio.CancelledError(),
     ])
 
-    mock_sp = MagicMock(return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False))
+    mock_sp = MagicMock(return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False))
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
@@ -694,7 +694,7 @@ async def test_process_stream_role_prompt_path_none_when_absent_in_user_record()
         asyncio.CancelledError(),
     ])
 
-    mock_sp = MagicMock(return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False))
+    mock_sp = MagicMock(return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False))
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
@@ -760,7 +760,7 @@ async def test_handle_message_passes_skills_to_agent_executor(tmp_path) -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -834,7 +834,7 @@ async def test_handle_message_passes_checkpointer_to_agent_executor() -> None:
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             try:
                                 await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
@@ -885,7 +885,7 @@ async def test_agent_execution_error_publishes_error_reply_to_outgoing_pending()
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             with patch("atelier.main.ErrorSynthesizer") as MockSynth:
                                 mock_synth_inst = AsyncMock()
@@ -950,7 +950,7 @@ async def test_agent_execution_error_synthesizer_receives_messages_raw() -> None
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                 with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                         with patch("atelier.main.load_for_sdk", return_value={}):
                             with patch("atelier.main.ErrorSynthesizer") as MockSynth:
                                 mock_synth_inst = AsyncMock()

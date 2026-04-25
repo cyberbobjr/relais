@@ -720,7 +720,7 @@ class Atelier(BrickBase):
         if self._compact_executor is None:
             self._compact_executor = AgentExecutor(
                 profile=profile,
-                soul_prompt="",
+                memory_paths=[],
                 tools=[],
                 checkpointer=self._checkpointer,
             )
@@ -806,15 +806,15 @@ class Atelier(BrickBase):
                 user_prompt_path=ur.get("prompt_path"),
                 channel_prompt_path=portail_ctx.get("channel_prompt_path"),
             )
-            soul_prompt = assembly.prompt
+            memory_paths = assembly.memory_paths
             if assembly.is_degraded:
                 logger.warning(
                     "[TASK] soul prompt degraded — corr=%s issues=%s",
                     corr, assembly.issues,
                 )
             logger.info(
-                "[TASK] soul prompt assembled — corr=%s len=%d role=%s",
-                corr, len(soul_prompt), ur.get("role_prompt_path", "none"),
+                "[TASK] memory paths assembled — corr=%s count=%d role=%s",
+                corr, len(memory_paths), ur.get("role_prompt_path", "none"),
             )
 
             # 3. Resolve per-user skills and MCP tool policy
@@ -894,7 +894,7 @@ class Atelier(BrickBase):
             display_config = replace(self._display_config, final_only=False) if streaming else self._display_config
             agent_executor = AgentExecutor(
                 profile=profile,
-                soul_prompt=soul_prompt,
+                memory_paths=memory_paths,
                 tools=mcp_tools,
                 skills=skills,
                 backend=SouvenirBackend(user_id=user_id),

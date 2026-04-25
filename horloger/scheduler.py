@@ -12,13 +12,17 @@ to compute the most recent scheduled time for each job and applies three guards:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from croniter import CroniterBadCronError
 from croniter import croniter as Croniter
 
 from horloger.job_model import JobSpec
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +196,8 @@ class Scheduler:
         """
         try:
             tz = ZoneInfo(spec.timezone)
-        except Exception:
+        except ZoneInfoNotFoundError:
+            logger.debug("Unknown timezone %r for job %s — skipping", spec.timezone, spec.id)
             return None
 
         try:
@@ -201,5 +206,6 @@ class Scheduler:
             cron = Croniter(spec.schedule, now_dt)
             prev: float = cron.get_prev(float)
             return prev
-        except Exception:
+        except (CroniterBadCronError, ValueError) as exc:
+            logger.debug("Invalid schedule %r for job %s: %s", spec.schedule, spec.id, exc)
             return None

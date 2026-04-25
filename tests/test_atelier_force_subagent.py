@@ -128,7 +128,7 @@ def _common_patches(atelier, redis_conn, envelope, mock_executor_instance):
 
                 with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
                     with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
                             with patch("atelier.main.load_for_sdk", return_value={}):
                                 yield MockExecutor
 

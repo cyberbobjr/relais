@@ -330,7 +330,8 @@ async def test_trigger_skill_design_brpop_timeout_returns_early(
 
     redis = AsyncMock()
     redis.xadd = AsyncMock()
-    redis.brpop = AsyncMock(return_value=None)  # timeout
+    # All retry attempts return None — exhausts max_retries=2
+    redis.brpop = AsyncMock(side_effect=[None, None])
 
     await forgeron._trigger_skill_design(
         envelope=_make_archive_envelope(),
@@ -340,6 +341,9 @@ async def test_trigger_skill_design_brpop_timeout_returns_early(
         skill_name_hint=None,
         redis_conn=redis,
     )
+
+    # BRPOP must have been called max_retries=2 times
+    assert redis.brpop.call_count == 2
 
     # Only the history read XADD + notification XADD, not the task XADD
     task_calls = [
@@ -352,3 +356,51 @@ async def test_trigger_skill_design_brpop_timeout_returns_early(
         c for c in redis.xadd.call_args_list if c.args[0] == STREAM_OUTGOING_PENDING
     ]
     assert len(notif_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_trigger_skill_design_brpop_retry_success(
+    tmp_path: Path,
+) -> None:
+    """First BRPOP attempt times out, second succeeds — task IS published."""
+    from forgeron.main import Forgeron
+    from forgeron.config import ForgeonConfig
+
+    cfg = ForgeonConfig(
+        correction_mode=True,
+        history_read_timeout_seconds=1,
+        skills_dir=tmp_path / "skills",
+    )
+
+    forgeron = Forgeron.__new__(Forgeron)
+    forgeron._config = cfg
+
+    history_payload = json.dumps([[{"role": "user", "content": "hello"}]])
+    brpop_result = ("relais:memory:response:test-corr", history_payload.encode())
+
+    redis = AsyncMock()
+    redis.xadd = AsyncMock()
+    # First attempt times out, second succeeds
+    redis.brpop = AsyncMock(side_effect=[None, brpop_result])
+
+    envelope = _make_archive_envelope()
+
+    with patch("forgeron.main.asyncio.sleep", new_callable=AsyncMock):
+        await forgeron._trigger_skill_design(
+            envelope=envelope,
+            channel="discord",
+            sender_id="discord:123",
+            corrected_behavior="Do it right",
+            skill_name_hint=None,
+            redis_conn=redis,
+        )
+
+    # BRPOP called twice (first None, then success)
+    assert redis.brpop.call_count == 2
+
+    # Task IS published after successful retry
+    task_calls = [
+        c for c in redis.xadd.call_args_list if c.args[0] == STREAM_TASKS
+    ]
+    assert len(task_calls) == 1

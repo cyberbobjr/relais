@@ -1,42 +1,23 @@
-"""Prompt constants and builder functions for the Atelier agent executor.
+"""Prompt builder functions for the Atelier agent executor.
 
 Centralises all prompt-related logic extracted from ``atelier/agent_executor.py``
 so that each module stays under the 800-line file size limit.
-
-Exported symbols are re-imported in ``atelier/agent_executor.py`` for
-backward-compatibility.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from common.config_loader import get_relais_project_dir
 from common.contexts import CTX_AIGUILLEUR, AiguilleurCtx
 from common.envelope import Envelope
 
+# Runtime constant — used to tag diagnostic messages injected into conversation history.
+# Do NOT move this to SYSTEM_PROMPT.md; it is referenced by diagnostic_trace.py at runtime.
+DIAGNOSTIC_MARKER = "[DIAGNOSTIC — internal]"
 
-LONG_TERM_MEMORY_PROMPT = """
-Long-term memory:
-- Any information about the user must be stored in the `memories` directory.
-- This includes the user's preferences, needs, goals, projects, and any other user-related details.
-- If the user asks you to remember anything, save it in `memories`.
-- Always use paths like `/memories/...` to create, read, update, or organize persistent memories.
-- Do not write long-term information outside `/memories/`.
-- Before answering any question about the user or long-term memory, first check `/memories/` for relevant user and long-term information.
-- CRITICAL: `/memories/` is a virtual filesystem. NEVER use the `execute` tool to run shell commands (mkdir, touch, ls, cat, etc.) on `/memories/` paths — they will fail because `/memories/` does not exist on disk. Always use the dedicated file tools (write_file, read_file, list_files, edit_file) for all operations under `/memories/`.
-""".strip()
-
-SELF_DIAGNOSIS_PROMPT = """
-Self-diagnosis on tool errors (IMPORTANT):
-If you encounter repeated tool errors (3+ in a row for the same tool, or 5+ total):
-1. STOP retrying the same approach immediately.
-2. Re-read the relevant SKILL.md troubleshooting section for the skill you are using.
-3. Analyze ALL error messages you have received to identify the root cause.
-4. Form a hypothesis about what is wrong (wrong syntax, wrong config key, wrong flag position, etc.).
-5. Try ONE corrected approach based on your diagnosis.
-Never blindly retry a failing command with minor variations — diagnose first.
-""".strip()
-
+# Operational rules injected into subagent system prompts (not the main agent — the main
+# agent receives equivalent content via SYSTEM_PROMPT.md through memory=).
 SUBAGENT_OPERATIONAL_RULES = """
 Operational rules (apply to every tool call):
 
@@ -57,16 +38,8 @@ Operational rules (apply to every tool call):
 Never blindly retry a failing command — diagnose first, then act.
 """.strip()
 
-DIAGNOSTIC_MARKER = "[DIAGNOSTIC — internal]"
-
-DIAGNOSTIC_AWARENESS_PROMPT = f"""
-Diagnostic awareness:
-If the user asks what went wrong in a previous turn (e.g. "what error did you encounter?",
-"why did you fail?", "what happened?"), look for a {DIAGNOSTIC_MARKER} message in the
-conversation history. That message contains a technical summary of the failure — use it to
-give the user a clear, honest explanation in plain language.
-Do NOT repeat the diagnostic verbatim; summarise it for the user.
-""".strip()
+_SYSTEM_PROMPT_PATH = get_relais_project_dir() / "atelier" / "SYSTEM_PROMPT.md"
+_SYSTEM_PROMPT_CACHE: str | None = None
 
 
 def build_project_context_prompt(relais_home: str, project_dir: str) -> str:
@@ -141,40 +114,38 @@ def _build_execution_context(envelope: Envelope) -> str:
     return "\n".join(lines)
 
 
-def _enrich_system_prompt(
-    soul_prompt: str,
+def _build_core_system_prompt(
     *,
     delegation_prompt: str = "",
     project_context: str = "",
 ) -> str:
-    """Append operational rules to the assembled system prompt.
+    """Build the fixed system prompt from SYSTEM_PROMPT.md plus dynamic runtime sections.
 
-    Appends long-term memory instructions, self-diagnosis instructions
-    for tool error recovery, project environment anchors, and the delegation
-    prompt (assembled by ``SubagentRegistry``) when non-empty.
+    Reads ``atelier/SYSTEM_PROMPT.md`` as the non-user-editable RELAIS core identity
+    and appends the dynamic per-request sections (project environment anchors and
+    delegation instructions) when non-empty.
 
-    The self-diagnosis instructions tell the agent to stop and re-read
-    the relevant SKILL.md troubleshooting section when encountering
-    repeated tool errors, rather than blindly retrying.
+    User-editable personality files (SOUL.md, role/user/channel overlays) are passed
+    separately as ``memory=`` to ``create_deep_agent()`` — they are NOT included here.
 
     Args:
-        soul_prompt: The base system prompt assembled by SoulAssembler.
-        delegation_prompt: Pre-assembled delegation prompt from the
-            subagent registry.  Empty string means no subagents.
-        project_context: Pre-built project environment block (RELAIS_HOME,
-            RELAIS_PROJECT_DIR).  Empty string skips injection.
+        delegation_prompt: Pre-assembled delegation prompt from the subagent registry.
+            Empty string means no subagents available for delegation.
+        project_context: Pre-built project environment block (RELAIS_HOME, RELAIS_PROJECT_DIR).
+            Empty string skips injection.
 
     Returns:
-        The enriched system prompt string.
+        The core system prompt string ready to pass as ``system_prompt=`` to
+        ``create_deep_agent()``.
+
+    Raises:
+        FileNotFoundError: If ``atelier/SYSTEM_PROMPT.md`` cannot be read.
     """
-    parts = [soul_prompt.rstrip()]
-    if LONG_TERM_MEMORY_PROMPT not in soul_prompt:
-        parts.append(LONG_TERM_MEMORY_PROMPT)
-    if SELF_DIAGNOSIS_PROMPT not in soul_prompt:
-        parts.append(SELF_DIAGNOSIS_PROMPT)
-    if DIAGNOSTIC_AWARENESS_PROMPT not in soul_prompt:
-        parts.append(DIAGNOSTIC_AWARENESS_PROMPT)
-    if project_context and project_context not in soul_prompt:
+    global _SYSTEM_PROMPT_CACHE
+    if _SYSTEM_PROMPT_CACHE is None:
+        _SYSTEM_PROMPT_CACHE = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    parts = [_SYSTEM_PROMPT_CACHE]
+    if project_context:
         parts.append(project_context)
     if delegation_prompt:
         parts.append(delegation_prompt)

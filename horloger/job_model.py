@@ -82,7 +82,9 @@ def load_job_yaml(path: Path) -> JobSpec:
         A validated, frozen ``JobSpec`` instance.
 
     Raises:
-        FileNotFoundError: If *path* does not exist.
+        OSError: If *path* cannot be read (includes ``FileNotFoundError``
+            when the file does not exist and ``PermissionError`` when access
+            is denied).
         ValueError: If a required field is missing or the cron expression
             in ``schedule`` is not valid.
         yaml.YAMLError: If the file content is not valid YAML.

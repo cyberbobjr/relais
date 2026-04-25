@@ -249,6 +249,22 @@ async def test_compact_session_returns_none_on_exception() -> None:
     assert result is None
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_compact_session_reraises_cancelled_error() -> None:
+    """compact_session() must re-raise asyncio.CancelledError — never swallow it."""
+    from atelier.agent_executor import AgentExecutor
+
+    profile = MagicMock(compact_keep=6, model="anthropic:claude-haiku-4-5-20251001")
+    executor = MagicMock(spec=AgentExecutor)
+    executor._profile = profile
+    executor._agent = AsyncMock()
+    executor._agent.aget_state = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await AgentExecutor.compact_session(executor, "sess_1", "usr_1", 6)
+
+
 # ---------------------------------------------------------------------------
 # Atelier.stream_specs() — must include STREAM_ATELIER_CONTROL
 # ---------------------------------------------------------------------------

@@ -25,7 +25,8 @@ class HorlogerExecution(SQLModel, table=True):
             ``"triggered"`` — message published successfully;
             ``"publish_failed"`` — Redis publish raised an error;
             ``"skipped_disabled"`` — job was disabled at fire time;
-            ``"skipped_catchup"`` — catch-up firing skipped by policy.
+            ``"skipped_catchup"`` — catch-up firing skipped by policy;
+            ``"skipped_double_fire"`` — recent duplicate firing prevented.
         error: Optional human-readable error detail when ``status`` indicates
             failure.  ``None`` on success.
     """
@@ -42,3 +43,6 @@ class HorlogerExecution(SQLModel, table=True):
     triggered_at: float
     status: str
     error: str | None = None
+
+    def __str__(self) -> str:
+        return f"HorlogerExecution(job_id={self.job_id!r}, status={self.status!r}, triggered_at={self.triggered_at})"

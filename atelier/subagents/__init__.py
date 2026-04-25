@@ -62,7 +62,7 @@ from typing import Any
 import yaml
 
 from atelier.prompts import SUBAGENT_OPERATIONAL_RULES
-from common.config_loader import CONFIG_SEARCH_PATH, resolve_bundles_dir
+from common.config_loader import CONFIG_SEARCH_PATH, get_relais_project_dir, resolve_bundles_dir
 from common.pattern_matcher import matches as _matches_patterns
 from common.pattern_matcher import parse_patterns as _parse_subagent_patterns
 from atelier.subagents_resolver import (  # noqa: F401 — re-exported for test imports
@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 
 # Path to the native subagents bundled with the source tree (second tier).
 # Patched in tests via conftest.isolated_search_path to prevent real packs loading.
-NATIVE_SUBAGENTS_PATH: Path = Path(__file__).parent
+NATIVE_SUBAGENTS_PATH: Path = get_relais_project_dir() / "atelier" / "subagents"
 
 # Regex for valid subagent names
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")

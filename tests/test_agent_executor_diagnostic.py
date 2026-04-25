@@ -244,25 +244,45 @@ async def test_inject_diagnostic_message_returns_false_on_exception() -> None:
     assert result is False
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_inject_diagnostic_message_reraises_cancelled_error() -> None:
+    """inject_diagnostic_message() must re-raise asyncio.CancelledError — never swallow it."""
+    import asyncio
+    from atelier.agent_executor import AgentExecutor
+
+    mock_agent = MagicMock()
+    mock_state = MagicMock()
+    mock_state.values = {"messages": [MagicMock()]}
+    mock_agent.aget_state = AsyncMock(return_value=mock_state)
+    mock_agent.aupdate_state = AsyncMock(side_effect=asyncio.CancelledError())
+
+    executor = object.__new__(AgentExecutor)
+    executor._agent = mock_agent
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.inject_diagnostic_message(_make_envelope(), "[DIAGNOSTIC — internal]\ntest")
+
+
 # ---------------------------------------------------------------------------
-# _enrich_system_prompt includes DIAGNOSTIC_AWARENESS_PROMPT
+# _build_core_system_prompt reads SYSTEM_PROMPT.md and appends dynamic sections
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_includes_diagnostic_awareness() -> None:
-    """_enrich_system_prompt() appends DIAGNOSTIC_AWARENESS_PROMPT."""
-    from atelier.agent_executor import _enrich_system_prompt, DIAGNOSTIC_AWARENESS_PROMPT
+def test_build_core_system_prompt_contains_diagnostic_awareness() -> None:
+    """_build_core_system_prompt() output includes the DIAGNOSTIC_MARKER from SYSTEM_PROMPT.md."""
+    from atelier.prompts import _build_core_system_prompt, DIAGNOSTIC_MARKER
 
-    result = _enrich_system_prompt("base soul prompt")
-    assert DIAGNOSTIC_AWARENESS_PROMPT in result
+    result = _build_core_system_prompt()
+    assert DIAGNOSTIC_MARKER in result
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_no_duplicate_diagnostic() -> None:
-    """_enrich_system_prompt() does not duplicate DIAGNOSTIC_AWARENESS_PROMPT."""
-    from atelier.agent_executor import _enrich_system_prompt, DIAGNOSTIC_AWARENESS_PROMPT
+def test_build_core_system_prompt_appends_delegation_prompt() -> None:
+    """_build_core_system_prompt() appends delegation_prompt when non-empty."""
+    from atelier.prompts import _build_core_system_prompt
 
-    base = "soul\n\n" + DIAGNOSTIC_AWARENESS_PROMPT
-    result = _enrich_system_prompt(base)
-    assert result.count("[DIAGNOSTIC — internal]") == 1
+    result = _build_core_system_prompt(delegation_prompt="## Available subagents\n- my-agent")
+    assert "## Available subagents" in result
+    assert "my-agent" in result

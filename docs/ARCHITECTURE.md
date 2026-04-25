@@ -247,18 +247,28 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
 
 ### Forgeron
 
-Forgeron is the skill self-improvement brick. It has two independent pipelines:
+Forgeron is the skill self-improvement brick. It has two independent pipelines and inherits from `BrickBase`:
+
+**Infrastructure**:
+- `BaseAsyncStore` — Base class centralizing async SQLAlchemy engine setup (`create_async_engine`, `async_sessionmaker`) with lifecycle management (`close()`, async context manager protocol `__aenter__`/`__aexit__`). Both `SessionStore` and `SkillTraceStore` inherit from this to eliminate duplicated engine initialization.
+- `on_shutdown()` — Hook called by BrickBase shutdown to cleanly close both stores' async engines.
 
 #### Direct edit pipeline — Progressive skill improvement
 
 - Consumes `relais:skill:trace` (group `forgeron_group`, `ack_mode="always"` — traces are advisory).
 - Atelier publishes to this stream after each agent turn: skill names used, tool call and error counts, serialised LangChain raw messages (`CTX_SKILL_TRACE`), and `skill_paths` (dict `{skill_name: absolute_path}` for bundle skills). Atelier also publishes a separate trace **per subagent** that used tools (step 7b, `SubagentTrace`), with messages scoped to the subagent's LangGraph namespace via `SubagentMessageCapture`.
-- Forgeron accumulates one row per trace per skill in SQLite (`SkillTraceStore`).
+- Forgeron accumulates one row per trace per skill in SQLite via `SkillTraceStore` (inherits from `BaseAsyncStore`).
 
 **Direct edit (`SkillEditor`, LLM precise)**:
 - `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (via `scope_messages_to_skill`). It calls the LLM once with `with_structured_output` to produce a rewritten SKILL.md and a `changed` flag.
 - The SKILL.md is written only if `changed=True` and the content differs from the existing file.
-- Triggered by four conditions (as soon as at least one is true): tool errors (`tool_error_count >= edit_min_tool_errors`), aborted turns (`tool_error_count == -1`, DLQ sentinel), **success after failure** (current turn has 0 errors but the previous turn for the same skill had some — this is the "correction turn" where the agent found the right approach), or cumulative call threshold (`edit_call_threshold`, default 10).
+- Every edit attempt (success or failure) is appended to `edit_history.jsonl` next to SKILL.md: Unix timestamp, trigger reason, LLM reason, `changed` flag, and `correlation_id`. The file is capped at 50 entries (oldest pruned) via an atomic tmp-replace write.
+- Triggered by four conditions (as soon as at least one is true):
+  1. **Tool errors**: `tool_error_count >= edit_min_tool_errors` (default 1)
+  2. **Aborted turn**: `tool_error_count == -1` (DLQ sentinel — turn aborted by `ToolErrorGuard`)
+  3. **Success after failure**: current turn has 0 errors but the previous turn for the same skill had some errors (the "correction turn")
+  4. **Usage threshold**: `edit_call_threshold` cumulative calls (default 10)
+- The four trigger conditions are evaluated by extracted methods: `_check_error_trigger()`, `_check_threshold_trigger()`, `_check_success_after_failure_trigger()` to reduce cyclomatic complexity.
 - Rate-limited by Redis cooldown `relais:skill:edit_cooldown:{skill_name}` (TTL `edit_cooldown_seconds`).
 - For bundle skills, `skill_paths` provides the absolute directory path; `SkillEditor` uses this path in priority over standard resolution.
 
@@ -268,7 +278,7 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines:
 
 - Consumes `relais:memory:request` (group `forgeron_archive_group`, independent from `souvenir_group` — full fan-out via two consumer groups on the same stream).
 - For each `archive` action, Forgeron extracts user messages from `CTX_SOUVENIR_REQUEST["messages_raw"]` and calls `IntentLabeler` (Haiku profile — lightweight) to obtain a normalised label (e.g. `"send_email"`).
-- `SessionStore` accumulates labelled sessions in SQLite (`session_summaries`) and maintains a counter per label in `skill_proposals`.
+- `SessionStore` (inherits from `BaseAsyncStore`) accumulates labelled sessions in SQLite (`session_summaries`) and maintains a counter per label in `skill_proposals`.
 - When `min_sessions_for_creation` sessions share the same label (and no Redis cooldown `relais:skill:creation_cooldown:{label}` is active), `SkillCreator` generates a complete SKILL.md via LLM (profile `precise`) and writes it to `skills_dir/{skill_name}/SKILL.md`.
 - Creation is idempotent: if the file already exists, `SkillCreator` returns `None` without overwriting.
 - The `skill.created` event (`ACTION_SKILL_CREATED`) is published to `relais:events:system` with `context["forgeron"]` containing `skill_created`, `skill_path`, `intent_label`, `contributing_sessions`.
@@ -277,10 +287,10 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines:
 #### Correction pipeline — Skill redesign via trace analysis
 
 - Triggered by `IntentLabeler` detecting a correction in a session pattern (`is_correction` field of `IntentLabelResult`).
-- `_trigger_skill_design()` orchestrates a synchronous handshake:
+- `_trigger_skill_design()` orchestrates a synchronous handshake with exponential backoff retry:
   1. Publishes a `history_read` request to `relais:memory:request` so Souvenir serves the full history.
   2. Sends a user notification to `relais:messages:outgoing_pending` (before BRPOP to avoid any blocking).
-  3. Waits for the reply via `BRPOP` on `relais:memory:response:{correlation_id}` (configurable timeout, defaults to a few seconds).
+  3. Waits for the reply via `_fetch_history_with_retry()` — BRPOP with exponential backoff (max 2 retries, 1s and 2s delays) to handle Souvenir being slow. On timeout, processing is skipped gracefully.
   4. If history arrives, publishes an `ACTION_MESSAGE_TASK` to `relais:tasks` with `force_subagent="skill-designer"` and correction data in `context["forgeron"]` (`corrected_behavior`, `history_turns`, optional `skill_name_hint`).
 - The `skill-designer` native subagent (Atelier) receives this data and generates a revised SKILL.md via the `WriteSkillTool`.
 
@@ -288,9 +298,12 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines:
 
 | Table | Contents |
 |-------|---------|
-| `skill_traces` | Execution traces per skill (changelog pipeline) |
+| `skill_traces` | Execution traces per skill (direct edit pipeline) |
 | `session_summaries` | Archived sessions with their intent label (auto-creation pipeline) |
 | `skill_proposals` | Skill proposals aggregated by label (auto-creation pipeline) |
+
+**Configuration validation** (`forgeron/config.py`):
+- `ForgeonConfig.__post_init__()` validates `llm_profile` and `edit_profile` against a whitelist of valid profiles (`default`, `fast`, `free`, `precise`, `coder`). Unknown profile values silently fall back to `"precise"` to prevent broken configurations from blocking the service.
 
 ---
 

@@ -382,6 +382,8 @@ class SkillEditor:
                     ]
                 ),
             )
+        # LLM SDKs raise heterogeneous exceptions; returning None signals the
+        # caller to skip this edit cycle without propagating the failure.
         except Exception as exc:  # noqa: BLE001
             logger.error("Edit LLM call failed for skill '%s': %s", skill_name, exc)
             return None

@@ -38,13 +38,10 @@ from atelier.streaming import (
     REPLY_PLACEHOLDER,
 )
 from atelier.prompts import (
-    LONG_TERM_MEMORY_PROMPT,
-    SELF_DIAGNOSIS_PROMPT,
     DIAGNOSTIC_MARKER,
-    DIAGNOSTIC_AWARENESS_PROMPT,
     build_project_context_prompt,
     _build_execution_context,
-    _enrich_system_prompt,
+    _build_core_system_prompt,
 )
 from atelier.transient_errors import _is_transient_provider_error
 from atelier.profile_model import _resolve_profile_model
@@ -65,8 +62,6 @@ from atelier.diagnostic_trace import (
     _render_diagnostic_trace,
 )
 
-# Re-export for backward compatibility — callers do
-# ``from atelier.agent_executor import AgentExecutionError`` etc.
 __all__ = [
     "AgentExecutionError",
     "DiagnosticTrace",
@@ -75,9 +70,7 @@ __all__ = [
     "build_project_context_prompt",
     "format_diagnostic_trace",
     "_render_diagnostic_trace",
-    "LONG_TERM_MEMORY_PROMPT",
     "DIAGNOSTIC_MARKER",
-    "DIAGNOSTIC_AWARENESS_PROMPT",
     "REPLY_PLACEHOLDER",
     "_is_transient_provider_error",
     "_resolve_profile_model",
@@ -159,7 +152,11 @@ class AgentExecutor:
     Args:
         profile: Profile config with at least a `.model` attribute
                  (format: ``provider:model-id``).
-        soul_prompt: System prompt assembled by SoulAssembler.
+        memory_paths: Ordered list of validated absolute path strings for
+                 user-editable prompt layers (SOUL.md, role, user, channel
+                 overlays).  Passed as ``memory=`` to ``create_deep_agent()``
+                 so DeepAgents reads and injects them automatically.
+                 Defaults to an empty list (no memory files).
         tools: List of LangChain tools (StructuredTool / BaseTool) to
                expose to the agent.
         skills: List of absolute directory paths to skill directories,
@@ -193,7 +190,7 @@ class AgentExecutor:
     def __init__(
         self,
         profile: ProfileConfig,
-        soul_prompt: str,
+        memory_paths: list[str],
         tools: list[BaseTool],
         skills: list[str] | None = None,
         backend: BackendProtocol | None = None,
@@ -229,11 +226,11 @@ class AgentExecutor:
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
-            system_prompt=_enrich_system_prompt(
-                soul_prompt,
+            system_prompt=_build_core_system_prompt(
                 delegation_prompt=delegation_prompt,
                 project_context=_project_context,
             ),
+            memory=memory_paths,
             skills=resolved_skills,
             backend=composite_backend,
             checkpointer=checkpointer or MemorySaver(),
@@ -380,8 +377,11 @@ class AgentExecutor:
                 state = await self._agent.aget_state(config)
                 partial_messages = serialize_messages(state.values.get("messages", []))
                 exc.messages_raw = partial_messages
-            except Exception:
-                pass  # best-effort; messages_raw stays []
+            except (RuntimeError, AttributeError, KeyError) as state_exc:
+                logger.debug(
+                    "partial state capture failed (best-effort) — corr=%s error=%s",
+                    envelope.correlation_id, state_exc,
+                )
             raise
         # Capture full message list from the agent graph state.
         # aget_state() must not fail — if it does, it means the agent is
@@ -451,7 +451,9 @@ class AgentExecutor:
                 envelope.correlation_id,
             )
             return True
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except (RuntimeError, AttributeError, KeyError, ValueError) as exc:
             logger.warning(
                 "inject_diagnostic: failed — corr=%s error=%s",
                 envelope.correlation_id,
@@ -529,7 +531,9 @@ class AgentExecutor:
                 messages_after=compact_keep + 1,
                 cutoff_index=cutoff_idx,
             )
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except (RuntimeError, AttributeError, KeyError, ValueError) as exc:
             logger.warning(
                 "compact_session: failed — session=%s error=%s", session_id, exc
             )
@@ -619,7 +623,7 @@ class AgentExecutor:
                             token=token, source=chunk.source, state=state,
                             guard=guard, progress_callback=progress_callback,
                         )
-                    if token.type != "tool" and token.content:
+                    if not chunk.ns and token.type != "tool" and token.content:
                         text = _normalise_content(token.content)
                         if text:
                             new_sec = await emit_text(

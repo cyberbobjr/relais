@@ -12,7 +12,7 @@ This page lists the environment variables actually used by the current runtime o
 | `LOG_LEVEL` | No | Python log level (`INFO` by default in the bricks). |
 | `REDIS_SOCKET_PATH` | No | Redis Unix socket path. Default: `<RELAIS_HOME>/redis.sock`. |
 | `REDIS_PASSWORD` | No | Generic Redis password fallback if no brick-specific password is provided. |
-| `RELAIS_DB_PATH` | No | Override for the SQLite path used by Alembic for `memory.db`. |
+| `RELAIS_DB_PATH` | No | Override for the SQLite path used by Souvenir for `memory.db`. |
 
 ---
 
