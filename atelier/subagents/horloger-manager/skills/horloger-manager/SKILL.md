@@ -10,6 +10,8 @@ metadata:
   author: RELAIS
   version: "1.0"
 allowed-tools:
+  # read_file, write_file, list_directory are DeepAgents built-in tools —
+  # no tool_tokens declaration needed in subagent.yaml
   - read_file
   - write_file
   - list_directory

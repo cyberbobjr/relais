@@ -217,8 +217,10 @@ async def handle_tool_result(
     logger.info("[%s] tool_result [%s]: %s", source, tool_name, normalised[:300])
     if progress_callback is not None:
         await progress_callback("tool_result", f"{tool_name}: {normalised[:100]}")
-    is_logical_error = getattr(token, "status", None) == "error" or (
-        tool_name == "execute" and _EXECUTE_FAILURE_MARKER in normalised
+    is_logical_error = (
+        getattr(token, "status", None) == "error"
+        or (tool_name == "execute" and _EXECUTE_FAILURE_MARKER in normalised)
+        or normalised.startswith("MCP error")
     )
     guard.record(tool_name, is_logical_error)
     return StreamLoopState(

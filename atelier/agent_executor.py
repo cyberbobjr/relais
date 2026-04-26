@@ -11,6 +11,7 @@ import contextlib
 import logging
 import tempfile
 from dataclasses import dataclass
+from html import unescape as _html_unescape
 from pathlib import Path
 from typing import Any, Callable, Awaitable, cast
 
@@ -81,6 +82,19 @@ from common.envelope import Envelope
 from atelier.subagent_capture import SubagentMessageCapture
 
 logger = logging.getLogger(__name__)
+
+
+class _HtmlSafeShellBackend(LocalShellBackend):
+    """LocalShellBackend that decodes HTML entities in command strings before execution.
+
+    Some LLMs (e.g. Grok) emit HTML-encoded characters such as &amp;&amp; instead
+    of && inside JSON tool call arguments.  This subclass normalises the command
+    string so that those models can run shell commands correctly.  For models that
+    already emit valid shell syntax, html.unescape() is a no-op.
+    """
+
+    def execute(self, command: str, *, timeout: int | None = None):  # type: ignore[override]
+        return super().execute(_html_unescape(command), timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -204,11 +218,11 @@ class AgentExecutor:
         _relais_home = str(get_relais_home())
         _project_dir = str(get_relais_project_dir())
         _shell_env = {"RELAIS_HOME": _relais_home}
-        memories_backend: BackendProtocol = backend or LocalShellBackend(
+        memories_backend: BackendProtocol = backend or _HtmlSafeShellBackend(
             root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env
         )
         composite_backend = CompositeBackend(
-            default=LocalShellBackend(root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env),
+            default=_HtmlSafeShellBackend(root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env),
             routes={
                 "/memories/": memories_backend,
             },
@@ -600,46 +614,53 @@ class AgentExecutor:
         if config is not None:
             stream_kwargs["config"] = config
 
-        async with contextlib.aclosing(self._agent.astream(input_data, **stream_kwargs)) as stream:
-            async for raw_chunk in stream:
-                chunk = decode_chunk(raw_chunk)
-                if chunk is None:
-                    logger.warning("Unexpected astream chunk shape: %s", type(raw_chunk))
-                    continue
+        try:
+            async with contextlib.aclosing(self._agent.astream(input_data, **stream_kwargs)) as stream:
+                async for raw_chunk in stream:
+                    chunk = decode_chunk(raw_chunk)
+                    if chunk is None:
+                        logger.warning("Unexpected astream chunk shape: %s", type(raw_chunk))
+                        continue
 
-                if chunk.chunk_type == "updates":
-                    await handle_updates_chunk(
-                        ns=chunk.ns, data=chunk.data, source=chunk.source,
-                        tracker=tracker, progress_callback=progress_callback,
-                    )
-                elif chunk.chunk_type == "messages":
-                    token, _metadata = chunk.data
-                    state = await handle_tool_call_chunks(
-                        token=token, source=chunk.source, state=state, tracker=tracker,
-                        final_only=self._display.final_only, progress_callback=progress_callback,
-                    )
-                    if token.type == "tool":
-                        state = await handle_tool_result(
-                            token=token, source=chunk.source, state=state,
-                            guard=guard, progress_callback=progress_callback,
+                    if chunk.chunk_type == "updates":
+                        await handle_updates_chunk(
+                            ns=chunk.ns, data=chunk.data, source=chunk.source,
+                            tracker=tracker, progress_callback=progress_callback,
                         )
-                    if not chunk.ns and token.type != "tool" and token.content:
-                        text = _normalise_content(token.content)
-                        if text:
-                            new_sec = await emit_text(
-                                text=text, buf=buf,
+                    elif chunk.chunk_type == "messages":
+                        token, _metadata = chunk.data
+                        state = await handle_tool_call_chunks(
+                            token=token, source=chunk.source, state=state, tracker=tracker,
+                            final_only=self._display.final_only, progress_callback=progress_callback,
+                        )
+                        if token.type == "tool":
+                            state = await handle_tool_result(
+                                token=token, source=chunk.source, state=state,
+                                guard=guard, progress_callback=progress_callback,
+                            )
+                        if not chunk.ns and token.type != "tool" and token.content:
+                            text = _normalise_content(token.content)
+                            if text:
+                                new_sec = await emit_text(
+                                    text=text, buf=buf,
+                                    current_section=state.current_section,
+                                    final_only=self._display.final_only,
+                                )
+                                state = StreamLoopState(state.full_reply + text, state.last_tool_result, state.pending_tool_name, new_sec)
+                            new_sec = await emit_thinking(
+                                raw=token.content, buf=buf,
                                 current_section=state.current_section,
+                                thinking_enabled=self._display.events.get("thinking", False),
                                 final_only=self._display.final_only,
                             )
-                            state = StreamLoopState(state.full_reply + text, state.last_tool_result, state.pending_tool_name, new_sec)
-                        new_sec = await emit_thinking(
-                            raw=token.content, buf=buf,
-                            current_section=state.current_section,
-                            thinking_enabled=self._display.events.get("thinking", False),
-                            final_only=self._display.final_only,
-                        )
-                        if new_sec is not state.current_section:
-                            state = StreamLoopState(state.full_reply, state.last_tool_result, state.pending_tool_name, new_sec)
+                            if new_sec is not state.current_section:
+                                state = StreamLoopState(state.full_reply, state.last_tool_result, state.pending_tool_name, new_sec)
+        except RecursionError as exc:
+            raise AgentExecutionError(
+                f"Agent execution failed: {exc}",
+                tool_call_count=guard.total_calls,
+                tool_error_count=guard.total_errors,
+            ) from exc
 
         if stream_callback is not None:
             if self._display.final_only:

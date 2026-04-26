@@ -803,6 +803,18 @@ async def _handle_sse(
                 if seen_final:
                     break
 
+        # When is_final sentinel arrived but the outgoing envelope is still
+        # in transit through Sentinelle, give it a short grace period before
+        # concluding the request timed out.  Atelier publishes is_final=1 and
+        # then the outgoing envelope back-to-back, but the envelope still has
+        # to traverse Sentinelle → outgoing:rest → correlator.resolve(), which
+        # can take tens of milliseconds on a loaded system.
+        if seen_final and not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
         # Send final event
         if future.done() and not future.cancelled():
             final = future.result()

@@ -9,14 +9,15 @@ interface by generating a BaseTool per MCP tool exposed by active sessions.
 Each generated tool:
 - is named ``{server_name}__{tool_name}`` (same prefix convention as before)
 - delegates calls asynchronously to ``manager.call_tool()``
-- accepts arbitrary kwargs (MCP tool schemas vary per server)
+- exposes ``mcp_tool.inputSchema`` verbatim as ``args_schema`` (a JSON Schema dict)
+  so the LLM receives each argument's name, type, description and required flag
 - catches exceptions and returns an error string (keeps the agentic loop alive)
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, PrivateAttr
@@ -28,14 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Permissive args schema for MCP tools (schema varies per server)
+# Fallback schema — used only when inputSchema is absent or not an object
 # ---------------------------------------------------------------------------
 
-
-class _McpToolArgs(BaseModel):
-    """Accept any keyword arguments — schema is determined per-tool by the MCP server."""
-
-    model_config = ConfigDict(extra="allow")
+_EMPTY_OBJECT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -44,14 +41,22 @@ class _McpToolArgs(BaseModel):
 
 
 class _McpTool(BaseTool):
-    """LangChain BaseTool that forwards calls to McpSessionManager.call_tool()."""
+    """LangChain BaseTool that forwards calls to McpSessionManager.call_tool().
+
+    ``args_schema`` is set per-instance to the raw ``inputSchema`` dict from
+    the MCP server, giving the LLM the full JSON Schema (property descriptions,
+    types, required constraints) without any lossy Pydantic conversion.
+    """
 
     name: str
     description: str
-    args_schema: type[BaseModel] = _McpToolArgs  # type: ignore[assignment]
+    # LangChain's ArgsSchema = TypeBaseModel | dict[str, Any]; we use the dict path.
+    args_schema: dict[str, Any] = _EMPTY_OBJECT_SCHEMA  # type: ignore[assignment]
 
     _prefixed_name: str = PrivateAttr()
     _session_manager: "McpSessionManager" = PrivateAttr()
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __init__(
         self,
@@ -66,11 +71,10 @@ class _McpTool(BaseTool):
     def _to_args_and_kwargs(  # type: ignore[override]
         self, tool_input: str | dict, tool_call_id: str | None = None
     ) -> tuple[tuple, dict]:
-        """Pass input dict directly as kwargs, bypassing the empty-schema shortcut.
+        """Forward the input dict as kwargs unchanged.
 
-        LangChain's default implementation treats schemas with no declared fields
-        as "no-arg tools" and returns ``(), {}``. We override this to forward the
-        full input dict so MCP tools can receive arbitrary arguments.
+        With a dict args_schema, LangChain's _parse_input already returns the
+        raw dict. We just unpack it here so _arun receives named kwargs.
         """
         if isinstance(tool_input, dict):
             return (), tool_input.copy()
@@ -101,6 +105,10 @@ async def make_mcp_tools(session_manager: "McpSessionManager") -> list[BaseTool]
     MCP ClientSession), calls ``list_tools()`` on each session, and returns
     one tool per MCP tool discovered.
 
+    ``mcp_tool.inputSchema`` is passed verbatim as ``args_schema`` so the LLM
+    sees the full JSON Schema with per-argument descriptions, types, and
+    required constraints — exactly as the MCP server declared them.
+
     If a session's ``list_tools()`` raises, that server is skipped and a
     warning is logged — the remaining servers are still wrapped.
 
@@ -120,9 +128,21 @@ async def make_mcp_tools(session_manager: "McpSessionManager") -> list[BaseTool]
             for mcp_tool in tool_list.tools:
                 prefixed_name = f"{server_name}__{mcp_tool.name}"
                 description = getattr(mcp_tool, "description", "") or ""
+
+                # Use the MCP server's inputSchema directly as args_schema.
+                # This preserves every property description, type, and required
+                # constraint so the LLM knows exactly what each argument expects.
+                raw_schema = getattr(mcp_tool, "inputSchema", None)
+                args_schema: dict[str, Any] = (
+                    raw_schema
+                    if isinstance(raw_schema, dict)
+                    else _EMPTY_OBJECT_SCHEMA
+                )
+
                 tool = _McpTool(
                     name=prefixed_name,
                     description=description or f"MCP tool: {prefixed_name}",
+                    args_schema=args_schema,
                     prefixed_name=prefixed_name,
                     session_manager=session_manager,
                 )

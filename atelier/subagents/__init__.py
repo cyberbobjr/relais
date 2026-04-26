@@ -683,6 +683,7 @@ class SubagentRegistry:
             resolved_tools, failed_tokens = _resolve_tool_tokens(
                 spec.tool_tokens, request_tools, self._tool_registry,
                 local_tools, spec.name,
+                already_warned=frozenset(spec.degraded_tokens),
             )
 
             # Track runtime failures in _runtime_degraded (never mutates _specs)

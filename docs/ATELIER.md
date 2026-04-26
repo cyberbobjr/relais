@@ -37,11 +37,12 @@ Every envelope on `relais:tasks` goes through a 9-step pipeline inside `_handle_
 Step 1   Resolve LLM profile
          └─ context["portail"]["llm_profile"] → load ProfileConfig from profiles.yaml
 
-Step 2   Assemble system prompt (SoulAssembler)
+Step 2   Resolve memory paths (SoulAssembler)
          └─ Layer 1: soul/SOUL.md (core personality — always attempted)
             Layer 2: role_prompt_path from portail.yaml (role overlay)
             Layer 3: user_prompt_path from portail.yaml (per-user override)
             Layer 4: channel_prompt_path from aiguilleur.yaml (channel formatting)
+            Returns list[str] of validated absolute paths → passed as memory= to create_deep_agent()
 
 Step 3   Resolve skills (ToolPolicy)
          └─ ToolPolicy.resolve_skill_dirs(role) → list of absolute skill directory paths
@@ -94,14 +95,14 @@ This metadata is visible to the model and to skills (notably `channel-setup`). T
 
 ```python
 AgentExecutor(
-    profile=profile,       # ProfileConfig: model, max_turns, mcp_timeout, mcp_max_tools, resilience
-    soul_prompt=soul,      # assembled system prompt string
-    mcp_servers=servers,   # dict from McpSessionManager.load_for_sdk()
-    tools=tools,           # list[BaseTool] filtered by ToolPolicy
-    skills=skill_dirs,     # list[str] absolute paths to skill directories
-    subagents=subagents,   # list[SubagentDef] allowed for this role
-    checkpointer=checkpointer,  # AsyncSqliteSaver shared by all requests
-    backend=backend,       # CompositeBackend (LocalShellBackend + SouvenirBackend)
+    profile=profile,           # ProfileConfig: model, max_turns, mcp_timeout, mcp_max_tools, resilience
+    memory_paths=memory_paths, # list[str] of validated absolute paths from SoulAssembler → memory=
+    mcp_servers=servers,       # dict from McpSessionManager.load_for_sdk()
+    tools=tools,               # list[BaseTool] filtered by ToolPolicy
+    skills=skill_dirs,         # list[str] absolute paths to skill directories
+    subagents=subagents,       # list[SubagentDef] allowed for this role
+    checkpointer=checkpointer, # AsyncSqliteSaver shared by all requests
+    backend=backend,           # CompositeBackend (LocalShellBackend + SouvenirBackend)
 )
 ```
 
@@ -166,7 +167,13 @@ Compaction reduces checkpoint size without losing the session's semantic content
 
 ## System Prompt Assembly (SoulAssembler)
 
-`SoulAssembler` (`atelier/soul_assembler.py`) assembles the system prompt from up to 4 layers, concatenated in order and separated by `\n\n---\n\n`:
+### Fixed core identity — `atelier/SYSTEM_PROMPT.md`
+
+`atelier/SYSTEM_PROMPT.md` is the non-user-editable RELAIS core identity prompt. It defines agent identity, long-term memory instructions, self-diagnosis behaviour on tool errors, diagnostic awareness, execution context block handling, and operational constraints. This file is read once at startup by `_build_core_system_prompt()` (cached) and passed as `system_prompt=` to `create_deep_agent()`.
+
+### User-editable layers — SoulAssembler
+
+`SoulAssembler` (`atelier/soul_assembler.py`) resolves up to 4 user-editable prompt file paths. It **does not read file contents** — file reading is delegated to DeepAgents via `memory=`. The validated paths are returned as `AssemblyResult.memory_paths: list[str]` and passed as `memory=` to `create_deep_agent()`.
 
 | Layer | Source | Required |
 |---|---|---|
@@ -175,7 +182,7 @@ Compaction reduces checkpoint size without losing the session's semantic content
 | 3 — Per-user override | `user_prompt_path` field in `portail.yaml` → `users[*].prompt_path` | No |
 | 4 — Channel formatting | `channel_prompt_path` from `aiguilleur.yaml` per channel, stamped into `context["aiguilleur"]["channel_prompt_path"]` by Aiguilleur | No |
 
-All paths for layers 2–4 are **explicit relative paths** configured in YAML — nothing is inferred from role names, channel names, or naming conventions. A path that is absolute or escapes `prompts_dir` is rejected with a WARNING and recorded in `AssemblyResult.issues`. Missing or empty files are silently skipped (logged at DEBUG). The `AssemblyResult.is_degraded` flag signals the caller when any layer could not be loaded.
+All paths for layers 2–4 are **explicit relative paths** configured in YAML — nothing is inferred from role names, channel names, or naming conventions. A path that is absolute or escapes `prompts_dir` is rejected with a WARNING and excluded. The `AssemblyResult.is_degraded` flag signals the caller when any layer could not be validated.
 
 ---
 
@@ -417,6 +424,7 @@ atelier:
       allowed_subagents:
         - "horloger-manager"
         - "relais-config"
+        - "general-purpose"
 ```
 
 ---
@@ -433,7 +441,7 @@ atelier:
 | `ToolErrorGuard` | `atelier/agent_executor.py` | Tracks consecutive and total tool errors; raises `AgentExecutionError` at thresholds |
 | `StreamBuffer` | `atelier/agent_executor.py` | Accumulates tokens and flushes to `stream_callback` at `STREAM_BUFFER_CHARS` threshold |
 | `SubagentMessageCapture` | `atelier/agent_executor.py` | LangChain callback handler that captures per-subagent metrics into `SubagentTrace` instances |
-| `SoulAssembler` | `atelier/soul_assembler.py` | Assembles the 4-layer system prompt from prompt files |
+| `SoulAssembler` | `atelier/soul_assembler.py` | Validates 4-layer prompt file paths; returns `memory_paths: list[str]` for `create_deep_agent(memory=)` |
 | `ToolPolicy` | `atelier/tool_policy.py` | Resolves skill directories and filters MCP tools per role |
 | `SubagentRegistry` | `atelier/subagent_registry.py` | 3-tier subagent discovery (user config > native > bundles); hot-reload; fnmatch role filtering |
 | `McpSessionManager` | `atelier/mcp_session_manager.py` | Singleton managing all MCP server sessions; per-server locks; dead-session eviction |

@@ -102,9 +102,13 @@ Key classes:
 
 * ``Forgeron`` — ``BrickBase`` subclass; two consumer loops:
   ``relais:skill:trace`` and ``relais:memory:request``.
+* ``BaseAsyncStore`` — shared async SQLAlchemy base; engine setup, ``close()``,
+  and async context manager; both ``SkillTraceStore`` and ``SessionStore`` inherit from it.
 * ``SkillTraceStore`` — SQLite accumulator; tracks one row per agent turn
   that used skills.
-* ``SkillEditor`` — rewrites SKILL.md directly from scoped conversation traces.
+* ``SkillEditor`` — rewrites SKILL.md directly from scoped conversation traces;
+  fetches full session history via ``_fetch_history_with_retry()`` (BRPOP with
+  exponential backoff, max 2 retries at 1 s / 2 s).
 * ``SessionStore`` — SQLite accumulator for per-session intent patterns.
 * ``IntentLabeler`` — fast LLM, extracts snake_case intent label.
 * ``SkillCreator`` — precise LLM, generates SKILL.md from examples.

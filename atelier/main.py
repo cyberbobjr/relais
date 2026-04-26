@@ -4,10 +4,10 @@ Functional role
 ---------------
 Executes the agentic LLM loop for each authorized task.  Conversation history
 is managed natively by the persistent LangGraph checkpointer (AsyncSqliteSaver,
-``checkpoints.db``), keyed by ``user_id``.  Assembles the system prompt (soul +
-role + user layers), runs the DeepAgents loop with MCP and internal tools,
-streams token-by-token output to the channel, and publishes the final reply for
-Sentinelle to deliver.
+``checkpoints.db``), keyed by ``user_id``.  Resolves memory paths for the
+multi-layer system prompt (soul + role + user + channel layers), runs the
+DeepAgents loop with MCP and internal tools, streams token-by-token output to
+the channel, and publishes the final reply for Sentinelle to deliver.
 
 Technical overview
 ------------------
@@ -32,8 +32,10 @@ Key classes:
   evicted and re-established on next call; closed on shutdown via ``close()``.
 * ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
   and filters MCP tool definitions (enforces ``mcp_max_tools``).
-* ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
-  system prompt from soul / role / user / channel / policy prompt files.
+* ``SoulAssembler`` (atelier.soul_assembler) — resolves and validates
+  multi-layer prompt file paths (soul / role / user / channel), returning
+  them as a ``memory_paths: list[str]`` for ``create_deep_agent(memory=)``.
+  File reading is delegated to DeepAgents; this module only validates paths.
 * ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
   ``atelier/profiles.yaml``); selects model, temperature,
   max_tokens, mcp_timeout, mcp_max_tools per request.  Optional field
