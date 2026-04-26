@@ -44,3 +44,6 @@ ACTION_SKILL_CREATED = "skill.created"
 
 # Horloger — scheduled job trigger fired into the incoming channel stream
 ACTION_HORLOGER_TRIGGER = "horloger.trigger"
+
+# Atelier control operations (Commandant → Atelier via relais:atelier:control)
+ACTION_ATELIER_COMPACT = "atelier.compact"

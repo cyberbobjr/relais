@@ -15,7 +15,7 @@ Active bricks in the repo:
 - `commandant`: slash commands outside the LLM
 - `souvenir`: Redis short-term memory + SQLite archiving
 - `archiviste`: logs and partial pipeline observation
-- `forgeron`: autonomous skill improvement (direct SkillEditor rewrite) and automatic skill creation from archives
+- `forgeron`: autonomous skill improvement via direct SKILL.md editing and automatic skill creation from archives, with resilient async SQLite storage and retry-based history fetching
 - `horloger`: CRON scheduler — fires scheduled prompts as virtual user messages through the full pipeline
 
 Channel adapters actually shipped:
@@ -28,8 +28,7 @@ The channel configuration also covers `telegram` and `slack`, but their presence
 
 Tools shipped in the repo:
 
-- `tools/tui/`: standalone terminal client (prompt_toolkit) for RELAIS, installable independently (`uv pip install -e tools/tui`). Connects exclusively via the REST SSE API — no dependency on RELAIS internals. See [plans/TUI.md](plans/TUI.md).
-- `tools/tui-ts/`: TypeScript terminal client (Bun + SolidJS + @opentui/core) — alternative TUI with native SSE streaming. Run with `bun run src/main.tsx`.
+- `tools/tui-ts/`: TypeScript terminal client (Bun + SolidJS + @opentui/core) — TUI with native SSE streaming. Run with `bun run src/main.tsx`.
 
 ---
 
@@ -139,6 +138,7 @@ flowchart TD
 | `relais:tasks:failed` | Atelier | observers / diagnostics |
 | `relais:admin:pending_users` | Portail | manual review |
 | `relais:skill:trace` | Atelier | Forgeron |
+| `relais:memory:response:{correlation_id}` | Souvenir | Forgeron (BRPOP) |
 | `relais:events:system` | Forgeron | Archiviste |
 | `relais:logs` | all bricks | Archiviste |
 
@@ -147,7 +147,7 @@ flowchart TD
 - `Portail` consumes `relais:messages:incoming`, resolves the user via `UserRegistry`, writes `context["portail"]["user_record"]`, `context["portail"]["user_id"]` and `context["portail"]["llm_profile"]` (from `channel_profile` or `"default"`), then publishes to `relais:security`.
 - `Sentinelle` consumes `relais:security`, applies ACLs, routes normal messages to `relais:tasks` and slash commands to `relais:commands`. Unknown or unauthorized commands generate a direct inline response on `relais:messages:outgoing:{channel}`.
 - `Commandant` consumes `relais:commands`. `/help` responds with the list of available commands. `/clear` publishes a `clear` request to `relais:memory:request`. `/sessions` lists the user's recent sessions. `/resume <session_id>` resumes a previous session by loading its full history.
-- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), optionally publishes streaming to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, then the final response to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD), `horloger-manager` (CRUD of Horloger job YAML files, accessible via `/horloger` or `/schedule`), and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
+- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), optionally publishes streaming to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, then the final response to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD), `horloger-manager` (CRUD of Horloger job YAML files, accessible via `/horloger` or `/schedule`), `general-purpose` (overrides deepagents' built-in worker to enforce a strict no-user-facing-output contract; inherits all parent MCP tools), and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
 - `Souvenir` consumes `relais:memory:request` (actions: `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`). The `archive` action is published by Atelier with the full turn content and `messages_raw` for archiving in SQLite. The `sessions` and `resume` actions return data to the user via `relais:messages:outgoing:{channel}` (with ownership enforcement). File actions are triggered by agents via `SouvenirBackend`. Short-term history is managed by the Atelier LangGraph checkpointer (keyed by `user_id:session_id`).
 - `Archiviste` observes `relais:logs`, `relais:events:*` and a partial list of pipeline streams. It does not literally observe all streams.
 - `Forgeron` has three autonomous pipelines:
@@ -165,7 +165,7 @@ flowchart TD
 
   A **Redis cooldown** per skill (`edit_cooldown_seconds`, default 300 s) prevents edit spam.
 
-  `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (`scope_messages_to_skill`), calls the LLM once (`edit_profile`, default `precise`) with `with_structured_output`, and rewrites SKILL.md directly if `changed=True`. For bundle skills, `skill_paths` in the trace context provides the absolute directory path.
+  `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (`scope_messages_to_skill`), calls the LLM once (`edit_profile`, default `precise`) with `with_structured_output`, and rewrites SKILL.md directly if `changed=True`. Every edit attempt is logged to `edit_history.jsonl` (capped at 50 entries). For bundle skills, `skill_paths` in the trace context provides the absolute directory path.
 
   **Pipeline 2 — Automatic skill creation**
 
@@ -180,9 +180,10 @@ flowchart TD
   **Pipeline 3 — User correction → `skill-designer`**
 
   Also consumes `relais:memory:request` (`forgeron_archive_group`). The `IntentLabeler` can detect that a session is an **explicit user correction** (`is_correction=True`) rather than normal usage. In that case (and if `correction_mode` is enabled):
-  1. Forgeron fetches the full session history from Souvenir via `relais:memory:response:{correlation_id}` (BRPOP).
+  1. Forgeron publishes a `history_read` request to `relais:memory:request` so Souvenir serves the full history.
   2. A notification is sent to the user informing them that a correction was detected.
-  3. An `ACTION_MESSAGE_TASK` message is published to `relais:tasks` with `force_subagent = "skill-designer"` in the context. Atelier then delegates directly to `skill-designer`, which engages a dialogue with the user to create an appropriate `SKILL.md`.
+  3. Forgeron waits for the reply via `relais:memory:response:{correlation_id}` (BRPOP with exponential backoff retry — max 2 retries, 1s and 2s delays — to handle Souvenir being slow).
+  4. If history arrives, an `ACTION_MESSAGE_TASK` message is published to `relais:tasks` with `force_subagent = "skill-designer"` in the context. Atelier then delegates directly to `skill-designer`, which engages a dialogue with the user to create an appropriate `SKILL.md`.
 
 ---
 
@@ -196,6 +197,7 @@ Slash commands are handled outside the LLM by **Commandant**. They all start wit
 | `/clear` | Clears the current session history (Redis + SQLite). |
 | `/sessions` | Lists your recent sessions with their identifiers. |
 | `/resume <id>` | Resumes a previous session and loads its history. |
+| `/bundle install <zip> \| uninstall <name> \| list` | Manages skill/tool bundles (install from ZIP, uninstall, or list installed bundles). |
 
 **Access control**: commands authorized per role are declared in `roles.*.actions` in `portail.yaml`. `["*"]` grants access to all commands, `[]` denies all.
 
@@ -221,7 +223,50 @@ Unknown or unauthorized commands generate a direct inline response (without goin
 - Python `>=3.11`
 - `uv`
 - `supervisord` if you want supervised launching
-- Local Redis if you start the full system
+- Redis server (see installation below)
+
+#### Installing Redis
+
+RELAIS uses a Redis **Unix socket** (`./.relais/redis.sock`). Native Windows does not support Unix sockets — use WSL2 or Docker instead.
+
+**macOS**
+```bash
+brew install redis
+# Optional: start Redis as a background service
+brew services start redis
+```
+
+**Linux — Debian / Ubuntu**
+```bash
+sudo apt update && sudo apt install redis-server
+sudo systemctl enable --now redis-server
+```
+
+**Linux — RHEL / Fedora / CentOS**
+```bash
+sudo dnf install redis
+sudo systemctl enable --now redis
+```
+
+**Linux — Arch**
+```bash
+sudo pacman -S redis
+sudo systemctl enable --now redis
+```
+
+**Windows**
+Redis has no official native Windows build. Two supported paths:
+
+- **WSL2** (recommended): install Ubuntu via WSL2, then follow the Debian/Ubuntu steps above.
+- **Docker**:
+  ```bash
+  docker run -d --name relais-redis \
+    -v "$PWD/.relais:/data" \
+    redis redis-server /data/redis.conf
+  ```
+  Make sure `config/redis.conf` bind-mounts correctly and that the socket path is reachable from the host.
+
+After installing Redis, RELAIS starts it automatically via `supervisord` using `config/redis.conf` — you do not need to start it manually when using `./supervisor.sh`.
 
 ### Recommended path
 
@@ -234,8 +279,6 @@ uv sync
 cp .env.example .env
 
 python -c "from common.init import initialize_user_dir; initialize_user_dir()"
-
-alembic upgrade head
 ```
 
 ### What initialization does
@@ -246,7 +289,6 @@ alembic upgrade head
 - `config/portail.yaml`, `config/sentinelle.yaml`
 - `config/atelier.yaml`, `config/atelier/profiles.yaml`, `config/atelier/mcp_servers.yaml`
 - `config/aiguilleur.yaml`
-- `config/tui/config.yaml`
 - `config/HEARTBEAT.md`
 - shipped prompts (`prompts/soul/SOUL.md`, channels, policies, roles, users)
 
@@ -273,12 +315,11 @@ After initialization, the user directory looks like this:
 │   ├── atelier.yaml
 │   ├── aiguilleur.yaml
 │   ├── HEARTBEAT.md
-│   ├── tui/
-│   │   └── config.yaml
 │   └── atelier/
 │       ├── profiles.yaml
 │       ├── mcp_servers.yaml
 │       └── subagents/          ← custom sub-agents (empty by default)
+├── bundles/                    ← installed ZIP bundles
 ├── prompts/
 │   ├── soul/
 │   │   ├── SOUL.md
@@ -292,7 +333,8 @@ After initialization, the user directory looks like this:
 ├── logs/
 ├── backup/
 └── storage/
-    └── memory.db
+    ├── memory.db
+    └── horloger.db
 ```
 
 `audit.db` is not a database currently managed by the code. Archiviste writes mainly to `logs/events.jsonl` and process logs.
@@ -512,6 +554,19 @@ Key points:
 - `type: external`, `command`, `args`, `class_path` and `max_restarts` are supported by the adapter supervisor
 
 > WhatsApp channel installation and configuration (baileys-api gateway install, API key creation, QR pairing) are handled end-to-end by the `relais-config` sub-agent via the `channel-setup` and `whatsapp` skills. See [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) for the manual step-by-step guide.
+
+### `config/horloger.yaml`
+
+Controls the CRON scheduler. Job specs are stored as individual YAML files in `jobs_dir` (one file per job).
+
+```yaml
+tick_interval_seconds: 30       # how often the scheduler checks for due jobs
+catch_up_window_seconds: 120    # jobs older than this are skipped (not bulk-fired) after downtime
+jobs_dir: "config/horloger/jobs"
+db_path: "storage/horloger.db"
+```
+
+Jobs are managed via the `horloger-manager` native sub-agent (accessible via `/horloger` or `/schedule` slash command) or by manually creating YAML files in `jobs_dir`.
 
 ---
 

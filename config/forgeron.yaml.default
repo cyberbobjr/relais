@@ -15,7 +15,7 @@ forgeron:
 
   # Cooldown for skill edits per skill (seconds).
   # Redis TTL key: relais:skill:edit_cooldown:{skill_name}
-  edit_cooldown_seconds: 300
+  edit_cooldown_seconds: 3600
 
   # Trigger a skill edit after this many cumulative calls,
   # even when there are no errors.

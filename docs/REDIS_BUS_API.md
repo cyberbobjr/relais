@@ -197,6 +197,52 @@ is intentionally absent — Sentinelle is the sole gatekeeper for command validi
 
 ---
 
+### `relais:atelier:control`
+
+**Direction**: Commandant → Atelier
+**Consumer group**: `atelier_control_group`
+
+Carries out-of-band control operations for Atelier that must bypass the normal task pipeline (e.g. operations that act on the checkpointer state rather than processing a user message).
+
+```
+XADD relais:atelier:control * payload <Envelope JSON>
+```
+
+The envelope `action` field is set to `ACTION_ATELIER_COMPACT` (`"atelier.compact"`).
+
+The `context["atelier_control"]` sub-dict carries the operation parameters:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `op` | `string` | Yes | Operation name. Currently only `"compact"` is defined. |
+| `user_id` | `string` | Yes | Stable user identifier (portail key, e.g. `"usr_admin"`). Combined with `session_id` to address the checkpointer thread (`"{user_id}:{session_id}"`). |
+| `envelope_json` | `string` | Yes | JSON-serialized original user envelope — used by Atelier to construct the reply envelope via `Envelope.from_json()`. |
+
+**`op=compact` behavior**:
+
+1. Atelier deserializes the original user envelope from `envelope_json` and reads `llm_profile` from `context["portail"]` (falls back to `"default"`).
+2. Resolves the profile by `llm_profile` (then `"default"`, then first available) and reads `compact_keep` (default: `6`) and model settings from it.
+3. Looks up or creates a per-profile minimal `AgentExecutor` (cached in `_compact_executors[llm_profile]`; cleared on config reload).
+4. Calls `AgentExecutor.compact_session(session_id, user_id, compact_keep)`:
+   - Fetches current checkpointer state via `agent.aget_state()`.
+   - Returns `None` (no-op) if the session has ≤ `compact_keep` messages.
+   - Otherwise: summarizes the oldest `len(messages) − compact_keep` messages via `_DeepAgentsSummarizationMiddleware._acreate_summary()`, builds a single summary `AIMessage`, then writes a `_summarization_event` dict into the LangGraph state via `agent.aupdate_state()`. DeepAgents applies the event on the next agent turn.
+5. Publishes a human-readable confirmation, no-op notice, or error message to `relais:messages:outgoing_pending` addressed to the original sender.
+
+**CompactResult** (returned by `compact_session()` on success):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `messages_before` | `int` | Total message count before compaction |
+| `messages_after` | `int` | Message count after compaction (`compact_keep + 1` summary) |
+| `cutoff_index` | `int` | Index of first kept message (`len(messages) − compact_keep`) |
+
+**XACK contract**: Atelier always ACKs (`return True`) control messages. If `compact_session()` raises an exception, the error is caught, logged, and an error reply (`"Compaction failed: …"`) is published to the user — the message is never left in the PEL.
+
+**ACL**: Commandant has write access; Atelier has read access. Defined in `config/redis.conf`.
+
+---
+
 ### `relais:tasks:failed` (DLQ)
 
 **Direction**: Atelier → (monitoring / manual review)
@@ -750,6 +796,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:messages:incoming:horloger` | `portail_group` | Portail (CRON triggers from Horloger) |
 | `relais:security` | `sentinelle_group` | Sentinelle |
 | `relais:tasks` | `atelier_group` | Atelier |
+| `relais:atelier:control` | `atelier_control_group` | Atelier |
 | `relais:commands` | `commandant_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group` | Aiguilleur |

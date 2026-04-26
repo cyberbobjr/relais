@@ -297,12 +297,13 @@ def _resolve_static_token(
     resolved: list,
     failed_tokens: list[str],
     seen_names: set[str],
+    already_warned: frozenset[str] = frozenset(),
 ) -> None:
     """Resolve a bare static tool name — first via ToolRegistry, then local fallback.
 
-    Logs a WARNING and appends *token* to *failed_tokens* when neither
-    source contains the tool.  Logs DEBUG when the local fallback is used.
-    Never raises.
+    Logs a WARNING (first failure) or DEBUG (repeated failure already reported at
+    startup) and appends *token* to *failed_tokens* when neither source contains
+    the tool.  Logs DEBUG when the local fallback is used.  Never raises.
 
     Args:
         token: Bare tool name (no prefix).
@@ -319,11 +320,18 @@ def _resolve_static_token(
     if tool is None:
         tool = local_tools.get(token)
         if tool is None:
-            logger.warning(
-                "SubagentRegistry: subagent '%s' references unknown static "
-                "tool '%s' — dropping (tool not found in ToolRegistry or local pack)",
-                spec_name, token,
-            )
+            if token in already_warned:
+                logger.debug(
+                    "SubagentRegistry: subagent '%s' — static tool '%s' still missing "
+                    "(already reported at startup — provided by deepagents backend?)",
+                    spec_name, token,
+                )
+            else:
+                logger.warning(
+                    "SubagentRegistry: subagent '%s' references unknown static "
+                    "tool '%s' — dropping (tool not found in ToolRegistry or local pack)",
+                    spec_name, token,
+                )
             failed_tokens.append(token)
         else:
             logger.debug(
@@ -342,6 +350,7 @@ def _resolve_tool_tokens(
     tool_registry: Any,
     local_tools: dict[str, Any],
     spec_name: str,
+    already_warned: frozenset[str] = frozenset(),
 ) -> tuple[list, list[str]]:
     """Resolve raw YAML tool_tokens into callable/BaseTool instances.
 
@@ -366,6 +375,8 @@ def _resolve_tool_tokens(
         tool_registry: Static ``ToolRegistry`` for bare-name tokens.
         local_tools: Dict of locally loaded tools for this subagent.
         spec_name: Subagent name, used in log messages.
+        already_warned: Tokens already reported as missing at startup; their
+            per-request failure is downgraded to DEBUG to avoid log spam.
 
     Returns:
         A 2-tuple ``(resolved, failed_tokens)`` where *resolved* is a list
@@ -396,7 +407,8 @@ def _resolve_tool_tokens(
             )
         else:
             _resolve_static_token(
-                token, tool_registry, local_tools, spec_name, resolved, failed_tokens, seen_names
+                token, tool_registry, local_tools, spec_name, resolved, failed_tokens,
+                seen_names, already_warned,
             )
 
     return resolved, failed_tokens

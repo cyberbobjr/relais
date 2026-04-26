@@ -147,7 +147,7 @@ async def test_execute_returns_ai_text_from_astream() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="You are helpful.",
+            memory_paths=[],
             tools=[],
         )
         result = await executor.execute(_make_envelope("Hi"))
@@ -170,7 +170,7 @@ async def test_execute_accumulates_multiple_ai_tokens() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("Hi"))
 
     assert result.reply_text == "Hello, world!"
@@ -196,7 +196,7 @@ async def test_execute_streaming_calls_stream_callback() -> None:
         received.append(chunk)
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(
             _make_envelope("Hi"), stream_callback=callback
         )
@@ -235,7 +235,7 @@ async def test_execute_streaming_buffers_below_threshold() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=False),
         )
@@ -283,7 +283,7 @@ async def test_execute_streaming_flushes_at_threshold() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=False),
         )
@@ -324,7 +324,7 @@ async def test_execute_streaming_skips_empty_content_chunks() -> None:
         received.append(chunk)
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(
             _make_envelope("Hi"), stream_callback=callback
         )
@@ -352,7 +352,7 @@ async def test_execute_raises_exhausted_on_rate_limit() -> None:
     mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         with pytest.raises(ExhaustedRetriesError):
             await executor.execute(_make_envelope("Hi"))
 
@@ -371,7 +371,7 @@ async def test_execute_raises_exhausted_on_internal_server_error() -> None:
     mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         with pytest.raises(ExhaustedRetriesError):
             await executor.execute(_make_envelope("Hi"))
 
@@ -390,7 +390,7 @@ async def test_execute_raises_exhausted_on_api_connection_error() -> None:
     mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         with pytest.raises(ExhaustedRetriesError):
             await executor.execute(_make_envelope("Hi"))
 
@@ -421,7 +421,7 @@ async def test_execute_retries_then_succeeds() -> None:
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            executor = AgentExecutor(profile=profile, soul_prompt="...", tools=[])
+            executor = AgentExecutor(profile=profile, memory_paths=[], tools=[])
             result = await executor.execute(_make_envelope("Hi"))
 
     assert call_count == 2
@@ -455,7 +455,7 @@ async def test_execute_wraps_unknown_error_in_agent_execution_error() -> None:
     mock_agent.astream = fake_astream
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         with pytest.raises(AgentExecutionError) as exc_info:
             await executor.execute(_make_envelope("Hi"))
 
@@ -496,7 +496,7 @@ def test_executor_accepts_skills_parameter() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="You are helpful.",
+            memory_paths=[],
             tools=[],
             skills=["/some/path/to/skills"],
         )
@@ -513,7 +513,7 @@ def test_executor_passes_skills_to_create_deep_agent() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             skills=["/path/coding", "/path/research"],
         )
@@ -533,7 +533,7 @@ def test_executor_defaults_skills_to_empty_list() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
         )
 
@@ -557,7 +557,7 @@ def test_executor_uses_memory_saver_by_default() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
         )
 
@@ -577,7 +577,7 @@ def test_executor_passes_explicit_checkpointer_to_create_deep_agent() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             checkpointer=explicit_checkpointer,
         )
@@ -638,7 +638,7 @@ async def test_execute_raises_on_repeated_consecutive_tool_errors() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="You are helpful.",
+            memory_paths=[],
             tools=[],
         )
         with pytest.raises(AgentExecutionError, match="write_todos"):
@@ -698,7 +698,7 @@ async def test_run_once_embeds_partial_state_on_agent_execution_error() -> None:
             "atelier.agent_executor.serialize_messages",
             return_value=partial_msgs,
         ):
-            executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+            executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
             with pytest.raises(AgentExecutionError) as exc_info:
                 await executor.execute(_make_envelope("send an email"))
 
@@ -721,11 +721,39 @@ async def test_run_once_messages_raw_empty_when_state_unavailable() -> None:
     mock_agent.aget_state = AsyncMock(side_effect=RuntimeError("checkpointer gone"))
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         with pytest.raises(AgentExecutionError) as exc_info:
             await executor.execute(_make_envelope("send an email"))
 
     assert exc_info.value.messages_raw == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_run_once_partial_state_capture_logs_debug_on_attribute_error(caplog) -> None:
+    """When aget_state() raises AttributeError during the best-effort partial capture,
+    the error is logged at DEBUG level — not silently swallowed."""
+    import logging
+    from atelier.agent_executor import AgentExecutor, AgentExecutionError
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        for _ in range(5):
+            yield _v2_chunk("messages", (), (_tool_error_token("himalaya"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(side_effect=AttributeError("state gone"))
+
+    with caplog.at_level(logging.DEBUG, logger="atelier.agent_executor"):
+        with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+            executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
+            with pytest.raises((AgentExecutionError, AttributeError)):
+                await executor.execute(_make_envelope("send an email"))
+
+    assert any(
+        "partial state capture failed" in r.message and r.levelno == logging.DEBUG
+        for r in caplog.records
+    ), f"Expected DEBUG log about partial state capture failure, got: {[r.message for r in caplog.records]}"
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +885,7 @@ async def test_subagent_traces_populated_from_ns_to_name() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             subagents=[{
                 "name": "mail-agent",
@@ -893,7 +921,67 @@ async def test_subagent_traces_empty_when_no_subagent_detected() -> None:
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
-        executor = AgentExecutor(profile=_make_profile(), soul_prompt="...", tools=[])
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
         result = await executor.execute(_make_envelope("Hi"))
 
     assert result.subagent_traces == ()
+
+
+# ---------------------------------------------------------------------------
+# Subagent text filtering (Fix 2: only root-agent tokens must be visible)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_subagent_text_excluded_from_reply_text() -> None:
+    """Text tokens from subagents (non-empty ns) must not appear in reply_text.
+
+    Only root-agent chunks (ns == ()) contribute to the final reply.
+    """
+    from atelier.agent_executor import AgentExecutor
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token("root text "), {}))
+        # subagent chunk — non-empty ns
+        yield _v2_chunk("messages", ("sub-ns-abc",), (_ai_token("subagent text"), {}))
+        yield _v2_chunk("messages", (), (_ai_token("more root"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
+        result = await executor.execute(_make_envelope("Hi"))
+
+    assert "subagent text" not in result.reply_text
+    assert result.reply_text == "root text more root"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_subagent_text_not_forwarded_to_stream_callback() -> None:
+    """stream_callback must NOT receive text tokens that originate from subagents."""
+    from atelier.agent_executor import AgentExecutor
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        yield _v2_chunk("messages", (), (_ai_token("root"), {}))
+        yield _v2_chunk("messages", ("ns-sub",), (_ai_token("hidden"), {}))
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    received: list[str] = []
+
+    async def callback(chunk: str) -> None:
+        received.append(chunk)
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(profile=_make_profile(), memory_paths=[], tools=[])
+        await executor.execute(_make_envelope("Hi"), stream_callback=callback)
+
+    combined = "".join(received)
+    assert "hidden" not in combined
+    assert "root" in combined

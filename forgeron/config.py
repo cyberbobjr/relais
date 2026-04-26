@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
 from common.config_loader import resolve_config_path, resolve_skills_dir
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,9 +48,24 @@ class ForgeonConfig:
     history_read_timeout_seconds: int = 30
     """Seconds to wait for Souvenir BRPOP response when fetching session history."""
 
+    # Profiles defined in profiles.yaml — unknown values fall back to "precise".
+    _VALID_PROFILES: ClassVar[frozenset[str]] = frozenset(
+        {"default", "fast", "free", "precise", "coder"}
+    )
+
     def __post_init__(self) -> None:
         if self.skills_dir is None:
             self.skills_dir = resolve_skills_dir()
+        if self.llm_profile not in self._VALID_PROFILES:
+            logger.warning(
+                "Unknown llm_profile %r — falling back to 'precise'", self.llm_profile
+            )
+            self.llm_profile = "precise"
+        if self.edit_profile not in self._VALID_PROFILES:
+            logger.warning(
+                "Unknown edit_profile %r — falling back to 'precise'", self.edit_profile
+            )
+            self.edit_profile = "precise"
 
 
 def load_forgeron_config() -> ForgeonConfig:

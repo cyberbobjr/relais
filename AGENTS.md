@@ -30,7 +30,6 @@ Additional active bricks called out in `README.md`:
 uv sync                                    # install deps (NOT poetry — project uses hatchling)
 cp .env.example .env                       # then fill in keys
 python -c "from common.init import initialize_user_dir; initialize_user_dir()"
-alembic upgrade head                       # DB migrations (script_location = souvenir/migrations)
 
 ./supervisor.sh start all                  # full system via supervisord
 ./supervisor.sh --verbose start all        # start + tail logs (Ctrl+C detaches)

@@ -48,6 +48,12 @@ with ``with_structured_output`` to produce a rewritten SKILL.md and a
 ``changed`` flag.  SKILL.md is only written when ``changed=True`` and the
 content differs from the current file.
 
+Every attempt — success or failure — is appended to ``edit_history.jsonl``
+(next to ``SKILL.md``), recording: Unix timestamp, trigger reason, LLM reason,
+``changed`` flag, and the originating ``correlation_id``.  The journal is
+capped at ``MAX_HISTORY_ENTRIES`` (50) entries; older lines are pruned via an
+atomic tmp-replace write.
+
 Skill auto-creation — trigger rules
 -------------------------------------
 Forgeron consumes ``relais:memory:request`` via a dedicated consumer group
@@ -96,9 +102,13 @@ Key classes:
 
 * ``Forgeron`` — ``BrickBase`` subclass; two consumer loops:
   ``relais:skill:trace`` and ``relais:memory:request``.
+* ``BaseAsyncStore`` — shared async SQLAlchemy base; engine setup, ``close()``,
+  and async context manager; both ``SkillTraceStore`` and ``SessionStore`` inherit from it.
 * ``SkillTraceStore`` — SQLite accumulator; tracks one row per agent turn
   that used skills.
-* ``SkillEditor`` — rewrites SKILL.md directly from scoped conversation traces.
+* ``SkillEditor`` — rewrites SKILL.md directly from scoped conversation traces;
+  fetches full session history via ``_fetch_history_with_retry()`` (BRPOP with
+  exponential backoff, max 2 retries at 1 s / 2 s).
 * ``SessionStore`` — SQLite accumulator for per-session intent patterns.
 * ``IntentLabeler`` — fast LLM, extracts snake_case intent label.
 * ``SkillCreator`` — precise LLM, generates SKILL.md from examples.
@@ -258,6 +268,11 @@ class Forgeron(BrickBase):
         await self._session_store._create_tables()
         logger.info("Forgeron SQLite tables initialised.")
 
+    async def on_shutdown(self) -> None:
+        """Close SQLite stores to flush WAL and release aiosqlite threads."""
+        await self._trace_store.close()
+        await self._session_store.close()
+
     def stream_specs(self) -> list[StreamSpec]:
         """Declare the streams this brick consumes.
 
@@ -305,9 +320,11 @@ class Forgeron(BrickBase):
             envelope.sender_id,
             envelope.action,
         )
+        # _process_trace dispatches through multiple stores and sub-calls;
+        # catching broadly prevents a bad trace from stalling the consumer group.
         try:
             await self._process_trace(envelope, redis_conn)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.error(
                 "[TRACE] ERROR processing trace corr=%s: %s",
                 envelope.correlation_id,
@@ -315,6 +332,60 @@ class Forgeron(BrickBase):
                 exc_info=True,
             )
         return True
+
+    def _check_error_trigger(self, tool_error_count: int, is_aborted: bool) -> bool:
+        """Return True when the turn had tool errors or was aborted.
+
+        Args:
+            tool_error_count: Number of tool errors in the completed turn.
+            is_aborted: Whether the agent loop was aborted by ToolErrorGuard.
+
+        Returns:
+            True if the turn's outcome alone warrants triggering an edit.
+        """
+        return tool_error_count > 0 or is_aborted
+
+    def _check_threshold_trigger(self, skill_name: str) -> bool:
+        """Return True when the call-count threshold is reached, then reset it.
+
+        Side-effects: mutates ``self._skill_call_counts[skill_name]``.
+
+        Args:
+            skill_name: Name of the skill whose counter is being checked.
+
+        Returns:
+            True if the accumulated call count reached ``edit_call_threshold``.
+        """
+        call_count = self._skill_call_counts.get(skill_name, 0) + 1
+        self._skill_call_counts[skill_name] = call_count
+        reached = call_count >= self._config.edit_call_threshold
+        if reached:
+            self._skill_call_counts[skill_name] = 0
+        return reached
+
+    def _check_success_after_failure_trigger(
+        self, skill_name: str, tool_error_count: int, is_aborted: bool
+    ) -> bool:
+        """Return True when the agent succeeded on a skill that previously failed.
+
+        Side-effects: mutates ``self._last_had_errors[skill_name]`` to reflect
+        the outcome of the *current* turn so the next call can compare against it.
+
+        Args:
+            skill_name: Name of the skill whose error history is being checked.
+            tool_error_count: Number of tool errors in the completed turn.
+            is_aborted: Whether the agent loop was aborted by ToolErrorGuard.
+
+        Returns:
+            True if the previous turn for this skill had errors and this one did not.
+        """
+        prev_had_errors = self._last_had_errors.get(skill_name, False)
+        # "Success after failure" — previous turn errored, this one did not.
+        success_after_failure = (
+            prev_had_errors and tool_error_count == 0 and not is_aborted
+        )
+        self._last_had_errors[skill_name] = tool_error_count > 0 or is_aborted
+        return success_after_failure
 
     async def _process_trace(self, envelope: Envelope, redis_conn: Any) -> None:
         """Parse, persist, and potentially trigger analysis for a trace.
@@ -372,46 +443,26 @@ class Forgeron(BrickBase):
             )
 
             # Decide whether to trigger skill edit.
-            call_count = self._skill_call_counts.get(skill_name, 0) + 1
-            self._skill_call_counts[skill_name] = call_count
-            threshold_reached = call_count >= self._config.edit_call_threshold
-            if threshold_reached:
-                self._skill_call_counts[skill_name] = 0
-
-            # "Success after failure" — the previous turn for this skill had
-            # errors, but this one succeeded. This is the correction turn where
-            # the agent found the right approach; its messages_raw contains the
-            # fix that should be captured in the skill.
-            prev_had_errors = self._last_had_errors.get(skill_name, False)
-            success_after_failure = (
-                prev_had_errors
-                and tool_error_count == 0
-                and not is_aborted
-            )
-
-            # Update the flag for the next turn.
-            self._last_had_errors[skill_name] = (
-                tool_error_count > 0 or is_aborted
+            error_trigger = self._check_error_trigger(tool_error_count, is_aborted)
+            threshold_reached = self._check_threshold_trigger(skill_name)
+            success_after_failure = self._check_success_after_failure_trigger(
+                skill_name, tool_error_count, is_aborted
             )
 
             should_edit = (
-                (tool_error_count > 0
-                 or is_aborted
-                 or threshold_reached
-                 or success_after_failure)
+                (error_trigger or threshold_reached or success_after_failure)
                 and self._config.edit_mode
             )
 
             if not should_edit:
                 logger.info(
                     "[TRACE] edit NOT triggered — skill='%s' corr=%s "
-                    "errors=%d aborted=%s threshold=%s/%d saf=%s mode=%s",
+                    "errors=%d aborted=%s threshold=%s saf=%s mode=%s",
                     skill_name,
                     correlation_id,
                     tool_error_count,
                     is_aborted,
-                    call_count,
-                    self._config.edit_call_threshold,
+                    threshold_reached,
                     success_after_failure,
                     self._config.edit_mode,
                 )
@@ -430,7 +481,7 @@ class Forgeron(BrickBase):
                 "aborted" if is_aborted
                 else f"{tool_error_count} errors" if tool_error_count > 0
                 else "success after failure" if success_after_failure
-                else f"threshold ({call_count} calls)"
+                else "threshold reached"
             )
             logger.info(
                 "[TRACE] edit TRIGGERED — skill='%s' reason=%s corr=%s "
@@ -456,6 +507,7 @@ class Forgeron(BrickBase):
                 trigger_reason=reason,
                 force=threshold_reached,
                 skill_path=skill_dir_override,
+                correlation_id=correlation_id,
             )
             logger.info(
                 "[TRACE] edit result — skill='%s' edited=%s corr=%s",
@@ -491,6 +543,8 @@ class Forgeron(BrickBase):
                 envelope.correlation_id,
             )
             return True
+        # _process_archive dispatches to multiple sub-handlers; catching broadly
+        # prevents a single bad payload from blocking the consumer group.
         try:
             await self._process_archive(envelope, redis_conn)
         except Exception as exc:  # noqa: BLE001
@@ -588,6 +642,8 @@ class Forgeron(BrickBase):
                     "[ARCHIVE] IntentLabeler not importable — skipping corr=%s",
                     corr,
                 )
+            # LLM SDKs raise heterogeneous exceptions; degrading gracefully keeps
+            # the archive pipeline alive when intent labeling is unavailable.
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[ARCHIVE] IntentLabeler failed — corr=%s error=%s",
@@ -677,6 +733,51 @@ class Forgeron(BrickBase):
                 redis_conn=redis_conn,
             )
 
+    async def _fetch_history_with_retry(
+        self,
+        redis_conn: Any,
+        response_key: str,
+        max_retries: int = 2,
+    ) -> tuple[Any, Any] | None:
+        """Attempt BRPOP up to ``max_retries`` times with exponential backoff.
+
+        Souvenir may take longer than the configured timeout on the first attempt
+        when it is under load.  Retrying with a growing wait gives it a chance to
+        respond before we give up entirely and lose the correction opportunity.
+
+        Args:
+            redis_conn: Active async Redis connection.
+            response_key: The Redis key to pop from.
+            max_retries: Total number of BRPOP attempts (default 2).
+
+        Returns:
+            The ``(key, payload)`` tuple returned by BRPOP, or ``None`` when all
+            attempts time out.
+        """
+        for attempt in range(max_retries):
+            result = await redis_conn.brpop(
+                response_key,
+                timeout=self._config.history_read_timeout_seconds,
+            )
+            if result is not None:
+                return result
+            if attempt < max_retries - 1:
+                wait = 2**attempt  # 1s, 2s, …
+                logger.warning(
+                    "[CORRECTION] BRPOP attempt %d/%d timed out — retrying in %ds — key=%s",
+                    attempt + 1,
+                    max_retries,
+                    wait,
+                    response_key,
+                )
+                await asyncio.sleep(wait)
+        logger.warning(
+            "[CORRECTION] BRPOP exhausted %d attempts — no history received — key=%s",
+            max_retries,
+            response_key,
+        )
+        return None
+
     async def _trigger_skill_design(
         self,
         envelope: Envelope,
@@ -729,8 +830,8 @@ class Forgeron(BrickBase):
         notif = Envelope.create_response_to(envelope, "")
         notif.action = ACTION_MESSAGE_OUTGOING_PENDING
         notif.content = (
-            "Je travaille sur l'amélioration de mes compétences, "
-            "un nouveau skill est en cours de création..."
+            "I am working on improving my skills, "
+            "a new skill is being created..."
         )
         await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": notif.to_json()})
         logger.info(
@@ -738,17 +839,9 @@ class Forgeron(BrickBase):
             corr,
         )
 
-        # 3. Wait for history payload (BRPOP)
-        result = await redis_conn.brpop(
-            response_key,
-            timeout=self._config.history_read_timeout_seconds,
-        )
+        # 3. Wait for history payload (BRPOP with retry)
+        result = await self._fetch_history_with_retry(redis_conn, response_key)
         if result is None:
-            logger.warning(
-                "[CORRECTION] BRPOP timeout — no history received — corr=%s key=%s",
-                corr,
-                response_key,
-            )
             return
 
         # 4. Parse history and publish task for skill-designer

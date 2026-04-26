@@ -19,10 +19,9 @@ Processing flow (per tick)
 1. ``_registry.reload()`` — re-scan the jobs directory for changes.
 2. ``_scheduler.get_due_jobs(jobs, now)`` — classify jobs into
    *to_trigger* and *to_skip*.
-3. For each skipped job → ``_store.record(… status="skipped_disabled")``
-   (or ``"skipped_catchup"`` if the scheduler returned it for that reason;
-   in practice the scheduler doesn't distinguish the two skip causes at the
-   API level, so we always use ``"skipped_disabled"`` for skips).
+3. For each skipped job → ``_store.record(…)`` with the reason returned by the
+   scheduler: one of ``"skipped_disabled"``, ``"skipped_catchup"``, or
+   ``"skipped_double_fire"``.
 4. For each triggerable job:
    a. Build an Envelope via ``build_trigger_envelope()``.
    b. ``redis.xadd(STREAM_INCOMING_HORLOGER, {"payload": envelope.to_json()})``.
@@ -70,6 +69,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config loader helper (module-level so tests can patch it)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_path(raw: str, home: Path) -> Path:
+    """Return *raw* as a Path, resolved relative to *home* if not absolute.
+
+    Args:
+        raw: The path string from YAML config (absolute or relative).
+        home: The RELAIS home directory used as the base for relative paths.
+
+    Returns:
+        An absolute :class:`~pathlib.Path`.
+    """
+    p = Path(raw)
+    return p if p.is_absolute() else home / p
 
 
 def load_horloger_config() -> dict:
@@ -124,6 +137,9 @@ class Horloger(BrickBase):
         self._registry: JobRegistry
         self._scheduler: Scheduler
         self._store: ExecutionStore
+        # Fallback shutdown event for tests that bypass BrickBase.start().
+        # Created lazily in _tick_loop so the event loop is guaranteed to exist.
+        self._fallback_shutdown_event: asyncio.Event | None = None
         self._load()
 
     # ------------------------------------------------------------------
@@ -148,12 +164,8 @@ class Horloger(BrickBase):
         self._tick_interval = int(cfg.get("tick_interval_seconds", 30))
         self._catch_up_window = int(cfg.get("catch_up_window_seconds", 120))
 
-        def _rp(raw: str) -> Path:
-            p = Path(raw)
-            return p if p.is_absolute() else home / p
-
-        self._jobs_dir = _rp(cfg.get("jobs_dir", "config/horloger/jobs"))
-        self._db_path = _rp(cfg.get("db_path", "storage/horloger.db"))
+        self._jobs_dir = _resolve_path(cfg.get("jobs_dir", "config/horloger/jobs"), home)
+        self._db_path = _resolve_path(cfg.get("db_path", "storage/horloger.db"), home)
 
         # Ensure the jobs directory exists so the registry scanner doesn't fail.
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -275,10 +287,12 @@ class Horloger(BrickBase):
         Args:
             redis: Live async Redis connection.
         """
-        shutdown_event: asyncio.Event = getattr(
-            self, "_shutdown_event",
-            asyncio.Event(),  # fallback for tests that bypass BrickBase.start()
-        )
+        if hasattr(self, "_shutdown_event"):
+            shutdown_event: asyncio.Event = self._shutdown_event
+        else:
+            if self._fallback_shutdown_event is None:
+                self._fallback_shutdown_event = asyncio.Event()
+            shutdown_event = self._fallback_shutdown_event
 
         while not shutdown_event.is_set():
             try:
@@ -313,8 +327,12 @@ class Horloger(BrickBase):
 
         # --- Record skipped jobs ---
         for due in to_skip:
+            if due.skip_reason is None:
+                raise ValueError(
+                    f"DueJob for {due.spec.id} in to_skip has no skip_reason — scheduler invariant violated"
+                )
             await self._store.record(
-                self._make_execution(due, str(uuid.uuid4()), now, due.skip_reason or "skipped_disabled")
+                self._make_execution(due, str(uuid.uuid4()), now, due.skip_reason)
             )
 
         # --- Trigger due jobs ---

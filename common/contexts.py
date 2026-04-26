@@ -42,6 +42,7 @@ CTX_ATELIER = "atelier"
 CTX_FORGERON = "forgeron"
 CTX_SOUVENIR_REQUEST = "souvenir_request"
 CTX_SKILL_TRACE = "skill_trace"
+CTX_ATELIER_CONTROL = "atelier_control"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,18 @@ class SkillTraceCtx(TypedDict, total=False):
     tool_error_count: int         # tool invocations that returned an error
     messages_raw: list[dict]      # full serialized LangChain message list
     skill_paths: dict[str, str]   # {skill_name: absolute_skill_dir_path} — set for bundle skills
+
+
+class AtelierControlCtx(TypedDict, total=False):
+    """Request payload for Atelier control operations (Commandant → Atelier).
+
+    Written by Commandant command handlers and read by Atelier._handle_control().
+    This is NOT a brick context — it is a typed request payload.
+    """
+
+    op: str            # Operation name: "compact"
+    user_id: str       # Stable user identifier (for thread_id construction)
+    envelope_json: str # Serialized original command envelope (for reply routing)
 
 
 class SouvenirRequest(TypedDict, total=False):

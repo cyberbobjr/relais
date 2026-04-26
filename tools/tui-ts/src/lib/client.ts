@@ -63,53 +63,77 @@ export class RelaisClient {
     if (opts.sessionId) body["session_id"] = opts.sessionId;
     if (opts.mediaRefs) body["media_refs"] = opts.mediaRefs;
 
-    const resp = await this.fetch(MESSAGES_PATH, {
-      method: "POST",
-      headers: {
-        ...this.authHeaders(),
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        "Cache-Control": "no-cache",
-      },
-      body: JSON.stringify(body),
-    });
+    // Rolling idle timeout: resets on every SSE chunk (keepalive included).
+    // This lets the client wait indefinitely while the server is alive and
+    // sending keepalives, and only aborts when the server goes silent.
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> = setTimeout(
+      () => controller.abort(new DOMException("SSE idle timeout", "TimeoutError")),
+      this.timeoutMs,
+    );
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => controller.abort(new DOMException("SSE idle timeout", "TimeoutError")),
+        this.timeoutMs,
+      );
+    };
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`HTTP ${resp.status}: ${text}`);
-    }
-
-    const ct = resp.headers.get("content-type") ?? "";
-
-    // JSON fallback — server did not stream
-    if (ct.includes("application/json")) {
-      const data = (await resp.json()) as Record<string, string>;
-      yield {
-        type: "done",
-        content: data["content"] ?? "",
-        correlationId: data["correlation_id"] ?? "",
-        sessionId: data["session_id"] ?? "",
-      };
-      return;
-    }
-
-    if (!resp.body) throw new Error("Response has no body");
-
-    const parser = new SSEParser();
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let reader: any;
     try {
+      const resp = await fetch(this.baseUrl + MESSAGES_PATH, {
+        method: "POST",
+        headers: {
+          ...this.authHeaders(),
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          "Cache-Control": "no-cache",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${text}`);
+      }
+
+      const ct = resp.headers.get("content-type") ?? "";
+
+      // JSON fallback — server did not stream
+      if (ct.includes("application/json")) {
+        const data = (await resp.json()) as Record<string, string>;
+        yield {
+          type: "done",
+          content: data["content"] ?? "",
+          correlationId: data["correlation_id"] ?? "",
+          sessionId: data["session_id"] ?? "",
+        };
+        return;
+      }
+
+      if (!resp.body) throw new Error("Response has no body");
+
+      const parser = new SSEParser();
+      reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        resetTimer();
         const chunk = decoder.decode(value, { stream: true });
         for (const ev of parser.feed(chunk)) {
-          if (ev.type !== "keepalive") yield ev;
+          if (ev.type !== "keepalive") {
+            yield ev;
+            if (ev.type === "done") return;
+          }
         }
       }
     } finally {
-      reader.releaseLock();
+      clearTimeout(timer);
+      reader?.releaseLock();
     }
   }
 

@@ -144,6 +144,8 @@ Avoid vague guidance."""
                 HumanMessage(content=user_prompt),
             ]))
             skill_content = result.skill_content.strip()
+        # LLM SDKs raise heterogeneous exceptions; returning None lets the caller
+        # skip creation rather than crashing the correction pipeline.
         except Exception as exc:  # noqa: BLE001
             logger.error("SkillCreator LLM call failed for '%s': %s", intent_label, exc)
             return None

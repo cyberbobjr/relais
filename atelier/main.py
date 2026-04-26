@@ -4,10 +4,10 @@ Functional role
 ---------------
 Executes the agentic LLM loop for each authorized task.  Conversation history
 is managed natively by the persistent LangGraph checkpointer (AsyncSqliteSaver,
-``checkpoints.db``), keyed by ``user_id``.  Assembles the system prompt (soul +
-role + user layers), runs the DeepAgents loop with MCP and internal tools,
-streams token-by-token output to the channel, and publishes the final reply for
-Sentinelle to deliver.
+``checkpoints.db``), keyed by ``user_id``.  Resolves memory paths for the
+multi-layer system prompt (soul + role + user + channel layers), runs the
+DeepAgents loop with MCP and internal tools, streams token-by-token output to
+the channel, and publishes the final reply for Sentinelle to deliver.
 
 Technical overview
 ------------------
@@ -32,8 +32,10 @@ Key classes:
   evicted and re-established on next call; closed on shutdown via ``close()``.
 * ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
   and filters MCP tool definitions (enforces ``mcp_max_tools``).
-* ``SoulAssembler`` (atelier.soul_assembler) — assembles the multi-layer
-  system prompt from soul / role / user / channel / policy prompt files.
+* ``SoulAssembler`` (atelier.soul_assembler) — resolves and validates
+  multi-layer prompt file paths (soul / role / user / channel), returning
+  them as a ``memory_paths: list[str]`` for ``create_deep_agent(memory=)``.
+  File reading is delegated to DeepAgents; this module only validates paths.
 * ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
   ``atelier/profiles.yaml``); selects model, temperature,
   max_tokens, mcp_timeout, mcp_max_tools per request.  Optional field
@@ -221,6 +223,7 @@ from typing import Any
 
 from common.brick_base import BrickBase, StreamSpec
 from common.streams import (
+    STREAM_ATELIER_CONTROL,
     STREAM_MEMORY_REQUEST,
     STREAM_OUTGOING_PENDING,
     STREAM_SKILL_TRACE,
@@ -230,6 +233,7 @@ from common.streams import (
 from common.contexts import (
     CTX_AIGUILLEUR,
     CTX_ATELIER,
+    CTX_ATELIER_CONTROL,
     CTX_FORGERON,
     CTX_PORTAIL,
     CTX_SKILL_TRACE,
@@ -238,14 +242,14 @@ from common.contexts import (
     PortailCtx,
     ensure_ctx,
 )
-from common.envelope_actions import ACTION_MEMORY_ARCHIVE, ACTION_MESSAGE_OUTGOING_PENDING, ACTION_SKILL_TRACE
+from common.envelope_actions import ACTION_ATELIER_COMPACT, ACTION_MEMORY_ARCHIVE, ACTION_MESSAGE_OUTGOING_PENDING, ACTION_SKILL_TRACE
 from common.redis_client import RedisClient  # noqa: F401 — kept for test namespace patching
 from common.envelope import Envelope
 from common.config_reload import watch_and_reload
 from common.profile_loader import load_profiles, resolve_profile
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
-from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, build_project_context_prompt, format_diagnostic_trace, _render_diagnostic_trace
+from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, CompactResult, build_project_context_prompt, format_diagnostic_trace, _render_diagnostic_trace
 from atelier.error_synthesizer import ErrorSynthesizer
 from atelier.mcp_session_manager import McpSessionManager
 from atelier.mcp_adapter import make_mcp_tools
@@ -335,6 +339,11 @@ class Atelier(BrickBase):
         self._mcp_tools: list = []
         self._mcp_lock = asyncio.Lock()
 
+        # Per-profile cache of minimal executors for compact operations — avoids
+        # recompiling the LangGraph graph on every /compact call. Cleared on config
+        # reload so the next compact picks up updated profiles (model changes, etc.).
+        self._compact_executors: dict[str, AgentExecutor] = {}
+
     # ------------------------------------------------------------------
     # BrickBase abstract interface implementation
     # ------------------------------------------------------------------
@@ -379,7 +388,16 @@ class Atelier(BrickBase):
                 ack_mode="on_success",
                 block_ms=2000,
                 count=5,
-            )
+            ),
+            StreamSpec(
+                stream=STREAM_ATELIER_CONTROL,
+                group="atelier_control_group",
+                consumer=self.consumer_name,
+                handler=self._handle_control,
+                ack_mode="on_success",
+                block_ms=2000,
+                count=5,
+            ),
         ]
 
     # ------------------------------------------------------------------
@@ -480,6 +498,7 @@ class Atelier(BrickBase):
         self._display_config = cfg["display"]
         if "subagent_registry" in cfg:
             self._subagent_registry = cfg["subagent_registry"]
+        self._compact_executors = {}  # force rebuild on next compact (profiles may have changed)
         logger.info("Atelier: configuration applied")
 
         # Schedule MCP singleton restart if server config changed.
@@ -665,6 +684,113 @@ class Atelier(BrickBase):
         return ToolPolicy(base_dir=self._skills_base_dir)
 
     # ------------------------------------------------------------------
+    # Control stream handler
+    # ------------------------------------------------------------------
+
+    async def _handle_control(self, envelope: Envelope, redis_conn: Any) -> bool:
+        """Handle a control envelope from ``relais:atelier:control``.
+
+        Currently supports a single operation: ``op="compact"`` — triggers a
+        conversation history compaction for the given session.
+
+        Profile resolution: reads ``llm_profile`` from ``context["portail"]``
+        of the original user envelope (carried in ``ctrl_ctx["envelope_json"]``)
+        so that ``compact_keep`` and the summarization model match the requesting
+        user's assigned profile.  A per-profile ``AgentExecutor`` cache
+        (``_compact_executors``) avoids recompiling the LangGraph graph on every
+        call; the cache is cleared on config reload.
+
+        On ``compact_session()`` failure the exception is caught and an error
+        reply is published to the user — control messages are always ACKed.
+
+        Args:
+            envelope: Control envelope published by Commandant.
+            redis_conn: Active Redis connection.
+
+        Returns:
+            Always ``True`` to ACK the control message (failures are caught,
+            logged, and reported to the user; never left in the PEL).
+        """
+        ctrl_ctx: dict = envelope.context.get(CTX_ATELIER_CONTROL, {})
+        op: str = ctrl_ctx.get("op", "")
+        user_id: str = ctrl_ctx.get("user_id", envelope.sender_id)
+
+        if op != "compact":
+            logger.warning(
+                "[CONTROL] unknown op=%r — corr=%s", op, envelope.correlation_id
+            )
+            return True
+
+        logger.info(
+            "[CONTROL] compact requested — session=%s user=%s corr=%s",
+            envelope.session_id, user_id, envelope.correlation_id,
+        )
+
+        # Resolve the originating envelope early to read the user's llm_profile.
+        try:
+            envelope_json = ctrl_ctx.get("envelope_json", "")
+            source_env = Envelope.from_json(envelope_json) if envelope_json else envelope
+        except Exception:
+            source_env = envelope
+
+        # Honour the requesting user's LLM profile (compact_keep, model).
+        portail_ctx = source_env.context.get(CTX_PORTAIL, {})
+        llm_profile: str = portail_ctx.get("llm_profile", "default")
+        profile = (
+            self._profiles.get(llm_profile)
+            or self._profiles.get("default")
+            or next(iter(self._profiles.values()), None)
+        )
+        compact_keep: int = getattr(profile, "compact_keep", 6)
+
+        reply_text: str
+        try:
+            if llm_profile not in self._compact_executors:
+                self._compact_executors[llm_profile] = AgentExecutor(
+                    profile=profile,
+                    memory_paths=[],
+                    tools=[],
+                    checkpointer=self._checkpointer,
+                )
+            result: CompactResult | None = await self._compact_executors[llm_profile].compact_session(
+                session_id=envelope.session_id,
+                user_id=user_id,
+                compact_keep=compact_keep,
+            )
+            if result is not None:
+                reply_text = (
+                    f"Conversation compacted: {result.messages_before} → "
+                    f"{result.messages_after} messages "
+                    f"(kept {compact_keep} recent + 1 summary)."
+                )
+            else:
+                reply_text = "Nothing to compact (session is empty or already within limits)."
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "[CONTROL] compact_session failed — session=%s corr=%s",
+                envelope.session_id, envelope.correlation_id,
+            )
+            reply_text = f"Compaction failed: {exc}"
+
+        # Publish reply to the original channel so the user receives feedback.
+        try:
+            reply = Envelope.create_response_to(source_env, reply_text)
+            reply.action = ACTION_MESSAGE_OUTGOING_PENDING
+            await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": reply.to_json()})
+            logger.info(
+                "[CONTROL] compact reply published — corr=%s", envelope.correlation_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "[CONTROL] failed to publish compact reply — corr=%s error=%s",
+                envelope.correlation_id, exc,
+            )
+
+        return True
+
+    # ------------------------------------------------------------------
     # Core message handler
     # ------------------------------------------------------------------
 
@@ -710,15 +836,15 @@ class Atelier(BrickBase):
                 user_prompt_path=ur.get("prompt_path"),
                 channel_prompt_path=portail_ctx.get("channel_prompt_path"),
             )
-            soul_prompt = assembly.prompt
+            memory_paths = assembly.memory_paths
             if assembly.is_degraded:
                 logger.warning(
-                    "[TASK] soul prompt dégradé — corr=%s issues=%s",
+                    "[TASK] soul prompt degraded — corr=%s issues=%s",
                     corr, assembly.issues,
                 )
             logger.info(
-                "[TASK] soul prompt assembled — corr=%s len=%d role=%s",
-                corr, len(soul_prompt), ur.get("role_prompt_path", "none"),
+                "[TASK] memory paths assembled — corr=%s count=%d role=%s",
+                corr, len(memory_paths), ur.get("role_prompt_path", "none"),
             )
 
             # 3. Resolve per-user skills and MCP tool policy
@@ -798,7 +924,7 @@ class Atelier(BrickBase):
             display_config = replace(self._display_config, final_only=False) if streaming else self._display_config
             agent_executor = AgentExecutor(
                 profile=profile,
-                soul_prompt=soul_prompt,
+                memory_paths=memory_paths,
                 tools=mcp_tools,
                 skills=skills,
                 backend=SouvenirBackend(user_id=user_id),

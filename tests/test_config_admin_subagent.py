@@ -74,7 +74,7 @@ def test_executor_accepts_subagents_parameter() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="You are helpful.",
+            memory_paths=[],
             tools=[],
             subagents=[{"name": "test", "description": "test"}],
         )
@@ -92,7 +92,7 @@ def test_executor_passes_subagents_to_create_deep_agent() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             subagents=subagents,
         )
@@ -112,7 +112,7 @@ def test_executor_defaults_subagents_to_empty_list() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
         )
 
@@ -130,7 +130,7 @@ def test_executor_passes_delegation_prompt_to_system_prompt() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="Base.",
+            memory_paths=[],
             tools=[],
             delegation_prompt="Delegate to config-admin.",
         )
@@ -149,7 +149,7 @@ def test_executor_no_delegation_prompt_by_default() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent) as mock_create:
         AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="Base.",
+            memory_paths=[],
             tools=[],
         )
 
@@ -158,48 +158,46 @@ def test_executor_no_delegation_prompt_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _enrich_system_prompt
+# _build_core_system_prompt
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_adds_delegation_when_provided() -> None:
+def test_build_core_system_prompt_adds_delegation_when_provided() -> None:
     """When delegation_prompt is non-empty, it is appended."""
-    from atelier.agent_executor import _enrich_system_prompt
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("Base.", delegation_prompt="Delegate here.")
+    result = _build_core_system_prompt(delegation_prompt="Delegate here.")
     assert "Delegate here." in result
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_no_delegation_when_empty() -> None:
-    """When delegation_prompt is empty, no delegation text is appended."""
-    from atelier.agent_executor import _enrich_system_prompt
+def test_build_core_system_prompt_no_delegation_when_empty() -> None:
+    """When delegation_prompt is empty, no extra delegation text is appended."""
+    from atelier.prompts import _build_core_system_prompt
 
-    result = _enrich_system_prompt("Base.", delegation_prompt="")
-    assert "Delegate" not in result
-
-
-@pytest.mark.unit
-def test_enrich_system_prompt_always_adds_memory_prompt() -> None:
-    """Long-term memory prompt is always appended regardless of delegation."""
-    from atelier.agent_executor import _enrich_system_prompt, LONG_TERM_MEMORY_PROMPT
-
-    result = _enrich_system_prompt("Base.", delegation_prompt="")
-    assert LONG_TERM_MEMORY_PROMPT in result
-
-    result_with = _enrich_system_prompt("Base.", delegation_prompt="Some delegation.")
-    assert LONG_TERM_MEMORY_PROMPT in result_with
+    result_without = _build_core_system_prompt(delegation_prompt="")
+    result_with = _build_core_system_prompt(delegation_prompt="Delegate here.")
+    assert "Delegate here." not in result_without
+    assert "Delegate here." in result_with
 
 
 @pytest.mark.unit
-def test_enrich_system_prompt_no_duplicate_memory_prompt() -> None:
-    """If memory prompt is already in soul_prompt, it is not duplicated."""
-    from atelier.agent_executor import _enrich_system_prompt, LONG_TERM_MEMORY_PROMPT
+def test_build_core_system_prompt_contains_diagnostic_marker() -> None:
+    """Core system prompt always includes the DIAGNOSTIC_MARKER from SYSTEM_PROMPT.md."""
+    from atelier.prompts import _build_core_system_prompt, DIAGNOSTIC_MARKER
 
-    soul_with_memory = f"Soul.\n\n{LONG_TERM_MEMORY_PROMPT}"
-    result = _enrich_system_prompt(soul_with_memory, delegation_prompt="")
-    assert result.count(LONG_TERM_MEMORY_PROMPT) == 1
+    result = _build_core_system_prompt()
+    assert DIAGNOSTIC_MARKER in result
+
+
+@pytest.mark.unit
+def test_build_core_system_prompt_appends_project_context() -> None:
+    """project_context is appended when non-empty."""
+    from atelier.prompts import _build_core_system_prompt
+
+    result = _build_core_system_prompt(project_context="RELAIS_HOME=/tmp/test")
+    assert "RELAIS_HOME=/tmp/test" in result
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +583,7 @@ async def _run_handle_message(allowed_subagents: list[str] | None) -> dict:
         patch("atelier.main.McpSessionManager", return_value=AsyncMock()),
         patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
         patch("atelier.main.resolve_profile", return_value=MagicMock(model="test:m")),
-        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(prompt="soul", issues=[], is_degraded=False)),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)),
         patch("atelier.main.load_for_sdk", return_value={}),
     ):
         mock_instance = AsyncMock()

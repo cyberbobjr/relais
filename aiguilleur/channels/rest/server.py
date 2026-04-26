@@ -21,7 +21,9 @@ Request flow (SSE streaming mode):
     Accept: text/event-stream triggers streaming mode. The handler opens a
     StreamResponse and forwards token chunks from
     relais:messages:streaming:rest:{correlation_id} until the final reply
-    arrives on relais:messages:outgoing:rest.
+    arrives on relais:messages:outgoing:rest. When the is_final sentinel is
+    received but the outgoing envelope is still in transit through Sentinelle,
+    a 5 s grace period is applied before concluding the request timed out.
 
 Background task (_consume_outgoing):
     Reads relais:messages:outgoing:rest via consumer group rest_relay_group
@@ -730,14 +732,14 @@ async def _handle_sse(
         last_id = "0"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request_timeout
+        seen_final = False
 
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
 
-            # Check if future is done (final message arrived)
-            if future.done():
+            if seen_final:
                 break
 
             try:
@@ -747,6 +749,8 @@ async def _handle_sse(
                 )
             except asyncio.TimeoutError:
                 await response.write(HEARTBEAT)
+                if future.done():
+                    break
                 continue
             except Exception as exc:
                 logger.warning("SSE xread error corr=%s: %s", correlation_id[:8], exc)
@@ -755,6 +759,8 @@ async def _handle_sse(
 
             if not results:
                 await response.write(HEARTBEAT)
+                if future.done():
+                    break
                 continue
 
             for _, messages in results:
@@ -762,6 +768,13 @@ async def _handle_sse(
                     last_id = msg_id
                     # Any activity = extend deadline
                     deadline = loop.time() + request_timeout
+
+                    is_final_raw = data.get(b"is_final") or data.get("is_final") or b"0"
+                    if isinstance(is_final_raw, bytes):
+                        is_final_raw = is_final_raw.decode()
+                    if is_final_raw == "1":
+                        seen_final = True
+                        break
 
                     entry_type = data.get(b"type") or data.get("type") or b""
                     if isinstance(entry_type, bytes):
@@ -789,6 +802,20 @@ async def _handle_sse(
                             detail = detail.decode()
                         frame = format_sse("progress", json.dumps({"event": event, "detail": detail}))
                         await response.write(frame)
+                if seen_final:
+                    break
+
+        # When is_final sentinel arrived but the outgoing envelope is still
+        # in transit through Sentinelle, give it a short grace period before
+        # concluding the request timed out.  Atelier publishes is_final=1 and
+        # then the outgoing envelope back-to-back, but the envelope still has
+        # to traverse Sentinelle → outgoing:rest → correlator.resolve(), which
+        # can take tens of milliseconds on a loaded system.
+        if seen_final and not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
 
         # Send final event
         if future.done() and not future.cancelled():

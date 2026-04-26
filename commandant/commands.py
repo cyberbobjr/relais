@@ -13,10 +13,16 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from commandant.bundle_commands import handle_bundle
-from common.contexts import CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
+from common.contexts import CTX_ATELIER_CONTROL, CTX_PORTAIL, CTX_SOUVENIR_REQUEST, PortailCtx
 from common.envelope import Envelope
-from common.envelope_actions import ACTION_MEMORY_CLEAR, ACTION_MEMORY_SESSIONS, ACTION_MEMORY_RESUME, ACTION_MESSAGE_OUTGOING
-from common.streams import STREAM_MEMORY_REQUEST, stream_outgoing
+from common.envelope_actions import (
+    ACTION_ATELIER_COMPACT,
+    ACTION_MEMORY_CLEAR,
+    ACTION_MEMORY_RESUME,
+    ACTION_MEMORY_SESSIONS,
+    ACTION_MESSAGE_OUTGOING,
+)
+from common.streams import STREAM_ATELIER_CONTROL, STREAM_MEMORY_REQUEST, stream_outgoing
 from common.text_utils import strip_outer_quotes
 
 logger = logging.getLogger("commandant.commands")
@@ -157,6 +163,30 @@ async def handle_resume(envelope: Envelope, redis_conn: Any) -> None:
     logger.info("Resume request sent for session=%s user=%s", session_id, user_id)
 
 
+async def handle_compact(envelope: Envelope, redis_conn: Any) -> None:
+    """Compact the current session's LangGraph conversation history.
+
+    Publishes a control envelope to STREAM_ATELIER_CONTROL so Atelier can
+    summarise the checkpointer state and replace the full message history
+    with a shorter summary + the N most recent messages.
+
+    Args:
+        envelope: The envelope of the received /compact message.
+        redis_conn: Active async Redis connection.
+    """
+    portail_ctx: PortailCtx = envelope.context.get(CTX_PORTAIL, {})  # type: ignore
+    user_id = portail_ctx.get("user_id", envelope.sender_id)
+    compact_env = Envelope.from_parent(envelope, "")
+    compact_env.action = ACTION_ATELIER_COMPACT
+    compact_env.context[CTX_ATELIER_CONTROL] = {
+        "op": "compact",
+        "user_id": user_id,
+        "envelope_json": envelope.to_json(),
+    }
+    await redis_conn.xadd(STREAM_ATELIER_CONTROL, {"payload": compact_env.to_json()})
+    logger.info("Compact request sent for session=%s user=%s", envelope.session_id, user_id)
+
+
 async def handle_help(envelope: Envelope, redis_conn: Any) -> None:
     """Return the list of all available commands with their descriptions.
 
@@ -205,18 +235,23 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
     ),
     "sessions": CommandSpec(
         name="sessions",
-        description="Liste vos sessions récentes.",
+        description="Lists your recent sessions.",
         handler=handle_sessions,
     ),
     "resume": CommandSpec(
         name="resume",
-        description="Reprend une session précédente (/resume <id>).",
+        description="Resumes a previous session (/resume <id>).",
         handler=handle_resume,
     ),
     "bundle": CommandSpec(
         name="bundle",
         description="Manages bundles: /bundle install <zip> | uninstall <name> | list",
         handler=handle_bundle,
+    ),
+    "compact": CommandSpec(
+        name="compact",
+        description="Compacts conversation history to reduce token usage.",
+        handler=handle_compact,
     ),
 }
 

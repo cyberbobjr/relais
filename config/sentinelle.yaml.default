@@ -1,31 +1,31 @@
-# Configuration ACL de la Sentinelle RELAIS.
-# Copié dans ~/.relais/config/sentinelle.yaml au premier lancement.
+# RELAIS Sentinelle ACL configuration.
+# Copied to ~/.relais/config/sentinelle.yaml on first launch.
 #
-# Ce fichier contient UNIQUEMENT : access_control et groups.
-# Les utilisateurs et rôles sont dans portail.yaml (chargé par le Portail).
+# This file contains ONLY: access_control and groups.
+# Users and roles are in portail.yaml (loaded by the Portail brick).
 #
-# Commandes slash autorisées par rôle (portail.yaml → roles.<role>.actions) :
-#   admin : ["*"]  — toutes les commandes dont /bundle
-#   user  : []     — aucune commande slash
-#   guest : []     — aucune commande slash
+# Slash commands allowed per role (portail.yaml → roles.<role>.actions):
+#   admin : ["*"]  — all commands including /bundle
+#   user  : []     — no slash commands
+#   guest : []     — no slash commands
 #
-# /bundle install|uninstall|list est réservé au rôle admin (actions: ["*"]).
+# /bundle install|uninstall|list is reserved for the admin role (actions: ["*"]).
 #
-# ── Contrôle d'accès ─────────────────────────────────────────────────────────
+# ── Access control ───────────────────────────────────────────────────────────
 access_control:
-  # allowlist : tout refuser sauf les enveloppes avec user_record valide
-  # blocklist : tout accepter sauf les enveloppes explicitement bloquées
+  # allowlist: reject everything except envelopes with a valid user_record
+  # blocklist: accept everything except explicitly blocked envelopes
   default_mode: allowlist
   channels: {}
-  # Exemple de surcharge par canal :
+  # Example: per-channel override:
   # channels:
   #   telegram:
   #     mode: blocklist
 
-# ── Groupes (WhatsApp, Telegram) ─────────────────────────────────────────────
-# L'autorisation de groupe porte sur le groupe lui-même, pas sur l'expéditeur.
+# ── Groups (WhatsApp, Telegram) ──────────────────────────────────────────────
+# Group authorization applies to the group itself, not to the sender.
 groups: []
-# Exemple :
+# Example:
 # groups:
 #   - id: grp_famille
 #     channel: whatsapp

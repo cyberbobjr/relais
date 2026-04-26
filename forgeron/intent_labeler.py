@@ -164,6 +164,7 @@ class IntentLabeler:
                 HumanMessage(content=f"Conversation:\n{conversation_text}"),
             ]))
             raw_label = result.label.strip().lower()
+        # LLM SDKs raise heterogeneous exceptions (network, rate-limit, schema validation).
         except Exception as exc:  # noqa: BLE001
             logger.warning("IntentLabeler LLM call failed: %s", exc)
             return IntentLabelResult(

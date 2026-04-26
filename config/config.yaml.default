@@ -1,54 +1,54 @@
-# Configuration système RELAIS
-# Ce fichier est copié dans ~/.relais/config/config.yaml au premier lancement.
-# Modifiez ~/.relais/config/config.yaml — jamais ce fichier.
+# RELAIS system configuration
+# This file is copied to ~/.relais/config/config.yaml on first launch.
+# Edit ~/.relais/config/config.yaml — never this file.
 
 # ── Redis ───────────────────────────────────────────────────────────────────
 redis:
-  # Socket Unix local — plus rapide que TCP pour un usage mono-machine
+  # Local Unix socket — faster than TCP for single-machine deployments
   unix_socket: ~/.relais/redis.sock
-  # Mot de passe maître Redis (à surcharger dans l'environnement)
+  # Redis master password (override via environment variable)
   password: "${REDIS_PASSWORD}"
 
 # ── LiteLLM ─────────────────────────────────────────────────────────────────
 litellm:
   base_url: "http://127.0.0.1:4000"
-  # Clé maître LiteLLM (voir config/litellm.yaml)
+  # LiteLLM master key (see config/litellm.yaml)
   api_key: "${LITELLM_MASTER_KEY}"
 
-# ── Journalisation ───────────────────────────────────────────────────────────
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging:
   level: INFO
-  # Format : "json" (production) ou "text" (développement)
+  # Format: "json" (production) or "text" (development)
   format: text
-  # Rotation quotidienne, 30 jours de rétention
+  # Daily rotation, 30-day retention
   rotation: daily
   retention_days: 30
 
-# ── Profil LLM par défaut ────────────────────────────────────────────────────
+# ── Default LLM profile ──────────────────────────────────────────────────────
 llm:
   default_profile: default
 
-# ── Sécurité ─────────────────────────────────────────────────────────────────
+# ── Security ─────────────────────────────────────────────────────────────────
 security:
-  # Durée de vie des sessions actives (secondes)
+  # Active session TTL (seconds)
   session_ttl: 86400
-  # Taille maximale d'un message entrant (octets)
+  # Maximum incoming message size (bytes)
   max_message_size: 8192
-  # Politique pour les utilisateurs absents de portail.yaml
-  # Valeurs possibles : deny | guest | pending
-  #   deny    — rejette le message, aucune réponse envoyée
-  #   guest   — autorise avec le rôle défini par guest_role dans portail.yaml
-  #   pending — rejette + publie sur relais:admin:pending_users pour revue humaine
+  # Policy for users absent from portail.yaml
+  # Possible values: deny | guest | pending
+  #   deny    — reject the message, no reply sent
+  #   guest   — allow with the role defined by guest_role in portail.yaml
+  #   pending — reject + publish to relais:admin:pending_users for human review
   unknown_user_policy: "deny"
 
-# ── Répertoires ──────────────────────────────────────────────────────────────
+# ── Paths ────────────────────────────────────────────────────────────────────
 paths:
   backup: ~/.relais/backup
   media: ~/.relais/media
   skills: ~/.relais/skills
   logs: ~/.relais/logs
 
-# ── Sous-agents ──────────────────────────────────────────────────────────────
+# ── Subagents ────────────────────────────────────────────────────────────────
 subagents:
-  # Interrupteur maître — mettre false pour désactiver tous les sous-agents
+  # Master switch — set false to disable all subagents
   enabled: true

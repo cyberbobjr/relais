@@ -135,7 +135,7 @@ async def test_final_only_discards_pre_tool_narration() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=True),
         )
@@ -184,7 +184,7 @@ async def test_final_only_streams_only_final_section() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=True),
         )
@@ -229,7 +229,7 @@ async def test_final_only_with_thinking_includes_thinking_in_reply() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=True, events=events),
         )
@@ -277,7 +277,7 @@ async def test_stream_mode_thinking_goes_to_stream_not_reply() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=False, events=events),
         )
@@ -329,7 +329,7 @@ async def test_stream_mode_thinking_disabled_not_in_stream() -> None:
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
             profile=_make_profile(),
-            soul_prompt="...",
+            memory_paths=[],
             tools=[],
             display_config=DisplayConfig(final_only=False),
         )

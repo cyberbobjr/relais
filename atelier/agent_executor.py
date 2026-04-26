@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import tempfile
 from dataclasses import dataclass
+from html import unescape as _html_unescape
 from pathlib import Path
 from typing import Any, Callable, Awaitable, cast
 
@@ -37,16 +39,14 @@ from atelier.streaming import (
     REPLY_PLACEHOLDER,
 )
 from atelier.prompts import (
-    LONG_TERM_MEMORY_PROMPT,
-    SELF_DIAGNOSIS_PROMPT,
     DIAGNOSTIC_MARKER,
-    DIAGNOSTIC_AWARENESS_PROMPT,
     build_project_context_prompt,
     _build_execution_context,
-    _enrich_system_prompt,
+    _build_core_system_prompt,
 )
 from atelier.transient_errors import _is_transient_provider_error
 from atelier.profile_model import _resolve_profile_model
+from deepagents.middleware.summarization import _DeepAgentsSummarizationMiddleware
 from atelier.stream_loop import (
     StreamLoopState,
     compute_reply_text,
@@ -63,8 +63,6 @@ from atelier.diagnostic_trace import (
     _render_diagnostic_trace,
 )
 
-# Re-export for backward compatibility — callers do
-# ``from atelier.agent_executor import AgentExecutionError`` etc.
 __all__ = [
     "AgentExecutionError",
     "DiagnosticTrace",
@@ -73,9 +71,7 @@ __all__ = [
     "build_project_context_prompt",
     "format_diagnostic_trace",
     "_render_diagnostic_trace",
-    "LONG_TERM_MEMORY_PROMPT",
     "DIAGNOSTIC_MARKER",
-    "DIAGNOSTIC_AWARENESS_PROMPT",
     "REPLY_PLACEHOLDER",
     "_is_transient_provider_error",
     "_resolve_profile_model",
@@ -86,6 +82,19 @@ from common.envelope import Envelope
 from atelier.subagent_capture import SubagentMessageCapture
 
 logger = logging.getLogger(__name__)
+
+
+class _HtmlSafeShellBackend(LocalShellBackend):
+    """LocalShellBackend that decodes HTML entities in command strings before execution.
+
+    Some LLMs (e.g. Grok) emit HTML-encoded characters such as &amp;&amp; instead
+    of && inside JSON tool call arguments.  This subclass normalises the command
+    string so that those models can run shell commands correctly.  For models that
+    already emit valid shell syntax, html.unescape() is a no-op.
+    """
+
+    def execute(self, command: str, *, timeout: int | None = None):  # type: ignore[override]
+        return super().execute(_html_unescape(command), timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,23 @@ class AgentResult:
     subagent_traces: tuple[SubagentTrace, ...]
 
 
+@dataclass(frozen=True)
+class CompactResult:
+    """Immutable result of a manual compaction operation.
+
+    Attributes:
+        messages_before: Number of messages in the thread before compaction.
+        messages_after: Number of messages in the thread after compaction
+            (``compact_keep`` recent messages + 1 injected summary message).
+        cutoff_index: Index at which history was cut; messages before this
+            index were summarised and replaced.
+    """
+
+    messages_before: int
+    messages_after: int
+    cutoff_index: int
+
+
 class AgentExecutor:
     """Execute LLM requests via a DeepAgents compiled state graph.
 
@@ -140,7 +166,11 @@ class AgentExecutor:
     Args:
         profile: Profile config with at least a `.model` attribute
                  (format: ``provider:model-id``).
-        soul_prompt: System prompt assembled by SoulAssembler.
+        memory_paths: Ordered list of validated absolute path strings for
+                 user-editable prompt layers (SOUL.md, role, user, channel
+                 overlays).  Passed as ``memory=`` to ``create_deep_agent()``
+                 so DeepAgents reads and injects them automatically.
+                 Defaults to an empty list (no memory files).
         tools: List of LangChain tools (StructuredTool / BaseTool) to
                expose to the agent.
         skills: List of absolute directory paths to skill directories,
@@ -174,7 +204,7 @@ class AgentExecutor:
     def __init__(
         self,
         profile: ProfileConfig,
-        soul_prompt: str,
+        memory_paths: list[str],
         tools: list[BaseTool],
         skills: list[str] | None = None,
         backend: BackendProtocol | None = None,
@@ -188,11 +218,11 @@ class AgentExecutor:
         _relais_home = str(get_relais_home())
         _project_dir = str(get_relais_project_dir())
         _shell_env = {"RELAIS_HOME": _relais_home}
-        memories_backend: BackendProtocol = backend or LocalShellBackend(
+        memories_backend: BackendProtocol = backend or _HtmlSafeShellBackend(
             root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env
         )
         composite_backend = CompositeBackend(
-            default=LocalShellBackend(root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env),
+            default=_HtmlSafeShellBackend(root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env),
             routes={
                 "/memories/": memories_backend,
             },
@@ -210,11 +240,11 @@ class AgentExecutor:
         self._agent = create_deep_agent(
             model=_resolve_profile_model(profile),
             tools=tools,
-            system_prompt=_enrich_system_prompt(
-                soul_prompt,
+            system_prompt=_build_core_system_prompt(
                 delegation_prompt=delegation_prompt,
                 project_context=_project_context,
             ),
+            memory=memory_paths,
             skills=resolved_skills,
             backend=composite_backend,
             checkpointer=checkpointer or MemorySaver(),
@@ -361,8 +391,11 @@ class AgentExecutor:
                 state = await self._agent.aget_state(config)
                 partial_messages = serialize_messages(state.values.get("messages", []))
                 exc.messages_raw = partial_messages
-            except Exception:
-                pass  # best-effort; messages_raw stays []
+            except (RuntimeError, AttributeError, KeyError) as state_exc:
+                logger.debug(
+                    "partial state capture failed (best-effort) — corr=%s error=%s",
+                    envelope.correlation_id, state_exc,
+                )
             raise
         # Capture full message list from the agent graph state.
         # aget_state() must not fail — if it does, it means the agent is
@@ -432,13 +465,93 @@ class AgentExecutor:
                 envelope.correlation_id,
             )
             return True
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except (RuntimeError, AttributeError, KeyError, ValueError) as exc:
             logger.warning(
                 "inject_diagnostic: failed — corr=%s error=%s",
                 envelope.correlation_id,
                 exc,
             )
             return False
+
+    async def compact_session(
+        self,
+        session_id: str,
+        user_id: str,
+        compact_keep: int,
+    ) -> "CompactResult | None":
+        """Summarise old messages in a thread and replace them with a summary.
+
+        Reads the current LangGraph checkpoint for ``user_id:session_id``,
+        summarises all messages before the ``compact_keep`` most recent ones
+        using ``_DeepAgentsSummarizationMiddleware``, and writes back a
+        ``_summarization_event`` state update so that DeepAgents' built-in
+        event-application logic replaces the old messages on the next turn.
+
+        Args:
+            session_id: The session identifier (from the envelope).
+            user_id: The stable user identifier (from Portail context).
+            compact_keep: Number of recent messages to preserve; messages
+                before this threshold are summarised and dropped.
+
+        Returns:
+            A ``CompactResult`` with before/after counts on success, or
+            ``None`` when the session has no history, when the message count
+            is already within ``compact_keep``, or on any unexpected error
+            (all handled non-fatally).
+        """
+        config = RunnableConfig(
+            configurable={"thread_id": f"{user_id}:{session_id}"}
+        )
+        try:
+            state = await self._agent.aget_state(config)
+            if not state or not state.values.get("messages"):
+                logger.debug(
+                    "compact_session: empty state, skipping — session=%s", session_id
+                )
+                return None
+            messages = list(state.values["messages"])
+            if len(messages) <= compact_keep:
+                logger.debug(
+                    "compact_session: %d messages <= keep=%d, skipping — session=%s",
+                    len(messages), compact_keep, session_id,
+                )
+                return None
+            cutoff_idx = len(messages) - compact_keep
+            to_summarize = messages[:cutoff_idx]
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                summ_mw = _DeepAgentsSummarizationMiddleware(
+                    model=_resolve_profile_model(self._profile),
+                    backend=LocalShellBackend(root_dir=tmp_dir),
+                    keep=("messages", compact_keep),
+                )
+                summary_text = await summ_mw._acreate_summary(to_summarize)
+                summary_msg = summ_mw._build_new_messages_with_path(summary_text, None)[0]
+
+            new_event = {
+                "cutoff_index": cutoff_idx,
+                "summary_message": summary_msg,
+                "file_path": None,
+            }
+            await self._agent.aupdate_state(config, {"_summarization_event": new_event})
+            logger.info(
+                "compact_session: compacted %d→%d messages — session=%s",
+                len(messages), compact_keep + 1, session_id,
+            )
+            return CompactResult(
+                messages_before=len(messages),
+                messages_after=compact_keep + 1,
+                cutoff_index=cutoff_idx,
+            )
+        except asyncio.CancelledError:
+            raise
+        except (RuntimeError, AttributeError, KeyError, ValueError) as exc:
+            logger.warning(
+                "compact_session: failed — session=%s error=%s", session_id, exc
+            )
+            return None
 
     async def _stream(
         self,
@@ -501,46 +614,53 @@ class AgentExecutor:
         if config is not None:
             stream_kwargs["config"] = config
 
-        async with contextlib.aclosing(self._agent.astream(input_data, **stream_kwargs)) as stream:
-            async for raw_chunk in stream:
-                chunk = decode_chunk(raw_chunk)
-                if chunk is None:
-                    logger.warning("Unexpected astream chunk shape: %s", type(raw_chunk))
-                    continue
+        try:
+            async with contextlib.aclosing(self._agent.astream(input_data, **stream_kwargs)) as stream:
+                async for raw_chunk in stream:
+                    chunk = decode_chunk(raw_chunk)
+                    if chunk is None:
+                        logger.warning("Unexpected astream chunk shape: %s", type(raw_chunk))
+                        continue
 
-                if chunk.chunk_type == "updates":
-                    await handle_updates_chunk(
-                        ns=chunk.ns, data=chunk.data, source=chunk.source,
-                        tracker=tracker, progress_callback=progress_callback,
-                    )
-                elif chunk.chunk_type == "messages":
-                    token, _metadata = chunk.data
-                    state = await handle_tool_call_chunks(
-                        token=token, source=chunk.source, state=state, tracker=tracker,
-                        final_only=self._display.final_only, progress_callback=progress_callback,
-                    )
-                    if token.type == "tool":
-                        state = await handle_tool_result(
-                            token=token, source=chunk.source, state=state,
-                            guard=guard, progress_callback=progress_callback,
+                    if chunk.chunk_type == "updates":
+                        await handle_updates_chunk(
+                            ns=chunk.ns, data=chunk.data, source=chunk.source,
+                            tracker=tracker, progress_callback=progress_callback,
                         )
-                    if token.type != "tool" and token.content:
-                        text = _normalise_content(token.content)
-                        if text:
-                            new_sec = await emit_text(
-                                text=text, buf=buf,
+                    elif chunk.chunk_type == "messages":
+                        token, _metadata = chunk.data
+                        state = await handle_tool_call_chunks(
+                            token=token, source=chunk.source, state=state, tracker=tracker,
+                            final_only=self._display.final_only, progress_callback=progress_callback,
+                        )
+                        if token.type == "tool":
+                            state = await handle_tool_result(
+                                token=token, source=chunk.source, state=state,
+                                guard=guard, progress_callback=progress_callback,
+                            )
+                        if not chunk.ns and token.type != "tool" and token.content:
+                            text = _normalise_content(token.content)
+                            if text:
+                                new_sec = await emit_text(
+                                    text=text, buf=buf,
+                                    current_section=state.current_section,
+                                    final_only=self._display.final_only,
+                                )
+                                state = StreamLoopState(state.full_reply + text, state.last_tool_result, state.pending_tool_name, new_sec)
+                            new_sec = await emit_thinking(
+                                raw=token.content, buf=buf,
                                 current_section=state.current_section,
+                                thinking_enabled=self._display.events.get("thinking", False),
                                 final_only=self._display.final_only,
                             )
-                            state = StreamLoopState(state.full_reply + text, state.last_tool_result, state.pending_tool_name, new_sec)
-                        new_sec = await emit_thinking(
-                            raw=token.content, buf=buf,
-                            current_section=state.current_section,
-                            thinking_enabled=self._display.events.get("thinking", False),
-                            final_only=self._display.final_only,
-                        )
-                        if new_sec is not state.current_section:
-                            state = StreamLoopState(state.full_reply, state.last_tool_result, state.pending_tool_name, new_sec)
+                            if new_sec is not state.current_section:
+                                state = StreamLoopState(state.full_reply, state.last_tool_result, state.pending_tool_name, new_sec)
+        except RecursionError as exc:
+            raise AgentExecutionError(
+                f"Agent execution failed: {exc}",
+                tool_call_count=guard.total_calls,
+                tool_error_count=guard.total_errors,
+            ) from exc
 
         if stream_callback is not None:
             if self._display.final_only:

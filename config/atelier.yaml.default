@@ -1,16 +1,16 @@
-# Configuration comportementale du brick Atelier.
-# Copié dans ~/.relais/config/atelier.yaml au premier lancement.
+# Behavioural configuration for the Atelier brick.
+# Copied to ~/.relais/config/atelier.yaml on first launch.
 
-# ── Affichage temps réel ─────────────────────────────────────────────────────
+# ── Real-time display ────────────────────────────────────────────────────────
 display:
-  # Interrupteur maître — false désactive toute publication d'événements
+  # Master switch — false disables all event publishing
   enabled: true
-  # Si true, seul le texte après le dernier appel outil est transmis au channel.
-  # Les tokens de narration intermédiaires (avant un tool_call) sont ignorés.
+  # When true, only the text after the last tool call is transmitted to the channel.
+  # Intermediate narration tokens (before a tool_call) are discarded.
   final_only: true
-  # Longueur max du détail publié (tronqué au-delà)
+  # Maximum length of the published detail field (truncated beyond this)
   detail_max_length: 100
-  # Événements transmis au channel (streaming ou bloc final)
+  # Events transmitted to the channel (streaming or final block)
   events:
     tool_call: true
     tool_result: true

@@ -1,21 +1,21 @@
-# RELAIS — Guide de contribution
+# RELAIS — Contribution Guide
 
-**Dernière mise à jour :** 2026-04-17
+**Last updated:** 2026-04-23
 
-Ce guide décrit le workflow de contribution réellement adapté au dépôt actuel.
+This guide describes the contribution workflow actually adapted to the current repository.
 
 ---
 
-## Setup développement
+## Development Setup
 
-### Prérequis
+### Prerequisites
 
 - Python `>=3.11`
 - `uv`
-- Redis local si vous voulez lancer le pipeline
-- `supervisord` si vous utilisez le mode supervisé
+- Local Redis if you want to run the pipeline
+- `supervisord` if you use supervised mode
 
-### Installation locale
+### Local Installation
 
 ```bash
 git clone <repo-url>
@@ -26,34 +26,32 @@ uv sync
 cp .env.example .env
 
 python -c "from common.init import initialize_user_dir; initialize_user_dir()"
-
-alembic upgrade head
 ```
 
-### Répertoire de travail
+### Working Directory
 
-Par défaut, RELAIS utilise `./.relais` à la racine du dépôt. Vous pouvez le surcharger avec `RELAIS_HOME`.
+By default, RELAIS uses `./.relais` at the repo root. You can override this with `RELAIS_HOME`.
 
-`initialize_user_dir()` :
+`initialize_user_dir()`:
 
-- crée la structure de travail sous `RELAIS_HOME`
-- copie les templates livrés
-- n'écrase jamais les fichiers existants
+- creates the working structure under `RELAIS_HOME`
+- copies the shipped templates
+- never overwrites existing files
 
-Il est correct que les points d'entrée de briques l'appellent au démarrage.
+It is correct for brick entry points to call it at startup.
 
-### Démarrage local
+### Local Startup
 
-#### Option recommandée
+#### Recommended Option
 
 ```bash
-./supervisor.sh start all           # Démarrer le système
-./supervisor.sh --verbose start all # Démarrer + suivre les logs (Ctrl+C pour détacher)
-./supervisor.sh status              # Voir l'état des bricks
-./supervisor.sh --verbose restart all # Redémarrer + suivre les logs
+./supervisor.sh start all             # Start the system
+./supervisor.sh --verbose start all   # Start + follow logs (Ctrl+C to detach)
+./supervisor.sh status                # Check brick status
+./supervisor.sh --verbose restart all # Restart + follow logs
 ```
 
-#### Option manuelle
+#### Manual Option
 
 ```bash
 redis-server config/redis.conf
@@ -69,27 +67,27 @@ uv run python aiguilleur/main.py
 
 ---
 
-## Architecture des tests
+## Test Architecture
 
-Le dépôt utilise principalement :
+The repository primarily uses:
 
-- tests unitaires avec `pytest`
-- tests async avec `pytest-asyncio`
-- mocks `unittest.mock`
-- `fakeredis` pour certains tests d'intégration locale
+- unit tests with `pytest`
+- async tests with `pytest-asyncio`
+- `unittest.mock` mocks
+- `fakeredis` for some local integration tests
 
-Les marqueurs présents dans `pyproject.toml` sont :
+Markers defined in `pyproject.toml`:
 
 - `unit`
 - `integration`
 
-### Types de tests utiles
+### Useful Test Types
 
-- tests unitaires de loader/config : ex. `tests/test_channel_config.py`
-- tests unitaires de briques : ex. `tests/test_commandant.py`, `tests/test_soul_assembler.py`
-- smoke / intégration de pipeline : ex. `tests/test_smoke_e2e.py`
+- loader/config unit tests: e.g. `tests/test_channel_config.py`
+- brick unit tests: e.g. `tests/test_commandant.py`, `tests/test_soul_assembler.py`
+- smoke / pipeline integration: e.g. `tests/test_smoke_e2e.py`
 
-### Commandes courantes
+### Common Commands
 
 ```bash
 uv run pytest tests/ -v
@@ -99,7 +97,7 @@ uv run pytest tests/test_channel_config.py -v
 uv run pytest tests/test_smoke_e2e.py -v
 ```
 
-Avec couverture :
+With coverage:
 
 ```bash
 uv run pytest tests/ --cov=common,portail,sentinelle,atelier,souvenir,aiguilleur,archiviste,commandant --cov-report=term-missing
@@ -107,16 +105,16 @@ uv run pytest tests/ --cov=common,portail,sentinelle,atelier,souvenir,aiguilleur
 
 ---
 
-## Contribuer à une brique existante
+## Contributing to an Existing Brick
 
-### Règles pratiques
+### Practical Rules
 
-- partir du `main.py` de la brique pour comprendre le flux réel
-- vérifier les streams Redis réellement consommés et produits
-- regarder les tests existants avant d’introduire de nouveaux patterns
-- mettre à jour la doc si vous changez un stream, une variable d’environnement ou un point d’entrée
+- start from the brick's `main.py` to understand the actual flow
+- check the Redis streams actually consumed and produced
+- look at existing tests before introducing new patterns
+- update the docs if you change a stream, an environment variable, or an entry point
 
-### Références utiles
+### Useful References
 
 - [README.md](/Users/benjaminmarchand/IdeaProjects/relais/README.md)
 - [docs/ARCHITECTURE.md](/Users/benjaminmarchand/IdeaProjects/relais/docs/ARCHITECTURE.md)
@@ -124,27 +122,27 @@ uv run pytest tests/ --cov=common,portail,sentinelle,atelier,souvenir,aiguilleur
 
 ---
 
-## Ajouter une nouvelle brique
+## Adding a New Brick
 
-### Checklist minimale
+### Minimal Checklist
 
-- créer un package dédié avec un `main.py`
-- utiliser `RedisClient("<nom_de_brique>")`
-- appeler `initialize_user_dir()` dans le bloc `__main__`
-- documenter les streams consommés et produits
-- ajouter les tests ciblés
-- ajouter la brique dans `supervisord.conf` si elle doit être démarrée avec le reste du système
-- mettre à jour le README et `docs/ARCHITECTURE.md`
+- create a dedicated package with a `main.py`
+- use `RedisClient("<brick_name>")`
+- call `initialize_user_dir()` in the `__main__` block
+- document the consumed and produced streams
+- add targeted tests
+- add the brick to `supervisord.conf` if it should start with the rest of the system
+- update the README and `docs/ARCHITECTURE.md`
 
-### Pattern minimal
+### Minimal Pattern
 
-Toutes les briques héritent de `common.brick_base.BrickBase`. Le patron minimal :
+All bricks inherit from `common.brick_base.BrickBase`. The minimal template:
 
 ```python
 import asyncio
 
 from common.brick_base import BrickBase, StreamSpec
-from common.shutdown import GracefulShutdown  # noqa: F401 — point de patch pour les tests
+from common.shutdown import GracefulShutdown  # noqa: F401 — test patch target
 
 
 class MyBrick(BrickBase):
@@ -155,7 +153,7 @@ class MyBrick(BrickBase):
         return GracefulShutdown()
 
     def _load(self) -> None:
-        pass  # charger le YAML dans les attributs self ici
+        pass  # load YAML into self attributes here
 
     def stream_specs(self) -> list[StreamSpec]:
         return [StreamSpec(stream="relais:my:stream", group="mybrick_group",
@@ -163,43 +161,43 @@ class MyBrick(BrickBase):
 
     async def _handle(self, envelope, redis_conn) -> bool:
         ...
-        return True  # True = XACK, False = laisser dans le PEL
+        return True  # True = XACK, False = leave in PEL
 
 
 if __name__ == "__main__":
     asyncio.run(MyBrick().start())
 ```
 
-### Points d’attention
+### Key Points
 
-- `RedisClient` s’appuie sur `REDIS_PASS_<BRICK>` puis `REDIS_PASSWORD`
-- le dépôt privilégie les consumer groups Redis pour les boucles de consommation
-- les ACK sont gérés explicitement dans les boucles de lecture
+- `RedisClient` uses `REDIS_PASS_<BRICK>` first, then falls back to `REDIS_PASSWORD`
+- the repository favors Redis consumer groups for consumption loops
+- ACKs are managed explicitly in read loops
 
 ---
 
-## Ajouter un canal Aiguilleur
+## Adding an Aiguilleur Channel
 
-L’entrée du superviseur de canaux est [aiguilleur/main.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/main.py). Les canaux sont configurés via `config/aiguilleur.yaml` puis chargés par `load_channels_config()`.
+The channel supervisor entry point is [aiguilleur/main.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/main.py). Channels are configured via `config/aiguilleur.yaml` and loaded by `load_channels_config()`.
 
-### Deux modes pris en charge
+### Two Supported Modes
 
-- `type: native` : adaptateur Python chargé dynamiquement
-- `type: external` : sous-processus supervisé par l’Aiguilleur
+- `type: native`: Python adapter loaded dynamically
+- `type: external`: subprocess supervised by the aiguilleur
 
-### Pour un canal natif
+### For a Native Channel
 
-- créer un module `aiguilleur/channels/<canal>/adapter.py`
-- exposer une classe `*Aiguilleur`
-- implémenter le contrat attendu par `AiguilleurManager`
-- publier les messages entrants sur `relais:messages:incoming`
-- consommer `relais:messages:outgoing:<canal>` pour la sortie
+- create a module `aiguilleur/channels/<channel>/adapter.py`
+- expose a `*Aiguilleur` class
+- implement the contract expected by `AiguilleurManager`
+- publish incoming messages to `relais:messages:incoming`
+- consume `relais:messages:outgoing:<channel>` for output
 
-L’exemple de référence actuel est [aiguilleur/channels/discord/adapter.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/channels/discord/adapter.py).
+The current reference example is [aiguilleur/channels/discord/adapter.py](/Users/benjaminmarchand/IdeaProjects/relais/aiguilleur/channels/discord/adapter.py).
 
-### Pour un canal externe
+### For an External Channel
 
-Déclarer dans `aiguilleur.yaml` :
+Declare in `aiguilleur.yaml`:
 
 ```yaml
 channels:
@@ -214,66 +212,66 @@ channels:
 
 ### Configuration
 
-`config/aiguilleur.yaml` n’est pas copié automatiquement par `initialize_user_dir()`. Si vous ajoutez un canal, pensez à :
+`config/aiguilleur.yaml` is not copied automatically by `initialize_user_dir()`. If you add a channel, remember to:
 
-- mettre à jour [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default)
-- documenter la création manuelle du fichier override dans `RELAIS_HOME/config/aiguilleur.yaml`
+- update [config/aiguilleur.yaml.default](/Users/benjaminmarchand/IdeaProjects/relais/config/aiguilleur.yaml.default)
+- document the manual creation of the override file at `RELAIS_HOME/config/aiguilleur.yaml`
 
 ---
 
-## Ajouter un sous-agent personnalisé
+## Adding a Custom Subagent
 
-Les sous-agents sont découverts automatiquement par Atelier sur hot-reload. Deux niveaux sont supportés :
+Subagents are discovered automatically by atelier on hot-reload. Two tiers are supported:
 
-### Sous-agents utilisateur (dans `$RELAIS_HOME/config/atelier/subagents/`)
+### User Subagents (in `$RELAIS_HOME/config/atelier/subagents/`)
 
-1. Créer `$RELAIS_HOME/config/atelier/subagents/{name}/` (le nom du répertoire doit correspondre exactement au champ `name` dans le YAML)
-2. Ajouter `subagent.yaml` avec les champs requis : `name`, `description`, `system_prompt` et optionnellement `tool_tokens`, `skill_tokens`, `delegation_snippet`
-3. Ajouter le nom du sous-agent aux rôles concernés dans `portail.yaml` via `allowed_subagents` (patterns fnmatch, ex. `["my-agent"]` ou `["my-*"]`)
-4. Optionnel : créer `tools/` contenant des modules Python exportant des instances `BaseTool`
-5. Optionnel : créer `skills/` contenant des répertoires de skills
-6. Aucune modification de code requise — Atelier découvre les changements sur hot-reload
+1. Create `$RELAIS_HOME/config/atelier/subagents/{name}/` (the directory name must exactly match the `name` field in the YAML)
+2. Add `subagent.yaml` with required fields: `name`, `description`, `system_prompt` and optionally `tool_tokens`, `skill_tokens`, `delegation_snippet`
+3. Add the subagent name to the relevant roles in `portail.yaml` via `allowed_subagents` (fnmatch patterns, e.g. `["my-agent"]` or `["my-*"]`)
+4. Optional: create `tools/` containing Python modules exporting `BaseTool` instances
+5. Optional: create `skills/` containing skill directories
+6. No code changes required — atelier discovers changes on hot-reload
 
-### Tokens d’outils
+### Tool Tokens
 
 <!-- AUTO-GENERATED: Docstring from atelier/subagents.py -->
-La section `tool_tokens` de `subagent.yaml` accepte plusieurs formes de tokens :
+The `tool_tokens` section of `subagent.yaml` accepts several token forms:
 
-- `local:<name>` — outil chargé depuis `tools/<name>.py` dans le répertoire du sous-agent
-- `mcp:<glob>` — filtre fnmatch sur les outils MCP de la requête (déjà filtrés par `ToolPolicy`)
-- `inherit` — tous les outils MCP de la requête
-- `module:<dotted.path>` — importe un module Python et collecte toutes les instances `BaseTool`. **Sécurité** : seules les préfixes dans `_ALLOWED_MODULE_PREFIXES` (`aiguilleur.channels.`, `atelier.tools.`, `relais_tools.`) sont autorisées. Les autres entraînent un WARNING et sont ignorés.
-- `<name>` (pas de préfixe) — outil statique du `ToolRegistry` (`atelier/tools/*.py`)
+- `local:<name>` — tool loaded from `tools/<name>.py` in the subagent directory
+- `mcp:<glob>` — fnmatch filter on the request's MCP tools (already filtered by `ToolPolicy`)
+- `inherit` — all MCP tools from the request
+- `module:<dotted.path>` — imports a Python module and collects all `BaseTool` instances. **Security**: only prefixes in `_ALLOWED_MODULE_PREFIXES` (`aiguilleur.channels.`, `atelier.tools.`, `relais_tools.`) are allowed. Others produce a WARNING and are ignored.
+- `<name>` (no prefix) — static tool from `ToolRegistry` (`atelier/tools/*.py`)
 
-**Validation des tokens** :
-- À l’appel de `load()`, les tokens `module:` et les références statiques `<name>` sont validés au démarrage
-- Les formes `mcp:`, `inherit` et `local:` sont dynamiques et validées à l’exécution
-- Un sous-agent dégradé (un ou plusieurs tokens invalides) reste accessible mais exécute uniquement avec les outils valides
-- Les tokens non résolus sont loggés comme WARNING avec la raison (module non importable, outil non trouvé, etc.)
+**Token validation**:
+- At `load()` time, `module:` tokens and static `<name>` references are validated at startup
+- `mcp:`, `inherit`, and `local:` forms are dynamic and validated at runtime
+- A degraded subagent (one or more invalid tokens) remains accessible but runs with only the valid tools
+- Unresolved tokens are logged as WARNING with the reason (non-importable module, tool not found, etc.)
 
-### Sous-agents natifs (dans `atelier/subagents/`, livrés avec le code)
+### Native Subagents (in `atelier/subagents/`, shipped with the source)
 
-Les sous-agents natifs sont scannés **après** les sous-agents utilisateur. Pour en ajouter un au dépôt :
+Native subagents are scanned **after** user subagents. To add one to the repository:
 
-1. Créer `atelier/subagents/{name}/` avec `subagent.yaml` (même structure que les sous-agents utilisateur)
-2. Optionnel : ajouter à `common/init.py` dans `DEFAULT_FILES` si le fichier doit être copié lors de l’initialisation
-3. Hot-reload est supporté automatiquement pour les sous-agents natifs
+1. Create `atelier/subagents/{name}/` with `subagent.yaml` (same structure as user subagents)
+2. Optional: add to `common/init.py` in `DEFAULT_FILES` if the file should be copied during initialization
+3. Hot-reload is automatically supported for native subagents
 
 ---
 
-## Conventions de code
+## Code Conventions
 
 - Python 3.11+
-- type hints partout où c’est utile
-- docstrings courtes mais concrètes
-- tests pour tout changement de flux, de config ou de contrat Redis
-- garder la doc ancrée dans le code réel, pas dans une architecture visée
+- type hints wherever useful
+- short but concrete docstrings
+- tests for any change to a flow, config, or Redis contract
+- keep docs anchored in the actual code, not a target architecture
 
 ---
 
-## Avant d’ouvrir une PR
+## Before Opening a PR
 
-- vérifier que les points d’entrée documentés existent toujours
-- vérifier les streams et variables d’environnement modifiés
-- lancer les tests ciblés touchés par votre changement
-- relire `README.md`, `docs/ARCHITECTURE.md` et `docs/ENV.md` si vous changez le comportement public
+- verify that documented entry points still exist
+- check any modified streams and environment variables
+- run the targeted tests affected by your change
+- re-read `README.md`, `docs/ARCHITECTURE.md`, and `docs/ENV.md` if you change public-facing behavior

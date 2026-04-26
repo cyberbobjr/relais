@@ -57,7 +57,7 @@ def _validate_bool(field_name: str, raw: object, default: bool) -> bool:
     """
     if not isinstance(raw, bool):
         logger.warning(
-            "display_config: champ '%s' invalide (reçu %r, attendu %s), valeur par défaut utilisée",
+            "display_config: field '%s' invalid (got %r, expected %s), using default value",
             field_name,
             raw,
             "bool",
@@ -82,7 +82,7 @@ def _validate_int(field_name: str, raw: object, default: int, min_val: int = 0) 
         value = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         logger.warning(
-            "display_config: champ '%s' invalide (reçu %r, attendu %s), valeur par défaut utilisée",
+            "display_config: field '%s' invalid (got %r, expected %s), using default value",
             field_name,
             raw,
             "int",
@@ -90,7 +90,7 @@ def _validate_int(field_name: str, raw: object, default: int, min_val: int = 0) 
         return default
     if value < min_val:
         logger.warning(
-            "display_config: champ '%s' invalide (reçu %r, attendu int >= %d), valeur par défaut utilisée",
+            "display_config: field '%s' invalid (got %r, expected int >= %d), using default value",
             field_name,
             raw,
             min_val,

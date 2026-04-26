@@ -1,32 +1,32 @@
-# HEARTBEAT — Tâches planifiées RELAIS
+# HEARTBEAT — RELAIS scheduled tasks
 
-Ce fichier définit les tâches CRON exécutées par Le Veilleur.
-Copié dans `~/.relais/config/HEARTBEAT.md` au premier lancement.
+This file defines the CRON tasks executed by the Horloger brick.
+Copied to `~/.relais/config/HEARTBEAT.md` on first launch.
 
-## Format des entrées
+## Entry format
 
 ```
-- cron: "<expression_cron>"
-  task: "<type_tache>"
-  params: { <clé>: <valeur> }
+- cron: "<cron_expression>"
+  task: "<task_type>"
+  params: { <key>: <value> }
   enabled: true|false
 ```
 
-## Tâches actives
+## Active tasks
 
 ```yaml
 tasks:
 
-  # Résumé quotidien envoyé chaque matin à 8h
+  # Daily summary sent every morning at 8 am
   - cron: "0 8 * * *"
     task: daily_summary
     params:
       channel: discord
       llm_profile: default
-      prompt: "Génère un résumé des activités de la journée passée."
+      prompt: "Generate a summary of the previous day's activity."
     enabled: true
 
-  # Sauvegarde hebdomadaire chaque lundi à 3h du matin
+  # Weekly backup every Monday at 3 am
   - cron: "0 3 * * 1"
     task: backup
     params:
@@ -34,7 +34,7 @@ tasks:
       retention_days: 30
     enabled: true
 
-  # Nettoyage des logs anciens — tous les dimanches à 2h
+  # Old log cleanup — every Sunday at 2 am
   - cron: "0 2 * * 0"
     task: cleanup_logs
     params:
@@ -44,6 +44,6 @@ tasks:
 
 ## Notes
 
-- Les expressions CRON suivent la syntaxe standard Unix (5 champs).
-- Le fuseau horaire utilisé est celui de la machine hôte.
-- Désactivez une tâche en passant `enabled: false` sans la supprimer.
+- CRON expressions follow the standard Unix syntax (5 fields).
+- The timezone used is that of the host machine.
+- Disable a task by setting `enabled: false` without deleting it.

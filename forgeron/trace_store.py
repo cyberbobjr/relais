@@ -5,17 +5,16 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from common.config_loader import resolve_storage_dir
+from forgeron.base_store import BaseAsyncStore
 from forgeron.models import SkillTrace
 
 logger = logging.getLogger(__name__)
 
 
-class SkillTraceStore:
+class SkillTraceStore(BaseAsyncStore):
     """Persist and query skill execution traces.
 
     Wraps an async SQLite session backed by ``~/.relais/storage/forgeron.db``
@@ -29,13 +28,8 @@ class SkillTraceStore:
             db_path: Path to the SQLite file.  Defaults to
                 ``~/.relais/storage/forgeron.db``.
         """
-        self._db_path: Path = db_path or (resolve_storage_dir() / "forgeron.db")
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        url = f"sqlite+aiosqlite:///{self._db_path}"
-        self._engine = create_async_engine(url, echo=False)
-        self._session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-            self._engine, class_=AsyncSession, expire_on_commit=False
-        )
+        db_path = db_path or (resolve_storage_dir() / "forgeron.db")
+        super().__init__(db_path)
 
     async def _create_tables(self) -> None:
         """Create all SQLModel-declared tables.
@@ -62,6 +56,3 @@ class SkillTraceStore:
             trace.tool_call_count,
         )
 
-    async def close(self) -> None:
-        """Dispose the async engine and release aiosqlite threads."""
-        await self._engine.dispose()

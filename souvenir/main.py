@@ -39,16 +39,13 @@ Produced:
 
 Configuration hot-reload
 ------------------------
-Souvenir watches souvenir configuration for changes and reloads without
-restarting:
+Souvenir has no YAML configuration file today.  The hot-reload contract
+is implemented (``_load()`` is a no-op) so the interface stays consistent
+with other bricks and can be extended without breaking changes.
 
-* Watched files: souvenir/profiles.yaml (memory extractor model config)
-* Reload trigger: File system change detected via watchfiles library
-* Reload mechanism: safe_reload() performs atomic parse → lock → swap pattern;
-  if new config is invalid YAML, previous config is preserved
-* Redis Pub/Sub channel: relais:config:reload:souvenir (listens for external
-  reload triggers from operator)
-* Config backups: up to 5 versions stored in ~/.relais/config/backups/
+* Redis Pub/Sub channel: relais:config:reload:souvenir (external reload trigger)
+* SQLite schema: initialised automatically at startup via
+  ``SQLModel.metadata.create_all`` — no migration tool required.
 
 Processing flow
 ---------------
@@ -147,10 +144,6 @@ class Souvenir(BrickBase):
         Args:
             redis: Live async Redis connection (unused by Souvenir's startup).
         """
-        await self.log.warning(
-            "Initialising SQLite schema via _create_tables() — "
-            "run 'alembic upgrade head' in production instead."
-        )
         await self._long_term._create_tables()
         await self._file_store._create_tables()
 

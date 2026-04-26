@@ -1,7 +1,7 @@
 import shutil
 import os
 from pathlib import Path
-from .config_loader import get_relais_home
+from .config_loader import get_relais_home, get_relais_project_dir
 
 # Default template files shipped with the system installation
 # Format: (destination_relative_path, source_relative_path_in_system)
@@ -14,7 +14,6 @@ DEFAULT_FILES = [
     ("config/atelier.yaml",                   "config/atelier.yaml.default"),
     ("config/aiguilleur.yaml",                 "config/aiguilleur.yaml.default"),
     ("config/horloger.yaml",                  "config/horloger.yaml.default"),
-    ("config/tui/config.yaml",               "config/tui/config.yaml.default"),
     ("config/HEARTBEAT.md",                   "config/HEARTBEAT.md.default"),
     # Soul personality (Layer 1) — under prompts/ so soul_assembler can find it
     ("prompts/soul/SOUL.md",                         "prompts/soul/SOUL.md.default"),
@@ -39,7 +38,7 @@ def initialize_user_dir(system_install_path: Path | None = None):
             files live.  Defaults to the project root (parent of ``common/``).
     """
     if system_install_path is None:
-        system_install_path = Path(__file__).parent.parent
+        system_install_path = get_relais_project_dir()
     home = get_relais_home()
 
     # Create directory structure
@@ -48,7 +47,6 @@ def initialize_user_dir(system_install_path: Path | None = None):
         "config/atelier",
         "config/atelier/subagents",
         "config/horloger/jobs",
-        "config/tui",
         "prompts/soul/variants",
         "prompts/channels",
         "prompts/policies",
