@@ -21,7 +21,9 @@ Request flow (SSE streaming mode):
     Accept: text/event-stream triggers streaming mode. The handler opens a
     StreamResponse and forwards token chunks from
     relais:messages:streaming:rest:{correlation_id} until the final reply
-    arrives on relais:messages:outgoing:rest.
+    arrives on relais:messages:outgoing:rest. When the is_final sentinel is
+    received but the outgoing envelope is still in transit through Sentinelle,
+    a 5 s grace period is applied before concluding the request timed out.
 
 Background task (_consume_outgoing):
     Reads relais:messages:outgoing:rest via consumer group rest_relay_group

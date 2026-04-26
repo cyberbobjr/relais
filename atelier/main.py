@@ -693,13 +693,23 @@ class Atelier(BrickBase):
         Currently supports a single operation: ``op="compact"`` — triggers a
         conversation history compaction for the given session.
 
+        Profile resolution: reads ``llm_profile`` from ``context["portail"]``
+        of the original user envelope (carried in ``ctrl_ctx["envelope_json"]``)
+        so that ``compact_keep`` and the summarization model match the requesting
+        user's assigned profile.  A per-profile ``AgentExecutor`` cache
+        (``_compact_executors``) avoids recompiling the LangGraph graph on every
+        call; the cache is cleared on config reload.
+
+        On ``compact_session()`` failure the exception is caught and an error
+        reply is published to the user — control messages are always ACKed.
+
         Args:
             envelope: Control envelope published by Commandant.
             redis_conn: Active Redis connection.
 
         Returns:
-            Always ``True`` to ACK the control message (non-fatal failures
-            are logged but never left in the PEL).
+            Always ``True`` to ACK the control message (failures are caught,
+            logged, and reported to the user; never left in the PEL).
         """
         ctrl_ctx: dict = envelope.context.get(CTX_ATELIER_CONTROL, {})
         op: str = ctrl_ctx.get("op", "")

@@ -220,12 +220,14 @@ The `context["atelier_control"]` sub-dict carries the operation parameters:
 
 **`op=compact` behavior**:
 
-1. Atelier reads `compact_keep` from the resolved profile (default: `6`).
-2. Calls `AgentExecutor.compact_session(session_id, user_id, compact_keep)`:
+1. Atelier deserializes the original user envelope from `envelope_json` and reads `llm_profile` from `context["portail"]` (falls back to `"default"`).
+2. Resolves the profile by `llm_profile` (then `"default"`, then first available) and reads `compact_keep` (default: `6`) and model settings from it.
+3. Looks up or creates a per-profile minimal `AgentExecutor` (cached in `_compact_executors[llm_profile]`; cleared on config reload).
+4. Calls `AgentExecutor.compact_session(session_id, user_id, compact_keep)`:
    - Fetches current checkpointer state via `agent.aget_state()`.
    - Returns `None` (no-op) if the session has ≤ `compact_keep` messages.
    - Otherwise: summarizes the oldest `len(messages) − compact_keep` messages via `_DeepAgentsSummarizationMiddleware._acreate_summary()`, builds a single summary `AIMessage`, then writes a `_summarization_event` dict into the LangGraph state via `agent.aupdate_state()`. DeepAgents applies the event on the next agent turn.
-3. Publishes a human-readable confirmation (or no-op notice) to `relais:messages:outgoing_pending` addressed to the original sender.
+5. Publishes a human-readable confirmation, no-op notice, or error message to `relais:messages:outgoing_pending` addressed to the original sender.
 
 **CompactResult** (returned by `compact_session()` on success):
 
@@ -235,7 +237,7 @@ The `context["atelier_control"]` sub-dict carries the operation parameters:
 | `messages_after` | `int` | Message count after compaction (`compact_keep + 1` summary) |
 | `cutoff_index` | `int` | Index of first kept message (`len(messages) − compact_keep`) |
 
-**XACK contract**: Atelier always ACKs (`return True`) control messages, including when `compact_session()` returns `None` (session too short) or raises an exception (non-fatal — logged as WARNING).
+**XACK contract**: Atelier always ACKs (`return True`) control messages. If `compact_session()` raises an exception, the error is caught, logged, and an error reply (`"Compaction failed: …"`) is published to the user — the message is never left in the PEL.
 
 **ACL**: Commandant has write access; Atelier has read access. Defined in `config/redis.conf`.
 
