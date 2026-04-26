@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
@@ -48,7 +49,7 @@ class ForgeonConfig:
     """Seconds to wait for Souvenir BRPOP response when fetching session history."""
 
     # Profiles defined in profiles.yaml — unknown values fall back to "precise".
-    _VALID_PROFILES: frozenset[str] = frozenset(
+    _VALID_PROFILES: ClassVar[frozenset[str]] = frozenset(
         {"default", "fast", "free", "precise", "coder"}
     )
 

@@ -339,10 +339,10 @@ class Atelier(BrickBase):
         self._mcp_tools: list = []
         self._mcp_lock = asyncio.Lock()
 
-        # Cached minimal executor for compact operations — avoids recompiling the
-        # LangGraph graph on every /compact call. Reset to None on config reload so
-        # the next compact picks up the updated profile (e.g. different model).
-        self._compact_executor: AgentExecutor | None = None
+        # Per-profile cache of minimal executors for compact operations — avoids
+        # recompiling the LangGraph graph on every /compact call. Cleared on config
+        # reload so the next compact picks up updated profiles (model changes, etc.).
+        self._compact_executors: dict[str, AgentExecutor] = {}
 
     # ------------------------------------------------------------------
     # BrickBase abstract interface implementation
@@ -498,7 +498,7 @@ class Atelier(BrickBase):
         self._display_config = cfg["display"]
         if "subagent_registry" in cfg:
             self._subagent_registry = cfg["subagent_registry"]
-        self._compact_executor = None  # force rebuild on next compact (profile may have changed)
+        self._compact_executors = {}  # force rebuild on next compact (profiles may have changed)
         logger.info("Atelier: configuration applied")
 
         # Schedule MCP singleton restart if server config changed.
@@ -716,37 +716,55 @@ class Atelier(BrickBase):
             envelope.session_id, user_id, envelope.correlation_id,
         )
 
-        profile = self._profiles.get("default", next(iter(self._profiles.values()), None))
-        compact_keep: int = getattr(profile, "compact_keep", 6)
-
-        if self._compact_executor is None:
-            self._compact_executor = AgentExecutor(
-                profile=profile,
-                memory_paths=[],
-                tools=[],
-                checkpointer=self._checkpointer,
-            )
-        result: CompactResult | None = await self._compact_executor.compact_session(
-            session_id=envelope.session_id,
-            user_id=user_id,
-            compact_keep=compact_keep,
-        )
-
-        if result is not None:
-            reply_text = (
-                f"Conversation compacted: {result.messages_before} → "
-                f"{result.messages_after} messages "
-                f"(kept {compact_keep} recent + 1 summary)."
-            )
-        else:
-            reply_text = "Nothing to compact (session is empty or already within limits)."
-
-        # Publish reply to the original channel so the user receives feedback.
+        # Resolve the originating envelope early to read the user's llm_profile.
         try:
             envelope_json = ctrl_ctx.get("envelope_json", "")
             source_env = Envelope.from_json(envelope_json) if envelope_json else envelope
         except Exception:
             source_env = envelope
+
+        # Honour the requesting user's LLM profile (compact_keep, model).
+        portail_ctx = source_env.context.get(CTX_PORTAIL, {})
+        llm_profile: str = portail_ctx.get("llm_profile", "default")
+        profile = (
+            self._profiles.get(llm_profile)
+            or self._profiles.get("default")
+            or next(iter(self._profiles.values()), None)
+        )
+        compact_keep: int = getattr(profile, "compact_keep", 6)
+
+        reply_text: str
+        try:
+            if llm_profile not in self._compact_executors:
+                self._compact_executors[llm_profile] = AgentExecutor(
+                    profile=profile,
+                    memory_paths=[],
+                    tools=[],
+                    checkpointer=self._checkpointer,
+                )
+            result: CompactResult | None = await self._compact_executors[llm_profile].compact_session(
+                session_id=envelope.session_id,
+                user_id=user_id,
+                compact_keep=compact_keep,
+            )
+            if result is not None:
+                reply_text = (
+                    f"Conversation compacted: {result.messages_before} → "
+                    f"{result.messages_after} messages "
+                    f"(kept {compact_keep} recent + 1 summary)."
+                )
+            else:
+                reply_text = "Nothing to compact (session is empty or already within limits)."
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "[CONTROL] compact_session failed — session=%s corr=%s",
+                envelope.session_id, envelope.correlation_id,
+            )
+            reply_text = f"Compaction failed: {exc}"
+
+        # Publish reply to the original channel so the user receives feedback.
         try:
             reply = Envelope.create_response_to(source_env, reply_text)
             reply.action = ACTION_MESSAGE_OUTGOING_PENDING
