@@ -192,20 +192,16 @@ def test_resolve_deepseek_model_maps_base_url_to_api_base() -> None:
 
 
 @pytest.mark.unit
-def test_resolve_deepseek_model_no_import_falls_back_to_init_chat_model() -> None:
-    """When _ChatDeepSeekReasoningPassback is None, deepseek: falls back to init_chat_model."""
+def test_resolve_deepseek_model_no_import_raises_import_error() -> None:
+    """When langchain_deepseek is absent, deepseek: raises ImportError (no silent fallback)."""
     from atelier.profile_model import _resolve_profile_model
 
-    fake_model = MagicMock()
     profile = _make_profile(model="deepseek:deepseek-chat", api_key_env="DS_KEY")
 
     with patch.dict(os.environ, {"DS_KEY": "sk-fake"}):
         with patch("atelier.profile_model._ChatDeepSeekReasoningPassback", None):
-            with patch("atelier.profile_model.init_chat_model", return_value=fake_model) as mock_init:
-                result = _resolve_profile_model(profile)
-
-    mock_init.assert_called_once()
-    assert result is fake_model
+            with pytest.raises(ImportError, match="langchain_deepseek"):
+                _resolve_profile_model(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -366,3 +362,103 @@ def test_reasoning_passback_returns_unchanged_when_payload_has_no_messages(deeps
         result = deepseek_instance._get_request_payload([HumanMessage(content="Hi")])
 
     assert result is parent_payload
+
+
+# ---------------------------------------------------------------------------
+# Factory pattern — ModelHandler protocol, DeepSeekModelHandler, DefaultModelHandler
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_factory_classes_importable() -> None:
+    """ModelHandler, DeepSeekModelHandler, DefaultModelHandler must be importable."""
+    from atelier.profile_model import (  # noqa: F401
+        DefaultModelHandler,
+        DeepSeekModelHandler,
+        ModelHandler,
+    )
+
+
+@pytest.mark.unit
+def test_handler_registry_importable() -> None:
+    """_HANDLER_REGISTRY must be importable and be a list."""
+    from atelier.profile_model import _HANDLER_REGISTRY
+
+    assert isinstance(_HANDLER_REGISTRY, list)
+    assert len(_HANDLER_REGISTRY) >= 2
+
+
+@pytest.mark.unit
+def test_deepseek_handler_can_handle_deepseek_prefix() -> None:
+    """DeepSeekModelHandler.can_handle returns True for 'deepseek'."""
+    from atelier.profile_model import DeepSeekModelHandler
+
+    handler = DeepSeekModelHandler()
+    assert handler.can_handle("deepseek") is True
+
+
+@pytest.mark.unit
+def test_deepseek_handler_cannot_handle_other_prefixes() -> None:
+    """DeepSeekModelHandler.can_handle returns False for non-deepseek providers."""
+    from atelier.profile_model import DeepSeekModelHandler
+
+    handler = DeepSeekModelHandler()
+    assert handler.can_handle("openai") is False
+    assert handler.can_handle("anthropic") is False
+    assert handler.can_handle("") is False
+
+
+@pytest.mark.unit
+def test_default_handler_can_handle_any_provider() -> None:
+    """DefaultModelHandler.can_handle returns True for any provider string."""
+    from atelier.profile_model import DefaultModelHandler
+
+    handler = DefaultModelHandler()
+    assert handler.can_handle("openai") is True
+    assert handler.can_handle("anthropic") is True
+    assert handler.can_handle("") is True
+    assert handler.can_handle("some-unknown-provider") is True
+
+
+@pytest.mark.unit
+def test_handler_registry_deepseek_before_default() -> None:
+    """_HANDLER_REGISTRY must list DeepSeekModelHandler before DefaultModelHandler."""
+    from atelier.profile_model import (
+        DefaultModelHandler,
+        DeepSeekModelHandler,
+        _HANDLER_REGISTRY,
+    )
+
+    types = [type(h) for h in _HANDLER_REGISTRY]
+    assert DeepSeekModelHandler in types
+    assert DefaultModelHandler in types
+    assert types.index(DeepSeekModelHandler) < types.index(DefaultModelHandler)
+
+
+@pytest.mark.unit
+def test_deepseek_handler_build_raises_import_error_when_lib_absent() -> None:
+    """DeepSeekModelHandler.build raises ImportError when langchain_deepseek is not installed."""
+    from atelier.profile_model import DeepSeekModelHandler
+
+    handler = DeepSeekModelHandler()
+    profile = _make_profile(model="deepseek:deepseek-chat")
+
+    with patch("atelier.profile_model._ChatDeepSeekReasoningPassback", None):
+        with pytest.raises(ImportError, match="langchain_deepseek"):
+            handler.build(profile, {})
+
+
+@pytest.mark.unit
+def test_default_handler_build_calls_init_chat_model() -> None:
+    """DefaultModelHandler.build delegates to init_chat_model with profile.model and base_kwargs."""
+    from atelier.profile_model import DefaultModelHandler
+
+    handler = DefaultModelHandler()
+    profile = _make_profile(model="openai:gpt-4")
+    fake_model = MagicMock()
+
+    with patch("atelier.profile_model.init_chat_model", return_value=fake_model) as mock_init:
+        result = handler.build(profile, {"base_url": "http://localhost"})
+
+    mock_init.assert_called_once_with("openai:gpt-4", base_url="http://localhost")
+    assert result is fake_model

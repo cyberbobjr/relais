@@ -293,7 +293,7 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines a
   2. Sends a user notification to `relais:messages:outgoing_pending` (before BRPOP to avoid any blocking).
   3. Waits for the reply via `_fetch_history_with_retry()` — BRPOP with exponential backoff (max 2 retries, 1s and 2s delays) to handle Souvenir being slow. On timeout, processing is skipped gracefully.
   4. If history arrives, publishes an `ACTION_MESSAGE_TASK` to `relais:tasks` with `force_subagent="skill-designer"` and correction data in `context["forgeron"]` (`corrected_behavior`, `history_turns`, optional `skill_name_hint`).
-- The `skill-designer` native subagent (Atelier) receives this data and generates a revised SKILL.md via the `WriteSkillTool`.
+- The `skill-designer` native subagent (Atelier) receives this data and generates a revised SKILL.md via the `WriteSkillTool`. `WriteSkillTool` enforces a flat-layout constraint: skills must be direct children of `$RELAIS_HOME/skills/` or of a bundle's `skills/` directory — nested subdirectories are rejected because `ToolPolicy` only scans one level deep.
 
 **SQLite files** (in `~/.relais/storage/forgeron.db`):
 

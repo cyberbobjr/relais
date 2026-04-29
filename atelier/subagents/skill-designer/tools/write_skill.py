@@ -7,6 +7,13 @@ by the subagent.
 Security: the skill name is validated against the agentskills.io name rules
 before any file-system operation.  Path traversal is blocked by rejecting
 names that contain slashes, dots, or other special characters.
+
+Placement constraint: every skill must be a **direct child** of the skills root
+(``$RELAIS_HOME/skills/<skill-name>/``) or of a bundle's ``skills/`` directory
+(``~/.relais/bundles/<bundle>/skills/<skill-name>/``).  Nested paths are
+rejected because ``ToolPolicy`` only scans one level deep and would never load
+them.  When ``skill_path`` is not supplied the tool places the skill under the
+skills root automatically.
 """
 
 from __future__ import annotations
