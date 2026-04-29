@@ -389,6 +389,22 @@ def test_handler_registry_importable() -> None:
 
 
 @pytest.mark.unit
+def test_deepseek_handler_always_instantiate_is_true() -> None:
+    """DeepSeekModelHandler.always_instantiate must be True."""
+    from atelier.profile_model import DeepSeekModelHandler
+
+    assert DeepSeekModelHandler.always_instantiate is True
+
+
+@pytest.mark.unit
+def test_default_handler_always_instantiate_is_false() -> None:
+    """DefaultModelHandler.always_instantiate must be False."""
+    from atelier.profile_model import DefaultModelHandler
+
+    assert DefaultModelHandler.always_instantiate is False
+
+
+@pytest.mark.unit
 def test_deepseek_handler_can_handle_deepseek_prefix() -> None:
     """DeepSeekModelHandler.can_handle returns True for 'deepseek'."""
     from atelier.profile_model import DeepSeekModelHandler

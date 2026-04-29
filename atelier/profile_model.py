@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 from langchain.chat_models import BaseChatModel, init_chat_model
 
@@ -64,21 +64,20 @@ except ImportError:
     _ChatDeepSeekReasoningPassback = None  # type: ignore[assignment,misc]
 
 
-@runtime_checkable
 class ModelHandler(Protocol):
     """Protocol for provider-specific model instantiation."""
 
-    def can_handle(self, provider: str) -> bool:
-        """Return True if this handler manages the given provider prefix."""
-        ...
+    always_instantiate: bool
 
-    def build(self, profile: ProfileConfig, base_kwargs: dict[str, Any]) -> BaseChatModel:
-        """Instantiate and return a BaseChatModel for the given profile."""
-        ...
+    def can_handle(self, provider: str) -> bool: ...
+
+    def build(self, profile: ProfileConfig, base_kwargs: dict[str, Any]) -> BaseChatModel: ...
 
 
 class DeepSeekModelHandler:
     """Handler for the ``deepseek:`` provider prefix."""
+
+    always_instantiate = True
 
     def can_handle(self, provider: str) -> bool:
         return provider == "deepseek"
@@ -89,16 +88,17 @@ class DeepSeekModelHandler:
                 "langchain_deepseek is required for deepseek: models. "
                 "Install it with: pip install langchain-deepseek"
             )
-        model_name = profile.model.split(":", 1)[1]
-        kwargs = dict(base_kwargs)
-        base_url = kwargs.pop("base_url", None)
+        model_name = profile.model.partition(":")[2]
+        base_url = base_kwargs.pop("base_url", None)
         if base_url is not None:
-            kwargs["api_base"] = base_url
-        return _ChatDeepSeekReasoningPassback(model=model_name, **kwargs)
+            base_kwargs["api_base"] = base_url
+        return _ChatDeepSeekReasoningPassback(model=model_name, **base_kwargs)
 
 
 class DefaultModelHandler:
     """Catch-all handler that delegates to ``init_chat_model`` for all providers."""
+
+    always_instantiate = False
 
     def can_handle(self, provider: str) -> bool:
         return True
@@ -124,8 +124,9 @@ def _resolve_profile_model(
     and accepts any provider, so dispatch never falls through.
 
     Returns the model string directly when no special handling is needed
-    (no base_url, api_key_env, parallel_tool_calls, max_tokens, and not a
-    deepseek: model).  Otherwise builds and returns a ``BaseChatModel``.
+    (no base_url, api_key_env, parallel_tool_calls, max_tokens, and the
+    handler does not require instantiation).  Otherwise builds and returns
+    a ``BaseChatModel``.
 
     Args:
         profile: The resolved ProfileConfig for the current envelope.
@@ -139,9 +140,11 @@ def _resolve_profile_model(
         KeyError: api_key_env is set but the environment variable is absent.
         ImportError: A provider-specific library is required but not installed.
     """
-    provider = profile.model.split(":", 1)[0] if ":" in profile.model else ""
+    provider = profile.model.partition(":")[0]
+    handler = next(h for h in _HANDLER_REGISTRY if h.can_handle(provider))
+
     needs_init = (
-        provider == "deepseek"
+        handler.always_instantiate
         or profile.base_url is not None
         or profile.api_key_env is not None
         or profile.parallel_tool_calls is not None
@@ -166,5 +169,4 @@ def _resolve_profile_model(
     if profile.parallel_tool_calls is not None:
         base_kwargs.setdefault("model_kwargs", {})["parallel_tool_calls"] = profile.parallel_tool_calls
 
-    handler = next(h for h in _HANDLER_REGISTRY if h.can_handle(provider))
     return handler.build(profile, base_kwargs)
