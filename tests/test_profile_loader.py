@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from common.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
-from atelier.agent_executor import _resolve_profile_model
+from atelier.profile_model import _resolve_profile_model
 
 # Path to the actual project default profiles file (used for integration-style tests
 # that must verify the shipped configuration, not a fixture YAML).
@@ -687,7 +687,7 @@ def test_resolve_profile_model_returns_string_when_no_overrides() -> None:
     profile = ProfileConfig(
         model="anthropic:claude-haiku-4-5",
         temperature=0.5,
-        max_tokens=512,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url=None,
         api_key_env=None,
@@ -713,7 +713,7 @@ def test_resolve_profile_model_calls_init_chat_model_with_base_url(tmp_path: Pat
     profile = ProfileConfig(
         model="openai:my-local-model",
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url="http://localhost:1234/v1",
         api_key_env=None,
@@ -742,7 +742,7 @@ def test_resolve_profile_model_reads_api_key_from_env(monkeypatch: pytest.Monkey
     profile = ProfileConfig(
         model="anthropic:claude-haiku-4-5",
         temperature=0.7,
-        max_tokens=512,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url=None,
         api_key_env="MY_PROVIDER_KEY",
@@ -894,7 +894,7 @@ def test_resolve_profile_model_passes_model_kwargs_when_parallel_tool_calls_set(
     profile = ProfileConfig(
         model="openai:mistral-medium-3.1",
         temperature=0.7,
-        max_tokens=2048,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url="http://openrouter.ai/api/v1",
         api_key_env=None,
@@ -927,7 +927,7 @@ def test_resolve_profile_model_calls_init_when_only_parallel_tool_calls_set() ->
     profile = ProfileConfig(
         model="openai:mistral-medium-3.1",
         temperature=0.7,
-        max_tokens=2048,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url=None,
         api_key_env=None,
@@ -963,7 +963,7 @@ def test_resolve_profile_model_no_model_kwargs_when_parallel_tool_calls_none(
     profile = ProfileConfig(
         model="openai:my-local-model",
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url="http://localhost:1234/v1",
         api_key_env=None,

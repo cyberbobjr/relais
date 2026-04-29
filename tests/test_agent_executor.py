@@ -299,6 +299,61 @@ async def test_execute_streaming_flushes_at_threshold() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_execute_streaming_flushes_buffer_on_tool_call_start() -> None:
+    """Buffer is flushed immediately when a tool call name is detected.
+
+    Pre-tool narration (below threshold) must reach the callback before the
+    tool runs, not only at the end of the full agent turn.
+    Uses DisplayConfig(final_only=False) so tokens flow through StreamBuffer.
+    """
+    from atelier.agent_executor import AgentExecutor
+    from atelier.display_config import DisplayConfig
+    from atelier.streaming import STREAM_BUFFER_CHARS
+
+    pre_tool_text = "X" * (STREAM_BUFFER_CHARS - 1)  # stays buffered without the fix
+
+    flush_order: list[str] = []  # track when callback is called vs "tool_started"
+
+    async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
+        # Root agent produces text below threshold
+        yield _v2_chunk("messages", (), (_ai_token(pre_tool_text), {}))
+        # Root agent calls a tool — name chunk triggers flush
+        yield _v2_chunk("messages", (), (_ai_token("", [{"name": "task", "args": ""}]), {}))
+        # No more tokens after the tool call (sub-agent would normally run here)
+
+    mock_agent = MagicMock()
+    mock_agent.astream = fake_astream
+    mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
+
+    async def callback(chunk: str) -> None:
+        flush_order.append(f"flush:{chunk}")
+
+    async def progress(event: str, detail: str) -> None:
+        if event == "tool_call":
+            flush_order.append("tool_started")
+
+    with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
+        executor = AgentExecutor(
+            profile=_make_profile(),
+            memory_paths=[],
+            tools=[],
+            display_config=DisplayConfig(final_only=False),
+        )
+        await executor.execute(
+            _make_envelope("Hi"), stream_callback=callback, progress_callback=progress,
+        )
+
+    # The callback must fire before "tool_started", not after.
+    assert f"flush:{pre_tool_text}" in flush_order, "pre-tool text was never flushed"
+    flush_idx = flush_order.index(f"flush:{pre_tool_text}")
+    tool_idx = flush_order.index("tool_started")
+    assert flush_idx < tool_idx, (
+        f"buffer flush (idx={flush_idx}) must precede tool_started (idx={tool_idx})"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_execute_streaming_skips_empty_content_chunks() -> None:
     """Chunks with empty or list content (e.g. tool_use blocks) are ignored."""
     from atelier.agent_executor import AgentExecutor

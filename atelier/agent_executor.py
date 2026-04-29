@@ -35,6 +35,7 @@ from atelier.streaming import (
     TaskArgsTracker,
     decode_chunk,
     _normalise_content,
+    _has_named_tool_call_start,
     _EXECUTE_FAILURE_MARKER,
     REPLY_PLACEHOLDER,
 )
@@ -74,7 +75,6 @@ __all__ = [
     "DIAGNOSTIC_MARKER",
     "REPLY_PLACEHOLDER",
     "_is_transient_provider_error",
-    "_resolve_profile_model",
     "_DIAGNOSTIC_MAX_CHARS",
 ]
 from common.contexts import CTX_AIGUILLEUR, CTX_PORTAIL, AiguilleurCtx, PortailCtx
@@ -629,6 +629,8 @@ class AgentExecutor:
                         )
                     elif chunk.chunk_type == "messages":
                         token, _metadata = chunk.data
+                        if _has_named_tool_call_start(token):
+                            await buf.flush()
                         state = await handle_tool_call_chunks(
                             token=token, source=chunk.source, state=state, tracker=tracker,
                             final_only=self._display.final_only, progress_callback=progress_callback,
