@@ -181,8 +181,9 @@ class TestWriteSkillToolWithSkillPath:
 
     def test_run_uses_explicit_skill_path(self, tmp_path: Path) -> None:
         tool = _ws_mod.WriteSkillTool()
-        bundles_root = tmp_path / "bundle"
-        bundle_skill_dir = bundles_root / "skills" / "my-skill"
+        bundles_root = tmp_path / "bundles"
+        # Real bundle layout: <bundles_root>/<bundle-name>/skills/<skill-name>
+        bundle_skill_dir = bundles_root / "my-bundle" / "skills" / "my-skill"
         bundle_skill_dir.mkdir(parents=True)
 
         with patch.object(_ws_mod, "resolve_bundles_dir", return_value=bundles_root), \

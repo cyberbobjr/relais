@@ -100,14 +100,29 @@ class WriteSkillTool(BaseTool):
 
         if skill_path is not None:
             resolved = Path(skill_path).expanduser().resolve()
-            allowed_roots = (
-                resolve_skills_dir().resolve(),
-                resolve_bundles_dir().resolve(),
-            )
+            skills_root = resolve_skills_dir().resolve()
+            bundles_root = resolve_bundles_dir().resolve()
+            allowed_roots = (skills_root, bundles_root)
             if not any(resolved == r or resolved.is_relative_to(r) for r in allowed_roots):
                 msg = (
                     f"skill_path '{skill_path}' is outside allowed directories "
                     f"(skills or bundles). Write refused."
+                )
+                logger.warning("WriteSkillTool: %s", msg)
+                return f"ERROR: {msg}"
+            # Depth check: skills must be direct children of the skills root or of
+            # <bundles_root>/<bundle>/skills/ — nested subdirectories are never loaded
+            # by ToolPolicy (iterdir() is one level only).
+            is_local = resolved.parent == skills_root
+            is_bundle = (
+                resolved.parent.name == "skills"
+                and resolved.parent.parent.parent == bundles_root
+            )
+            if not (is_local or is_bundle):
+                msg = (
+                    f"skill_path '{skill_path}' must be a direct child of the skills "
+                    "directory or of a bundle's skills/ directory. "
+                    "Nested skill directories are not supported (ToolPolicy only scans one level)."
                 )
                 logger.warning("WriteSkillTool: %s", msg)
                 return f"ERROR: {msg}"

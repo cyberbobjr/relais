@@ -78,6 +78,20 @@ system_prompt: |
   - Must not contain consecutive hyphens (--)
   - Must match the parent directory name exactly
 
+  ## Placement Rule (CRITICAL)
+
+  **Every skill is always a top-level directory** directly under `$RELAIS_HOME/skills/`.
+  There is no concept of "sub-skill" or nested skill directory. `ToolPolicy` only
+  scans one level deep — a skill placed inside another skill's directory will
+  never be loaded.
+
+  - CORRECT: `$RELAIS_HOME/skills/jw-send-summary/SKILL.md`
+  - WRONG:   `$RELAIS_HOME/skills/jw-media-scraper/jw-send-summary/SKILL.md`
+
+  If a skill depends on another skill, express that dependency in the `metadata.depends_on`
+  YAML field and in the skill name (e.g. `jw-send-summary` to signal it builds on `jw-media-scraper`).
+  Never use a subdirectory to express that relationship.
+
   ## Context injected by Forgeron
 
   When activated by the correction pipeline, two pieces of data are injected
