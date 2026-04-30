@@ -1270,6 +1270,20 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-mcp-adapters"
+version = "0.1.14"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "mcp" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/36/0179462acf344ad18cf6d7190b7a6797e015386a3b4518fcd960bb831c61/langchain_mcp_adapters-0.1.14.tar.gz", hash = "sha256:36f8131d0b3b5ca28df03440be4dc2a3636e2f73e3e4a0a266d606ffaa12adda", size = 31119, upload-time = "2025-11-24T15:00:54.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/e0/eee23ea4d651d2b2dd5b1a5e1b7f66ee212940a595917a280663d5f745b9/langchain_mcp_adapters-0.1.14-py3-none-any.whl", hash = "sha256:b900d37d1a82261e408e663b7176a1a74cf0072e17ae9e4241c068093912394a", size = 21133, upload-time = "2025-11-24T15:00:53.569Z" },
+]
+
+[[package]]
 name = "langchain-mistralai"
 version = "1.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2380,6 +2394,7 @@ dependencies = [
     { name = "deepagents" },
     { name = "discord-py" },
     { name = "langchain-deepseek" },
+    { name = "langchain-mcp-adapters" },
     { name = "langchain-mistralai" },
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
@@ -2422,6 +2437,7 @@ requires-dist = [
     { name = "deepagents", specifier = ">=0.5.3" },
     { name = "discord-py", specifier = ">=2.0" },
     { name = "langchain-deepseek", specifier = ">=1.0.1" },
+    { name = "langchain-mcp-adapters", specifier = ">=0.1.0,<0.2.0" },
     { name = "langchain-mistralai", specifier = ">=1.1.2" },
     { name = "langchain-ollama", specifier = ">=1.0.1" },
     { name = "langchain-openai", specifier = ">=1.1.12" },
