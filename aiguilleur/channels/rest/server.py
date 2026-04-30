@@ -44,9 +44,11 @@ from aiohttp import web
 
 from common.contexts import CTX_AIGUILLEUR
 from common.envelope import Envelope, MediaRef
-from common.envelope_actions import ACTION_MESSAGE_INCOMING
+from common.envelope_actions import ACTION_CATALOG_QUERY, ACTION_MESSAGE_INCOMING
 from common.streams import (
+    STREAM_COMMANDANT_QUERY,
     STREAM_INCOMING,
+    key_commandant_catalog,
     stream_streaming,
 )
 
@@ -301,6 +303,43 @@ _OPENAPI_SPEC: dict = {
                             }
                         },
                     },
+                },
+            }
+        },
+        "/commands": {
+            "get": {
+                "summary": "List available slash commands",
+                "operationId": "getCommands",
+                "security": [{"bearerAuth": []}],
+                "description": (
+                    "Returns the registered command catalog via an async CQRS query to Commandant. "
+                    "No ACL filtering — Sentinelle enforces authorization at submission time."
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Command catalog",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "commands": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "name": {"type": "string", "example": "clear"},
+                                                    "description": {"type": "string"},
+                                                },
+                                            },
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "401": {"description": "Unauthorized"},
+                    "503": {"description": "Commandant did not respond in time"},
                 },
             }
         },
@@ -647,6 +686,50 @@ def create_app(
 
         return web.json_response(response_body)
 
+    async def get_commands(request: web.Request) -> web.Response:
+        """Handle GET /v1/commands — return the registered slash-command catalog.
+
+        Publishes a CQRS query to relais:commandant:query and waits for Commandant
+        to respond via BRPOP on a per-request key (TTL 30 s).
+
+        No ACL filtering: Sentinelle enforces authorization at submission time.
+        Showing an unauthorized command in auto-complete is acceptable UX.
+
+        Args:
+            request: Authenticated incoming request (user_record set by middleware).
+
+        Returns:
+            200 JSON ``{"commands": [{"name": str, "description": str}, ...]}``.
+            503 JSON ``{"error": "..."}`` when Commandant does not respond in time.
+        """
+        user_record = request.get("user_record")
+        user_id = user_record.user_id if user_record else "anonymous"
+        correlation_id = str(uuid.uuid4())
+
+        envelope = Envelope(
+            content="catalog_query",
+            sender_id=f"rest:{user_id}",
+            channel=_CHANNEL,
+            session_id=correlation_id,
+            correlation_id=correlation_id,
+            action=ACTION_CATALOG_QUERY,
+        )
+
+        await redis_conn.xadd(STREAM_COMMANDANT_QUERY, {"payload": envelope.to_json()})
+
+        response_key = key_commandant_catalog(correlation_id)
+        result = await redis_conn.brpop(response_key, timeout=5)
+
+        if result is None:
+            logger.warning("Catalog query timed out corr=%s", correlation_id[:8])
+            return web.json_response(
+                {"error": "Command catalog not available (timeout)"},
+                status=503,
+            )
+
+        _, payload = result
+        return web.json_response(json.loads(payload))
+
     # --- App assembly ---
     # Auth middleware only applies to routes that need it
     app = web.Application(middlewares=[options_middleware, cors_middleware])
@@ -676,6 +759,7 @@ def create_app(
     api_app.router.add_post("/messages", post_message)
     api_app.router.add_get("/history", get_history)
     api_app.router.add_get("/events", events_handler)
+    api_app.router.add_get("/commands", get_commands)
     if push_registry is not None:
         api_app["_push_registry"] = push_registry
     app.add_subapp("/v1", api_app)

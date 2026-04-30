@@ -165,6 +165,8 @@ async def test_atelier_passes_stream_callback_when_envelope_streaming_true() -> 
     profile_mock = MagicMock()
     profile_mock.model = "anthropic:claude-sonnet-4-6"
     profile_mock.max_turns = 5
+    profile_mock.max_turn_seconds = 300
+    profile_mock.shell_timeout_seconds = 30
     atelier._profiles = {"default": profile_mock}
 
     from common.envelope_actions import ACTION_MESSAGE_INCOMING
@@ -257,6 +259,8 @@ async def test_atelier_passes_no_stream_callback_when_envelope_streaming_false()
     profile_mock = MagicMock()
     profile_mock.model = "anthropic:claude-sonnet-4-6"
     profile_mock.max_turns = 5
+    profile_mock.max_turn_seconds = 300
+    profile_mock.shell_timeout_seconds = 30
     atelier._profiles = {"default": profile_mock}
 
     from common.envelope_actions import ACTION_MESSAGE_INCOMING

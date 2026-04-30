@@ -2,6 +2,7 @@
 
 Phase 1: DLQ failure trace must include exc.messages_raw (not empty []).
 Phase 3: ToolErrorGuard max_total raised to 8; self-diagnosis prompt in system prompt.
+Phase 3b: AgentExecutionError carries subagent_traces; DLQ path publishes per-subagent traces.
 
 TDD RED phase — tests written before implementation.
 """
@@ -133,6 +134,8 @@ async def test_dlq_trace_includes_messages_raw_from_exception() -> None:
     profile_mock = MagicMock()
     profile_mock.model = "test:model"
     profile_mock.max_turns = 10
+    profile_mock.max_turn_seconds = 300
+    profile_mock.shell_timeout_seconds = 30
 
     mock_saver = MagicMock()
     mock_saver_cls = MagicMock()
@@ -306,4 +309,174 @@ def test_core_system_prompt_contains_self_diagnosis() -> None:
     )
     assert "SKILL.md" in prompt or "skill" in prompt.lower(), (
         "Self-diagnosis instructions must reference SKILL.md or skills."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b — DLQ path must publish per-subagent skill traces
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_agent_execution_error_accepts_subagent_traces() -> None:
+    """AgentExecutionError must accept and store a subagent_traces kwarg."""
+    from atelier.agent_executor import AgentExecutionError, SubagentTrace
+
+    sa_trace = SubagentTrace(
+        subagent_name="mail-agent",
+        skill_names=["mail-skills"],
+        tool_call_count=3,
+        tool_error_count=2,
+        messages_raw=[{"role": "ai", "content": "I'll use himalaya"}],
+    )
+    exc = AgentExecutionError(
+        "5 tool errors",
+        tool_call_count=5,
+        tool_error_count=5,
+        messages_raw=[],
+        subagent_traces=(sa_trace,),
+    )
+
+    assert len(exc.subagent_traces) == 1
+    assert exc.subagent_traces[0].subagent_name == "mail-agent"
+    assert exc.subagent_traces[0].skill_names == ["mail-skills"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dlq_publishes_subagent_traces_from_exception() -> None:
+    """When AgentExecutionError carries subagent_traces, Site C must publish
+    one STREAM_SKILL_TRACE entry per subagent trace — in addition to the
+    parent failure trace.
+
+    This is required so Forgeron can correlate sub-agent skill bugs
+    with the top-level failure.
+    """
+    from atelier.agent_executor import AgentExecutionError, SubagentTrace
+    from common.envelope import Envelope
+    from common.streams import STREAM_SKILL_TRACE
+    from common.contexts import CTX_PORTAIL
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
+
+    sa_trace = SubagentTrace(
+        subagent_name="mail-agent",
+        skill_names=["mail-skills"],
+        tool_call_count=3,
+        tool_error_count=3,
+        messages_raw=[{"role": "ai", "content": "trying himalaya"}],
+    )
+
+    exc = AgentExecutionError(
+        "8 total tool errors exceeded limit",
+        tool_call_count=8,
+        tool_error_count=8,
+        messages_raw=[{"role": "human", "content": "send an email"}],
+        subagent_traces=(sa_trace,),
+    )
+
+    envelope = Envelope(
+        content="send an email",
+        sender_id="discord:123",
+        channel="discord",
+        session_id="sess-1",
+        correlation_id="corr-sa-dlq-test",
+        action=ACTION_MESSAGE_INCOMING,
+        context={CTX_PORTAIL: {
+            "user_record": {"skills_dirs": ["*"]},
+            "llm_profile": "default",
+        }},
+    )
+
+    redis_conn = AsyncMock()
+    redis_conn.xadd = AsyncMock(return_value="0-0")
+    redis_conn.xack = AsyncMock()
+    redis_conn.publish = AsyncMock()
+    redis_conn.xgroup_create = AsyncMock(side_effect=Exception("BUSYGROUP"))
+
+    from atelier.main import Atelier
+
+    profile_mock = MagicMock()
+    profile_mock.model = "test:model"
+    profile_mock.max_turns = 10
+    profile_mock.max_turn_seconds = 300
+    profile_mock.shell_timeout_seconds = 30
+
+    mock_saver = MagicMock()
+    mock_saver_cls = MagicMock()
+    mock_saver_cls.from_conn_string.return_value = mock_saver
+
+    with (
+        patch("atelier.main.load_profiles", return_value={"default": profile_mock}),
+        patch("atelier.main.load_for_sdk", return_value={}),
+        patch("atelier.main.resolve_profile", return_value=profile_mock),
+        patch("atelier.main.AsyncSqliteSaver", new=mock_saver_cls),
+    ):
+        atelier = Atelier()
+
+    with (
+        patch("atelier.main.AgentExecutor") as MockExecutor,
+        patch("atelier.main.McpSessionManager") as MockMcpMgr,
+        patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("atelier.main.resolve_profile", return_value=profile_mock),
+        patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)),
+        patch("atelier.main.load_for_sdk", return_value={}),
+        patch("atelier.main.ErrorSynthesizer") as MockSynth,
+    ):
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(side_effect=exc)
+        MockExecutor.return_value = mock_instance
+
+        mock_mgr = AsyncMock()
+        mock_mgr.start_all = AsyncMock()
+        MockMcpMgr.return_value = mock_mgr
+
+        mock_synth = AsyncMock()
+        mock_synth.synthesize = AsyncMock(return_value="Sorry, error.")
+        MockSynth.return_value = mock_synth
+
+        import tempfile, os
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = os.path.join(tmp, "mail-skills")
+            os.makedirs(skill_dir)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+                f.write("# mail-skills\n")
+            atelier._skills_base_dir = Path(tmp)
+
+            import asyncio
+
+            redis_conn.xreadgroup = AsyncMock(side_effect=[
+                [("relais:tasks", [("1-0", {"payload": envelope.to_json()})])],
+                asyncio.CancelledError(),
+            ])
+
+            try:
+                await atelier._run_stream_loop(
+                    atelier.stream_specs()[0], redis_conn, asyncio.Event()
+                )
+            except asyncio.CancelledError:
+                pass
+
+    trace_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == STREAM_SKILL_TRACE
+    ]
+    assert len(trace_calls) == 2, (
+        f"Expected 2 STREAM_SKILL_TRACE calls (parent + 1 subagent), "
+        f"got {len(trace_calls)}. All xadd targets: "
+        f"{[c.args[0] for c in redis_conn.xadd.await_args_list]}"
+    )
+
+    # Find the subagent-specific trace (subagent_name="mail-agent")
+    sa_trace_calls = [
+        c for c in trace_calls
+        if json.loads(c.args[1]["payload"])["context"]["skill_trace"].get("subagent_name") == "mail-agent"
+    ]
+    assert len(sa_trace_calls) == 1, (
+        "Expected exactly 1 subagent trace with subagent_name='mail-agent'"
+    )
+    sa_payload = json.loads(sa_trace_calls[0].args[1]["payload"])
+    sa_ctx = sa_payload["context"]["skill_trace"]
+    assert sa_ctx["messages_raw"] == [{"role": "ai", "content": "trying himalaya"}], (
+        "Subagent trace must include the subagent's messages_raw from exc.subagent_traces"
     )

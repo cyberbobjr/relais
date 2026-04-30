@@ -47,6 +47,11 @@ try:
                 return payload  # best-effort: don't break the call on edge inputs
             if len(messages) != len(payload_messages):
                 return payload  # alignment broken, skip injection
+
+            # Pass 1 — inject reasoning_content for messages that carry it.
+            # Track whether any assistant turn received the field so Pass 2 knows
+            # whether to back-fill diagnostic AIMessages that lack additional_kwargs.
+            any_thinking = False
             for msg, msg_dict in zip(messages, payload_messages):
                 if (
                     msg_dict.get("role") == "assistant"
@@ -58,6 +63,17 @@ try:
                     msg_dict["reasoning_content"] = msg.additional_kwargs[
                         "reasoning_content"
                     ]
+                    any_thinking = True
+
+            # Pass 2 — once thinking mode is active, ALL assistant turns must echo
+            # reasoning_content.  Diagnostic messages injected by inject_diagnostic_message
+            # (AIMessage without additional_kwargs) would otherwise cause DeepSeek to return
+            # 400 "reasoning_content must be passed back" on the very next turn.
+            if any_thinking:
+                for msg_dict in payload_messages:
+                    if msg_dict.get("role") == "assistant":
+                        msg_dict.setdefault("reasoning_content", "")
+
             return payload
 
 except ImportError:

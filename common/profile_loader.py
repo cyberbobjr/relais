@@ -78,6 +78,14 @@ class ProfileConfig:
         compact_keep: Number of recent messages to preserve when compacting
             session history via /compact. Messages older than the keep window
             are replaced by a summary. Default 6.
+        shell_timeout_seconds: Wall-clock timeout in seconds applied to every
+            shell tool execution (LocalShellBackend.execute). Prevents interactive
+            commands or hung processes from blocking the agent indefinitely.
+            Default 30.
+        max_turn_seconds: Wall-clock timeout in seconds for the entire agentic
+            turn (agent_executor.execute). When exceeded the turn is aborted,
+            a failure trace is published for Forgeron, and an error reply is
+            sent to the user. 0 disables the timeout. Default 300.
     """
 
     model: str
@@ -92,6 +100,8 @@ class ProfileConfig:
     mcp_max_tools: int = 20
     parallel_tool_calls: bool | None = None
     compact_keep: int = 6
+    shell_timeout_seconds: int = 30
+    max_turn_seconds: int = 300
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +186,8 @@ def load_profiles(
             mcp_max_tools=int(cfg.get("mcp_max_tools", 20)),
             parallel_tool_calls=parallel_tool_calls,
             compact_keep=int(cfg.get("compact_keep", 6)),
+            shell_timeout_seconds=int(cfg.get("shell_timeout_seconds", 30)),
+            max_turn_seconds=int(cfg.get("max_turn_seconds", 300)),
         )
 
     return result

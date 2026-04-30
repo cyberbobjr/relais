@@ -101,9 +101,9 @@ async def test_sessions_handler_formats_list():
     payload_json = call_args[0][1]["payload"]
     published = Envelope.from_json(payload_json)
 
-    assert "Sessions disponibles" in published.content
-    assert "3 tours" in published.content or "3 turn" in published.content
-    assert "7 tours" in published.content or "7 turn" in published.content
+    assert "Available sessions" in published.content
+    assert "3 turns" in published.content
+    assert "7 turns" in published.content
     assert "/resume" in published.content
 
 
@@ -128,7 +128,7 @@ async def test_sessions_handler_empty():
     payload_json = call_args[0][1]["payload"]
     published = Envelope.from_json(payload_json)
 
-    assert "Aucune session" in published.content
+    assert "No sessions found" in published.content
 
 
 @pytest.mark.asyncio

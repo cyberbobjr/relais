@@ -47,3 +47,6 @@ ACTION_HORLOGER_TRIGGER = "horloger.trigger"
 
 # Atelier control operations (Commandant → Atelier via relais:atelier:control)
 ACTION_ATELIER_COMPACT = "atelier.compact"
+
+# Catalog query (any adapter → Commandant via relais:commandant:query)
+ACTION_CATALOG_QUERY = "catalog.query"

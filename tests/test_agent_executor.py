@@ -597,6 +597,47 @@ def test_executor_defaults_skills_to_empty_list() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 — _HtmlSafeShellBackend shell_timeout auto-injection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_html_safe_shell_backend_auto_applies_stored_timeout() -> None:
+    """_HtmlSafeShellBackend must forward the stored shell_timeout on every execute() call.
+
+    After construction with shell_timeout=42, every call to .execute() must pass
+    timeout=42 to LocalShellBackend.execute — even when the caller omits timeout.
+    """
+    from atelier.agent_executor import _HtmlSafeShellBackend
+
+    with patch("atelier.agent_executor.LocalShellBackend.__init__", return_value=None), \
+         patch("atelier.agent_executor.LocalShellBackend.execute", return_value="") as mock_exec:
+        backend = _HtmlSafeShellBackend(shell_timeout=42)
+        backend.execute("echo hello")
+
+    mock_exec.assert_called_once()
+    kwargs = mock_exec.call_args.kwargs
+    assert kwargs.get("timeout") == 42
+
+
+@pytest.mark.unit
+def test_html_safe_shell_backend_no_timeout_when_none() -> None:
+    """When shell_timeout=None, _HtmlSafeShellBackend passes timeout=None to super().
+
+    A stored None means no wall-clock limit on shell commands.
+    """
+    from atelier.agent_executor import _HtmlSafeShellBackend
+
+    with patch("atelier.agent_executor.LocalShellBackend.__init__", return_value=None), \
+         patch("atelier.agent_executor.LocalShellBackend.execute", return_value="") as mock_exec:
+        backend = _HtmlSafeShellBackend(shell_timeout=None)
+        backend.execute("echo hello")
+
+    kwargs = mock_exec.call_args.kwargs
+    assert kwargs.get("timeout") is None
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 — checkpointer= parameter (Phase 1 migration)
 # ---------------------------------------------------------------------------
 

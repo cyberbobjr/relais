@@ -4,8 +4,14 @@ import type { Config } from "./config.ts";
 const MESSAGES_PATH = "/v1/messages";
 const HEALTHZ_PATH = "/healthz";
 const HISTORY_PATH = "/v1/history";
+const COMMANDS_PATH = "/v1/commands";
 
 export type { SSEEvent, DoneEvent };
+
+export interface CommandEntry {
+  name: string;
+  description: string;
+}
 
 export class RelaisClient {
   readonly baseUrl: string;
@@ -135,6 +141,16 @@ export class RelaisClient {
       clearTimeout(timer);
       reader?.releaseLock();
     }
+  }
+
+  async getCommands(): Promise<CommandEntry[]> {
+    const resp = await this.fetch(COMMANDS_PATH, {
+      method: "GET",
+      headers: this.authHeaders(),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = (await resp.json()) as { commands?: CommandEntry[] };
+    return data.commands ?? [];
   }
 
   async fetchHistory(sessionId: string, limit = 50): Promise<Array<{ user_content: string; assistant_content: string }>> {

@@ -351,6 +351,45 @@ def test_reasoning_passback_returns_unchanged_on_convert_input_error(deepseek_in
 
 
 @pytest.mark.unit
+def test_reasoning_passback_fills_missing_reasoning_in_thinking_mode(deepseek_instance) -> None:
+    """When session has thinking-mode messages, assistant messages without reasoning_content
+    (e.g. diagnostic AIMessages from inject_diagnostic_message) must receive reasoning_content=''
+    to satisfy DeepSeek's contract that all assistant turns echo reasoning_content."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_deepseek import ChatDeepSeek
+
+    messages = [
+        HumanMessage(content="Turn 1"),
+        AIMessage(content="Thinking reply", additional_kwargs={"reasoning_content": "thoughts"}),
+        HumanMessage(content="Turn 2"),
+        AIMessage(content="Diagnostic error message"),  # no reasoning_content — injected by inject_diagnostic_message
+        HumanMessage(content="Turn 3"),
+    ]
+    parent_payload = {
+        "messages": [
+            {"role": "user", "content": "Turn 1"},
+            {"role": "assistant", "content": "Thinking reply"},
+            {"role": "user", "content": "Turn 2"},
+            {"role": "assistant", "content": "Diagnostic error message"},
+            {"role": "user", "content": "Turn 3"},
+        ]
+    }
+
+    mock_value = MagicMock()
+    mock_value.to_messages.return_value = messages
+
+    with patch.object(ChatDeepSeek, "_get_request_payload", return_value=parent_payload):
+        with patch.object(deepseek_instance, "_convert_input", return_value=mock_value):
+            result = deepseek_instance._get_request_payload(messages)
+
+    assert result["messages"][1]["reasoning_content"] == "thoughts"
+    assert result["messages"][3]["reasoning_content"] == ""  # diagnostic filled with ""
+    assert "reasoning_content" not in result["messages"][0]
+    assert "reasoning_content" not in result["messages"][2]
+    assert "reasoning_content" not in result["messages"][4]
+
+
+@pytest.mark.unit
 def test_reasoning_passback_returns_unchanged_when_payload_has_no_messages(deepseek_instance) -> None:
     """When payload has no 'messages' key, payload is returned as-is."""
     from langchain_core.messages import HumanMessage

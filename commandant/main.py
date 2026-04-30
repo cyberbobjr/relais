@@ -35,13 +35,14 @@ users ask the agent in natural language.
 """
 
 import asyncio
+import json
 from typing import Any
 
 from commandant.commands import COMMAND_REGISTRY, parse_command
 from common.brick_base import BrickBase, StreamSpec
 from common.envelope import Envelope
 from common.shutdown import GracefulShutdown  # noqa: F401 — test patch target
-from common.streams import STREAM_COMMANDS
+from common.streams import STREAM_COMMANDS, STREAM_COMMANDANT_QUERY, key_commandant_catalog
 
 
 class Commandant(BrickBase):
@@ -70,10 +71,10 @@ class Commandant(BrickBase):
         """No configuration to load for Commandant."""
 
     def stream_specs(self) -> list[StreamSpec]:
-        """Return the single stream spec for command consumption.
+        """Return stream specs for command consumption and catalog queries.
 
         Returns:
-            A list containing one StreamSpec for relais:commands.
+            A list of two StreamSpecs: relais:commands and relais:commandant:query.
         """
         return [
             StreamSpec(
@@ -83,7 +84,41 @@ class Commandant(BrickBase):
                 handler=self._handle,
                 ack_mode="always",
             ),
+            StreamSpec(
+                stream=STREAM_COMMANDANT_QUERY,
+                group="commandant_catalog_group",
+                consumer="commandant_catalog_1",
+                handler=self._handle_catalog_query,
+                ack_mode="always",
+            ),
         ]
+
+    async def _handle_catalog_query(self, envelope: Envelope, redis_conn: Any) -> bool:
+        """Respond to a catalog query by publishing the command list to a per-request key.
+
+        Uses LPUSH + EXPIRE (TTL 7 s = BRPOP timeout 5 s + 2 s grace) so the caller can retrieve via BRPOP.
+        Only ``name`` and ``description`` are exposed — the handler callable is omitted.
+
+        Args:
+            envelope: Incoming query envelope; only correlation_id is used.
+            redis_conn: Active async Redis connection.
+
+        Returns:
+            Always True (ACK unconditionally).
+        """
+        catalog = [
+            {"name": spec.name, "description": spec.description}
+            for spec in sorted(COMMAND_REGISTRY.values(), key=lambda s: s.name)
+        ]
+        response_key = key_commandant_catalog(envelope.correlation_id)
+        await redis_conn.lpush(response_key, json.dumps({"commands": catalog}))
+        await redis_conn.expire(response_key, 7)
+        await self.log.info(
+            f"Catalog query answered corr={envelope.correlation_id[:8]}, "
+            f"{len(catalog)} commands",
+            envelope.correlation_id,
+        )
+        return True
 
     async def _handle(self, envelope: Envelope, redis_conn: Any) -> bool:
         """Dispatch a command from the envelope if recognised.

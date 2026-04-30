@@ -70,11 +70,13 @@ def _default_profile_mock() -> MagicMock:
     """Return a MagicMock that behaves like a ProfileConfig.
 
     Returns:
-        MagicMock with model and max_turns set.
+        MagicMock with model, max_turns, max_turn_seconds and shell_timeout_seconds set.
     """
     m = MagicMock()
     m.model = "claude-opus-4-5"
     m.max_turns = 10
+    m.max_turn_seconds = 300
+    m.shell_timeout_seconds = 30
     return m
 
 
