@@ -4,9 +4,19 @@ Replaces the two-phase ChangelogWriter + SkillConsolidator pipeline with a
 single LLM call that rewrites SKILL.md directly from conversation traces,
 scoped to one specific skill.
 
-The scope filter is a best-effort heuristic that keeps only ToolMessage entries
-relevant to the target skill, reducing cross-contamination when multiple skills
-are used in the same conversation.
+Scope filter (``scope_messages_to_skill``): keeps ToolMessage entries whose
+tool_call_id either (a) originated from a ``read_skill`` call for the target
+skill, or (b) whose content mentions the skill name (content-based signal).
+Returns ``[]`` when no evidence of the target skill is found — the caller then
+skips the LLM call entirely rather than feeding unrelated context.
+
+Relevance gate (``SkillEditResult.relevant``): even when a non-empty scope is
+passed to the LLM, the model sets ``relevant=False`` when the conversation is
+entirely about something else.  The edit is then skipped without writing the
+file.
+
+Together these two gates prevent skill pollution (cross-contamination where
+off-topic conversations modify unrelated SKILL.md files).
 
 Atomic writes use a ``.tmp`` file + ``os.replace()`` (POSIX-atomic).
 """
@@ -40,6 +50,7 @@ MAX_HISTORY_ENTRIES = 50
 _REASON_LLM_FAILURE = "llm_failure"
 _REASON_NO_NEW_LESSONS = "no new lessons"
 _REASON_CONTENT_IDENTICAL = "content identical after strip"
+_NO_DESCRIPTION = "(no description)"
 
 # ---------------------------------------------------------------------------
 # Structured output schema
@@ -91,49 +102,40 @@ def scope_messages_to_skill(messages_raw: list[dict], skill_name: str) -> list[d
     if not messages_raw:
         return messages_raw
 
-    # Step 1: Collect tool call IDs from read_skill(skill_name) in AI messages.
     relevant_tool_call_ids: set[str] = set()
-    for msg in messages_raw:
-        msg_type = msg.get("type", msg.get("role", ""))
-        if msg_type not in ("ai", "AIMessage", "assistant"):
-            continue
-        tool_calls = msg.get("tool_calls") or []
-        if isinstance(tool_calls, list):
-            for tc in tool_calls:
-                if not isinstance(tc, dict):
-                    continue
-                name = tc.get("name", "")
-                args = tc.get("args") or tc.get("arguments") or {}
-                if isinstance(args, str):
-                    if name == "read_skill" and skill_name in args:
-                        tc_id = tc.get("id") or tc.get("tool_call_id", "")
-                        if tc_id:
-                            relevant_tool_call_ids.add(tc_id)
-                elif isinstance(args, dict):
-                    skill_arg = args.get("skill_name") or args.get("name") or args.get("skill") or ""
-                    if name == "read_skill" and skill_name in str(skill_arg):
-                        tc_id = tc.get("id") or tc.get("tool_call_id", "")
-                        if tc_id:
-                            relevant_tool_call_ids.add(tc_id)
-
-    # Step 2: Content-based signal — ToolMessages whose content mentions the skill.
     content_based_ids: set[str] = set()
     for msg in messages_raw:
         msg_type = msg.get("type", msg.get("role", ""))
-        if msg_type not in ("tool", "ToolMessage"):
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str) and skill_name in content:
-            tc_id = msg.get("tool_call_id", "")
-            if tc_id:
-                content_based_ids.add(tc_id)
+        if msg_type in ("ai", "AIMessage", "assistant"):
+            tool_calls = msg.get("tool_calls") or []
+            if isinstance(tool_calls, list):
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    name = tc.get("name", "")
+                    args = tc.get("args") or tc.get("arguments") or {}
+                    if isinstance(args, str):
+                        if name == "read_skill" and skill_name in args:
+                            tc_id = tc.get("id") or tc.get("tool_call_id", "")
+                            if tc_id:
+                                relevant_tool_call_ids.add(tc_id)
+                    elif isinstance(args, dict):
+                        skill_arg = args.get("skill_name") or args.get("name") or args.get("skill") or ""
+                        if name == "read_skill" and skill_name in str(skill_arg):
+                            tc_id = tc.get("id") or tc.get("tool_call_id", "")
+                            if tc_id:
+                                relevant_tool_call_ids.add(tc_id)
+        elif msg_type in ("tool", "ToolMessage"):
+            content = msg.get("content", "")
+            if isinstance(content, str) and skill_name in content:
+                tc_id = msg.get("tool_call_id", "")
+                if tc_id:
+                    content_based_ids.add(tc_id)
 
-    # Step 3: Return [] when there is no evidence the skill was consulted.
     all_relevant = relevant_tool_call_ids | content_based_ids
     if not all_relevant:
         return []
 
-    # Step 4: Keep non-ToolMessages; keep ToolMessages only when relevant.
     filtered: list[dict] = []
     for msg in messages_raw:
         msg_type = msg.get("type", msg.get("role", ""))
@@ -442,22 +444,22 @@ def _extract_skill_description(content: str) -> str:
         content: Raw SKILL.md text.
 
     Returns:
-        Description string, or ``"(no description)"`` when absent or unparseable.
+        Description string, or ``_NO_DESCRIPTION`` when absent or unparseable.
     """
-    lines = content.splitlines()
+    lines = content.split("\n", 25)
     if not lines or lines[0].strip() != "---":
-        return "(no description)"
+        return _NO_DESCRIPTION
     end = None
     for i, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
             end = i
             break
     if end is None:
-        return "(no description)"
+        return _NO_DESCRIPTION
     for line in lines[1:end]:
         if line.startswith("description:"):
-            return line[len("description:"):].strip().strip('"').strip("'") or "(no description)"
-    return "(no description)"
+            return line[len("description:"):].strip().strip('"').strip("'") or _NO_DESCRIPTION
+    return _NO_DESCRIPTION
 
 
 def _format_conversation(messages_raw: list[dict]) -> str:

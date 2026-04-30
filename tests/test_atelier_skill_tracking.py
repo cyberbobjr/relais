@@ -51,7 +51,7 @@ def test_skills_used_contains_only_invoked_skills() -> None:
     It must NOT include skills assigned to the agent role that were never
     actually read during the turn.
     """
-    from atelier.main import _extract_invoked_skill_names  # noqa: PLC0415 — tested symbol
+    from atelier.message_serializer import extract_read_skill_names as _extract_invoked_skill_names  # noqa: PLC0415
 
     messages_raw = [
         _make_human("Search and email."),
@@ -75,7 +75,7 @@ def test_skills_used_empty_when_no_read_skill_calls() -> None:
     When the agent answered without consulting any skill, skills_used must be
     empty so Forgeron does not attempt to update unrelated skill files.
     """
-    from atelier.main import _extract_invoked_skill_names  # noqa: PLC0415
+    from atelier.message_serializer import extract_read_skill_names as _extract_invoked_skill_names  # noqa: PLC0415
 
     messages_raw = [
         _make_human("Just answer."),
@@ -95,7 +95,7 @@ def test_skills_used_deduplicates_repeated_calls() -> None:
     The returned list must contain each skill name only once to avoid duplicate
     Forgeron edit triggers.
     """
-    from atelier.main import _extract_invoked_skill_names  # noqa: PLC0415
+    from atelier.message_serializer import extract_read_skill_names as _extract_invoked_skill_names  # noqa: PLC0415
 
     messages_raw = [
         _make_human("Step 1"),
@@ -132,6 +132,7 @@ def test_subagent_skill_names_from_invocations() -> None:
     """
     from langchain_core.messages import AIMessage  # noqa: PLC0415
 
+    from atelier.message_serializer import serialize_messages  # noqa: PLC0415
     from atelier.stream_loop import build_subagent_traces  # noqa: PLC0415
     from atelier.subagent_capture import SubagentMetrics  # noqa: PLC0415
 
@@ -163,7 +164,7 @@ def test_subagent_skill_names_from_invocations() -> None:
         capture=_MockCapture(),
         ns_to_name={"ns-1": "my-subagent"},
         subagent_skill_map={"my-subagent": assigned_skills},
-        serialize_messages_fn=lambda msgs: [{"type": "ai", "content": ""}],
+        serialize_messages_fn=serialize_messages,
     )
 
     assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
