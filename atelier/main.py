@@ -279,6 +279,42 @@ logger = logging.getLogger("atelier")
 _PROMPTS_DIR: Path = resolve_prompts_dir()
 
 
+def _extract_invoked_skill_names(messages_raw: list[dict]) -> list[str]:
+    """Return skill names actually invoked via read_skill during a turn.
+
+    Scans serialized message dicts for AIMessage tool_calls where name ==
+    "read_skill" and collects the skill_name argument values, deduplicated
+    in order of first appearance.
+
+    Args:
+        messages_raw: Serialized LangChain message list for the turn.
+
+    Returns:
+        Deduplicated list of skill names that were read, in call order.
+    """
+    seen: dict[str, None] = {}
+    for msg in messages_raw:
+        msg_type = msg.get("type", msg.get("role", ""))
+        if msg_type not in ("ai", "AIMessage", "assistant"):
+            continue
+        tool_calls = msg.get("tool_calls") or []
+        for tc in tool_calls:
+            if not isinstance(tc, dict) or tc.get("name") != "read_skill":
+                continue
+            args = tc.get("args") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (ValueError, TypeError):
+                    continue
+            skill_name = (
+                args.get("skill_name") or args.get("name") or args.get("skill") or ""
+            )
+            if skill_name:
+                seen[skill_name] = None
+    return list(seen)
+
+
 class Atelier(BrickBase):
     """The Atelier brick — orchestrates DeepAgents-based LLM generation.
 
@@ -1015,6 +1051,7 @@ class Atelier(BrickBase):
                 ),
                 timeout=_turn_timeout,
             )
+            skills_used = _extract_invoked_skill_names(agent_result.messages_raw)
             reply_text = agent_result.reply_text
             logger.info(
                 "[TASK] agent done — corr=%s reply_len=%d tool_calls=%d "

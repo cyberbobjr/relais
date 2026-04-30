@@ -54,15 +54,36 @@ def _make_redis(ttl: int = 0) -> AsyncMock:
     return redis
 
 
-def _make_edit_result(*, changed: bool, updated_skill: str = "# Updated\nContent.", reason: str = "improved"):
+def _make_edit_result(
+    *,
+    changed: bool,
+    updated_skill: str = "# Updated\nContent.",
+    reason: str = "improved",
+    relevant: bool = True,
+):
     from forgeron.skill_editor import SkillEditResult
 
-    return SkillEditResult(updated_skill=updated_skill, changed=changed, reason=reason)
+    return SkillEditResult(
+        updated_skill=updated_skill, changed=changed, reason=reason, relevant=relevant
+    )
 
 
 MESSAGES_RAW = [
     {"type": "human", "content": "Run the deploy script."},
     {"type": "ai", "content": "Deploying now..."},
+]
+
+MESSAGES_WITH_SKILL = [
+    {"type": "human", "content": "Use my-skill to do the task."},
+    {
+        "type": "ai",
+        "content": "",
+        "tool_calls": [
+            {"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}
+        ],
+    },
+    {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content here"},
+    {"type": "ai", "content": "Done."},
 ]
 
 ORIGINAL_CONTENT = "# My Skill\n\nOriginal content here."
@@ -99,7 +120,7 @@ async def test_edit_rewrites_skill_md_when_changed(tmp_path: Path) -> None:
         editor = SkillEditor(profile=_make_profile(), skills_dir=tmp_path)
         edited = await editor.edit(
             skill_name="my-skill",
-            messages_raw=MESSAGES_RAW,
+            messages_raw=MESSAGES_WITH_SKILL,
             config=cfg,
             redis_conn=redis,
             trigger_reason="2 errors",
@@ -134,7 +155,7 @@ async def test_edit_noop_when_changed_false(tmp_path: Path) -> None:
         editor = SkillEditor(profile=_make_profile(), skills_dir=tmp_path)
         edited = await editor.edit(
             skill_name="my-skill",
-            messages_raw=MESSAGES_RAW,
+            messages_raw=MESSAGES_WITH_SKILL,
             config=cfg,
             redis_conn=redis,
         )
@@ -193,7 +214,7 @@ async def test_edit_force_bypasses_cooldown(tmp_path: Path) -> None:
         editor = SkillEditor(profile=_make_profile(), skills_dir=tmp_path)
         edited = await editor.edit(
             skill_name="my-skill",
-            messages_raw=MESSAGES_RAW,
+            messages_raw=MESSAGES_WITH_SKILL,
             config=cfg,
             redis_conn=redis,
             force=True,
@@ -249,7 +270,7 @@ async def test_edit_sets_cooldown_key_after_write(tmp_path: Path) -> None:
         editor = SkillEditor(profile=_make_profile(), skills_dir=tmp_path)
         await editor.edit(
             skill_name="my-skill",
-            messages_raw=MESSAGES_RAW,
+            messages_raw=MESSAGES_WITH_SKILL,
             config=cfg,
             redis_conn=redis,
         )
@@ -300,7 +321,7 @@ async def test_edit_atomic_write_uses_tmp_file(tmp_path: Path) -> None:
             editor = SkillEditor(profile=_make_profile(), skills_dir=tmp_path)
             await editor.edit(
                 skill_name="my-skill",
-                messages_raw=MESSAGES_RAW,
+                messages_raw=MESSAGES_WITH_SKILL,
                 config=cfg,
                 redis_conn=redis,
             )
@@ -337,13 +358,110 @@ async def test_edit_noop_when_content_identical(tmp_path: Path) -> None:
         editor = SkillEditor(profile=_make_profile(), skills_dir=tmp_path)
         edited = await editor.edit(
             skill_name="my-skill",
-            messages_raw=MESSAGES_RAW,
+            messages_raw=MESSAGES_WITH_SKILL,
             config=cfg,
             redis_conn=redis,
         )
 
     assert edited is False
     redis.setex.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_edit_skips_when_scope_returns_empty(tmp_path: Path) -> None:
+    """When scope_messages_to_skill returns [], edit() must not call the LLM.
+
+    Bug (RC#1 + RC#4): the current implementation passes the scoped messages
+    to the LLM without checking whether scope returned an empty list, so the
+    LLM is invoked even when there is no evidence the skill was used.  The
+    correct behavior is to skip the LLM call and return False immediately.
+
+    MESSAGES_RAW contains only a human and an AI turn with no read_skill calls,
+    so scope_messages_to_skill("my-skill") returns [] after the fix.
+    """
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(ORIGINAL_CONTENT)
+
+    mock_llm = MagicMock()
+    llm_invoke = AsyncMock()
+    mock_llm.with_structured_output.return_value.ainvoke = llm_invoke
+
+    with patch("forgeron.skill_editor.build_chat_model", return_value=mock_llm):
+        from forgeron.skill_editor import SkillEditor
+
+        editor = SkillEditor(_make_profile(), None)
+        result = await editor.edit(
+            "my-skill",
+            MESSAGES_RAW,  # no read_skill calls → scope returns []
+            _make_config(),
+            _make_redis(),
+            skill_path=skill_dir,
+        )
+
+    assert result is False
+    llm_invoke.assert_not_called()  # LLM must NOT be called when scope is empty
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_edit_rejects_when_relevant_false(tmp_path: Path) -> None:
+    """When LLM returns relevant=False, edit() returns False even if changed=True.
+
+    Bug (RC#3): SkillEditResult currently has no ``relevant`` field, so the
+    editor cannot distinguish "content changed" from "change is about this skill".
+    The fix adds a ``relevant`` boolean gate: when the LLM signals that the
+    conversation did not relate to the target skill, the edit is rejected even
+    if changed=True, preventing cross-skill pollution from the LLM's own
+    hallucinations.
+
+    This test uses a conversation WITH a read_skill call for the target skill
+    so that scope_messages_to_skill returns a non-empty list (ensuring we reach
+    the LLM call); then verifies that relevant=False from the LLM blocks the write.
+    """
+    messages_with_skill = [
+        {"type": "human", "content": "use my-skill"},
+        {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [
+                {"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}
+            ],
+        },
+        {"type": "tool", "tool_call_id": "tc-1", "content": "skill content"},
+        {"type": "ai", "content": "Done."},
+    ]
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(ORIGINAL_CONTENT)
+
+    # LLM says changed=True with updated content, BUT relevant=False
+    irrelevant_result = _make_edit_result(
+        changed=True, updated_skill=UPDATED_CONTENT, relevant=False
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value.ainvoke = AsyncMock(
+        return_value=irrelevant_result
+    )
+
+    with patch("forgeron.skill_editor.build_chat_model", return_value=mock_llm):
+        from forgeron.skill_editor import SkillEditor
+
+        editor = SkillEditor(_make_profile(), None)
+        result = await editor.edit(
+            "my-skill",
+            messages_with_skill,
+            _make_config(),
+            _make_redis(),
+            skill_path=skill_dir,
+        )
+
+    assert result is False
+    assert (skill_dir / "SKILL.md").read_text() == ORIGINAL_CONTENT, (
+        "SKILL.md must not be modified when LLM returns relevant=False"
+    )
 
 
 @pytest.mark.asyncio
@@ -372,7 +490,7 @@ async def test_edit_uses_skill_path_override(tmp_path: Path) -> None:
         editor = SkillEditor(profile=_make_profile(), skills_dir=None)
         edited = await editor.edit(
             skill_name="my-skill",
-            messages_raw=MESSAGES_RAW,
+            messages_raw=MESSAGES_WITH_SKILL,
             config=cfg,
             redis_conn=redis,
             skill_path=override_dir,

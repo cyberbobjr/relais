@@ -125,10 +125,21 @@ class TestSkillEditorEditWithSkillPath:
             changed=True,
             reason="improved",
         )
+        messages_with_skill = [
+            {"type": "human", "content": "use my-skill"},
+            {
+                "type": "ai",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}
+                ],
+            },
+            {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+        ]
         with patch.object(editor, "_call_llm", new=AsyncMock(return_value=result)):
             edited = await editor.edit(
                 skill_name="my-skill",
-                messages_raw=[],
+                messages_raw=messages_with_skill,
                 config=config,
                 redis_conn=redis_mock,
                 skill_path=skill_dir,
@@ -162,10 +173,21 @@ class TestSkillEditorEditWithSkillPath:
             changed=True,
             reason="improved",
         )
+        messages_with_skill = [
+            {"type": "human", "content": "use my-skill"},
+            {
+                "type": "ai",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}
+                ],
+            },
+            {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+        ]
         with patch.object(editor, "_call_llm", new=AsyncMock(return_value=result)):
             edited = await editor.edit(
                 skill_name="my-skill",
-                messages_raw=[],
+                messages_raw=messages_with_skill,
                 config=config,
                 redis_conn=redis_mock,
             )

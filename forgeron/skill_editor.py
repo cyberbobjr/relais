@@ -49,6 +49,10 @@ _REASON_CONTENT_IDENTICAL = "content identical after strip"
 class SkillEditResult(BaseModel):
     """Structured output schema for the skill edit LLM call."""
 
+    relevant: bool = Field(
+        default=True,
+        description="True if the conversation contains observations specifically about this skill. Set to false when the conversation is entirely unrelated.",
+    )
     updated_skill: str = Field(
         description="Full rewritten SKILL.md content with improvements integrated."
     )
@@ -70,25 +74,24 @@ def scope_messages_to_skill(messages_raw: list[dict], skill_name: str) -> list[d
     """Filter conversation messages to those relevant to a specific skill.
 
     Keeps all HumanMessage and AIMessage entries for intent context.
-    Keeps ToolMessage entries only when the immediately preceding AIMessage's
-    tool_calls contained a call to ``read_skill`` with args referencing the
-    target skill name.
+    Keeps only ToolMessage entries whose tool_call_id either (a) originated from
+    a ``read_skill`` call for the target skill, or (b) whose content references
+    the skill name (content-based signal).
 
-    Falls back to the full list when the filtered result has fewer than 3 messages,
-    which avoids sending an empty or near-empty context to the LLM.
+    Returns ``[]`` when no evidence of the target skill was found, so the caller
+    can skip the LLM call entirely rather than feeding unrelated context.
 
     Args:
         messages_raw: Serialized LangChain message list for a conversation turn.
         skill_name: Skill directory name (e.g. ``"mail-summary"``).
 
     Returns:
-        Filtered list of messages, or the full list as fallback.
+        Filtered list of messages, or ``[]`` when the skill was never consulted.
     """
     if not messages_raw:
         return messages_raw
 
-    # Identify which tool call IDs are relevant to this skill.
-    # A tool call is relevant when it calls read_skill and references skill_name.
+    # Step 1: Collect tool call IDs from read_skill(skill_name) in AI messages.
     relevant_tool_call_ids: set[str] = set()
     for msg in messages_raw:
         msg_type = msg.get("type", msg.get("role", ""))
@@ -102,7 +105,6 @@ def scope_messages_to_skill(messages_raw: list[dict], skill_name: str) -> list[d
                 name = tc.get("name", "")
                 args = tc.get("args") or tc.get("arguments") or {}
                 if isinstance(args, str):
-                    # Sometimes args is a JSON string; treat it as text for matching
                     if name == "read_skill" and skill_name in args:
                         tc_id = tc.get("id") or tc.get("tool_call_id", "")
                         if tc_id:
@@ -114,18 +116,32 @@ def scope_messages_to_skill(messages_raw: list[dict], skill_name: str) -> list[d
                         if tc_id:
                             relevant_tool_call_ids.add(tc_id)
 
+    # Step 2: Content-based signal — ToolMessages whose content mentions the skill.
+    content_based_ids: set[str] = set()
+    for msg in messages_raw:
+        msg_type = msg.get("type", msg.get("role", ""))
+        if msg_type not in ("tool", "ToolMessage"):
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str) and skill_name in content:
+            tc_id = msg.get("tool_call_id", "")
+            if tc_id:
+                content_based_ids.add(tc_id)
+
+    # Step 3: Return [] when there is no evidence the skill was consulted.
+    all_relevant = relevant_tool_call_ids | content_based_ids
+    if not all_relevant:
+        return []
+
+    # Step 4: Keep non-ToolMessages; keep ToolMessages only when relevant.
     filtered: list[dict] = []
     for msg in messages_raw:
         msg_type = msg.get("type", msg.get("role", ""))
         if msg_type in ("tool", "ToolMessage"):
             tc_id = msg.get("tool_call_id", "")
-            if tc_id and relevant_tool_call_ids and tc_id not in relevant_tool_call_ids:
-                # Skip tool results not relevant to this skill
+            if not tc_id or tc_id not in all_relevant:
                 continue
         filtered.append(msg)
-
-    if len(filtered) < 3:
-        return messages_raw
     return filtered
 
 
@@ -135,10 +151,23 @@ def scope_messages_to_skill(messages_raw: list[dict], skill_name: str) -> list[d
 
 _SYSTEM_PROMPT_TEMPLATE = textwrap.dedent("""\
     You are improving the skill documentation file for ONE specific skill: '{skill_name}'.
+    This skill is about: {description}. Only accept changes aligned with this description.
 
     STRICT SCOPE RULE: Only incorporate observations that are DIRECTLY and SPECIFICALLY about '{skill_name}'.
     Ignore any content about other skills, unrelated tool calls, or off-topic conversations.
-    If the conversation contains no new lesson specifically about '{skill_name}', set changed=false and return the current file unchanged.
+
+    ANTI-PATTERN: Do NOT add sections about topics foreign to this skill.
+    Example of bad behaviour: adding SSH configuration notes to a JW.org email digest skill.
+
+    RELEVANCE GATE (critical):
+    - First, set `relevant` to true only if the conversation contains observations specifically about '{skill_name}'.
+    - If the conversation is entirely about something else, set relevant=false, changed=false, and return the current file unchanged.
+    - Even if changed=true, the edit is rejected when relevant=false.
+
+    FEW-SHOT EXAMPLE — off-topic conversation:
+    Conversation: user asks agent to configure SSH keys; agent uses read_skill("ssh-config").
+    Target skill: "mail-summary"
+    Correct response: relevant=false, changed=false, reason="conversation is about SSH, not mail-summary"
 
     When you do find relevant improvements:
     - Preserve file structure (front-matter, headings, existing sections)
@@ -256,9 +285,25 @@ class SkillEditor:
                 EditHistoryEntry(ts=time.time(), trigger=trigger_reason, reason=reason, changed=changed, corr=correlation_id),
             )
 
+        if not scoped:
+            logger.debug(
+                "Skipping LLM call for skill '%s' — no relevant messages in scope.",
+                skill_name,
+            )
+            return False
+
         result = await self._call_llm(skill_name, current_content, scoped)
         if result is None:
             _record(_REASON_LLM_FAILURE, False)
+            return False
+
+        if not result.relevant:
+            logger.debug(
+                "Skipping edit for skill '%s' — LLM marked conversation as not relevant: %s",
+                skill_name,
+                result.reason,
+            )
+            _record(result.reason or "not_relevant", False)
             return False
 
         updated = result.updated_skill.strip()
@@ -360,7 +405,8 @@ class SkillEditor:
             ``SkillEditResult`` on success, ``None`` on LLM failure.
         """
         conversation = _format_conversation(messages_raw)
-        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(skill_name=skill_name)
+        description = _extract_skill_description(current_content)
+        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(skill_name=skill_name, description=description)
         user_message = (
             f"# Skill: {skill_name}\n\n"
             "## Current SKILL.md\n"
@@ -387,6 +433,31 @@ class SkillEditor:
         except Exception as exc:  # noqa: BLE001
             logger.error("Edit LLM call failed for skill '%s': %s", skill_name, exc)
             return None
+
+
+def _extract_skill_description(content: str) -> str:
+    """Extract the ``description`` field from SKILL.md YAML front-matter.
+
+    Args:
+        content: Raw SKILL.md text.
+
+    Returns:
+        Description string, or ``"(no description)"`` when absent or unparseable.
+    """
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "(no description)"
+    end = None
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            end = i
+            break
+    if end is None:
+        return "(no description)"
+    for line in lines[1:end]:
+        if line.startswith("description:"):
+            return line[len("description:"):].strip().strip('"').strip("'") or "(no description)"
+    return "(no description)"
 
 
 def _format_conversation(messages_raw: list[dict]) -> str:

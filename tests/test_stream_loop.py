@@ -202,7 +202,7 @@ def test_build_subagent_traces_builds_one_trace() -> None:
     trace = result[0]
     assert isinstance(trace, SubagentTrace)
     assert trace.subagent_name == "my-agent"
-    assert trace.skill_names == ["skill-a"]
+    assert trace.skill_names == []
     assert trace.tool_call_count == 3
     assert trace.tool_error_count == 1
     assert trace.messages_raw == ["msg1"]

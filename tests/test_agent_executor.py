@@ -948,7 +948,8 @@ async def test_subagent_traces_populated_from_ns_to_name() -> None:
     - task tool args accumulate correctly to populate ns_to_name
     - An updates chunk with non-empty ns triggers ns_to_name entry
     - AgentResult.subagent_traces has one SubagentTrace with correct subagent_name
-    - skill_names are extracted from the subagents= init param (basename of path)
+    - skill_names reflect ACTUALLY INVOKED skills (read_skill calls), not init params
+      (a subagent that makes no read_skill calls → skill_names == [])
     """
     from atelier.agent_executor import AgentExecutor, SubagentTrace
 
@@ -997,7 +998,8 @@ async def test_subagent_traces_populated_from_ns_to_name() -> None:
     trace = result.subagent_traces[0]
     assert isinstance(trace, SubagentTrace)
     assert trace.subagent_name == "mail-agent"
-    assert trace.skill_names == ["mail-ops"]
+    # Subagent made no read_skill calls → invoked skill list is empty
+    assert trace.skill_names == []
     assert isinstance(trace.tool_call_count, int)
     assert isinstance(trace.tool_error_count, int)
     assert isinstance(trace.messages_raw, list)
