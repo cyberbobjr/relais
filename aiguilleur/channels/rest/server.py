@@ -690,7 +690,7 @@ def create_app(
         """Handle GET /v1/commands — return the registered slash-command catalog.
 
         Publishes a CQRS query to relais:commandant:query and waits for Commandant
-        to respond via BRPOP on a per-request key (TTL 30 s).
+        to respond via BRPOP on a per-request key for up to 5 seconds.
 
         No ACL filtering: Sentinelle enforces authorization at submission time.
         Showing an unauthorized command in auto-complete is acceptable UX.

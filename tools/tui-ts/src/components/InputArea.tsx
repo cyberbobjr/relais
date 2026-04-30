@@ -64,7 +64,7 @@ export function InputArea({ height, onSubmit }: Props) {
   }
 
   function handleContentChange(arg: ContentChangeEvent | string): void {
-    const text = typeof arg === "string" ? arg : "";
+    const text = typeof arg === "string" ? arg : (taRef?.editBuffer.getText() ?? "");
     if (_suppressContentChange) return;
     const trimmed = text.trimStart();
     if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
