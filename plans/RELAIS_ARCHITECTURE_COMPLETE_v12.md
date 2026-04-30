@@ -280,7 +280,7 @@ mcp_servers:
 
 > **Sélection :** `global` → inclus si `enabled: true`. `contextual` → inclus si `enabled: true` ET profil actif dans `profiles`.
 >
-> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `mcp_timeout` (défaut 10 s), `mcp_max_tools` (défaut 20) et `parallel_tool_calls` (défaut `None`) existent en tant que champs optionnels dans `ProfileConfig` mais ne sont plus documentés dans `atelier/profiles.yaml`.
+> **Filtrage MCP par rôle** — les outils MCP exposés au modèle sont filtrés par `ToolPolicy.filter_mcp_tools()` selon les patterns `allowed_mcp_tools` définis dans `portail.yaml:roles:`. Les champs `shell_timeout_seconds` (défaut 30 s) et `max_turn_seconds` (défaut 300 s) sont des champs de `ProfileConfig` qui contrôlent respectivement le timeout par appel shell et le timeout total du tour agentique. `mcp_timeout` et `mcp_max_tools` ont été supprimés lors de la migration DeepAgents.
 
 ---
 
@@ -467,8 +467,8 @@ channels:
 | Discord | Implémenté | `discord.py`, réception mentions/DM, indicateur de frappe, sortie finale |
 | Telegram | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
 | Slack | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
-| REST | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
-| TUI | Placeholder config | Pas d'adaptateur présent dans `aiguilleur/channels/` |
+| REST | Implémenté | `aiguilleur/channels/rest/` — FastAPI/aiohttp, auth Bearer, endpoints : `POST /v1/message`, `GET /v1/stream/{correlation_id}` (SSE), `GET /v1/events` (SSE fan-out), `GET /v1/commands` (catalogue CQRS → Commandant via `relais:commandant:query`) |
+| TUI | Implémenté (TypeScript) | `tools/tui-ts/` — TUI TypeScript React Ink, auto-complétion via `GET /v1/commands` |
 | WhatsApp | Implémenté (2026-04-10) | Adaptateur Python natif (`aiguilleur/channels/whatsapp/adapter.py`) — serveur webhook aiohttp + client REST vers la passerelle externe [fazer-ai/baileys-api](https://github.com/fazer-ai/baileys-api) (Node.js, programme supervisord `baileys-api` dans le groupe `optional`). Installation, config et pairing QR pris en charge par le sous-agent `relais-config` via les tools LangChain `whatsapp_install`, `whatsapp_configure`, `whatsapp_uninstall` (chargés via `tool_tokens: [module:aiguilleur.channels.whatsapp.tools]`). CLI : `python -m aiguilleur.channels.whatsapp`. Voir `docs/WHATSAPP_SETUP.md` et `plans/WHATSAPP_ADAPTER.md`. |
 
 ### Streaming progressif — édition temps réel
@@ -843,7 +843,7 @@ L'Archiviste est un observer pur — il consomme sans jamais publier.
 
 Le Commandant exécute les commandes slash autorisées hors-LLM. Il reçoit uniquement les enveloppes pré-filtrées par La Sentinelle : commandes connues **et** autorisées pour le rôle de l'utilisateur. Il exécute l'action demandée immédiatement et répond directement à l'utilisateur sur le canal d'origine. Aucun token LLM n'est consommé.
 
-**Taxonomie :** Transformer — consomme `relais:commands`, publie vers `relais:messages:outgoing:{channel}` et/ou `relais:memory:request`.
+**Taxonomie :** Transformer — consomme `relais:commands` et `relais:commandant:query`, publie vers `relais:messages:outgoing:{channel}`, `relais:memory:request` et `relais:commandant:catalog:{correlation_id}`.
 
 ### Architecture
 
@@ -857,7 +857,9 @@ SENTINELLE (entrant)
   └─► [commande non autorisée]  → réponse inline "Vous n'avez pas la permission..."
 ```
 
-Le Commandant consomme `relais:commands` (`commandant_group`). Toutes les enveloppes arrivant ici ont déjà passé l'ACL identité et l'ACL commande. Le Commandant ACK chaque message qu'il dépile, qu'un handler existe ou non.
+Le Commandant consomme deux streams (`ack_mode="always"` sur les deux) :
+- `relais:commands` (`commandant_group`) — dispatch des slash commandes. Toutes les enveloppes arrivant ici ont déjà passé l'ACL identité et l'ACL commande.
+- `relais:commandant:query` (`commandant_catalog_group`) — côté lecture CQRS : le REST adapter publie une enveloppe `action=catalog.query` ; Le Commandant répond par un `LPUSH` sur `relais:commandant:catalog:{correlation_id}` (TTL 7 s) que le REST adapter récupère via `BRPOP` (timeout 5 s).
 
 ### Commandes supportées
 
@@ -887,8 +889,10 @@ Le Commandant consomme `relais:commands` (`commandant_group`). Toutes les envelo
 | Opération | Stream / Clé |
 |---|---|
 | XREADGROUP (lecture) | `relais:commands` |
+| XREADGROUP (lecture) | `relais:commandant:query` |
 | XADD (réponse canal) | `relais:messages:outgoing:*` |
 | XADD (effacement mémoire) | `relais:memory:request` |
+| LPUSH + EXPIRE (catalogue) | `relais:commandant:catalog:{correlation_id}` |
 
 ### Extensibilité
 
@@ -979,8 +983,8 @@ profiles:
     base_url: null
     api_key_env: ANTHROPIC_API_KEY
     fallback_model: null
-    mcp_timeout: 10
-    mcp_max_tools: 20
+    shell_timeout_seconds: 30
+    max_turn_seconds: 300
     resilience:
       retry_attempts: 3
       retry_delays: [2, 5, 15]
@@ -995,8 +999,8 @@ profiles:
 - `base_url`
 - `api_key_env`
 - `fallback_model`
-- `mcp_timeout`
-- `mcp_max_tools`
+- `shell_timeout_seconds` (défaut 30) — timeout wall-clock par appel shell (`_HtmlSafeShellBackend.execute`)
+- `max_turn_seconds` (défaut 300) — timeout wall-clock pour le tour agentique complet (`AgentExecutor.execute`) ; 0 = désactivé
 - `resilience.retry_attempts`
 - `resilience.retry_delays`
 - `resilience.fallback_model`

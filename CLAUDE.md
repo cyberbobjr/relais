@@ -435,7 +435,7 @@ my-bundle.zip
     │   └── my-agent/
     │       └── subagent.yaml
     ├── skills/          # optional: one dir per skill (skill files directly inside)
-    │   └── my-skill/
+    │   └── my-skill/    # MUST be a direct child — no nesting (ToolPolicy scans one level only)
     │       └── SKILL.md
     └── tools/           # optional: .py files exporting BaseTool instances
         └── my_tool.py

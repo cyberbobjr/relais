@@ -259,9 +259,10 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 ### 5a.5 ✅ `mcp_timeout` et `mcp_max_tools` — supprimés avec migration DeepAgents
 
 Ces champs existaient dans `ProfileConfig` pour le SDKExecutor (limite d'outils MCP passés au modèle Anthropic, timeout par appel). Avec la migration DeepAgents :
-- `mcp_timeout` : géré par `McpSessionManager` via `asyncio.wait_for` directement
-- `mcp_max_tools` : plus pertinent — DeepAgents gère la liste d'outils en interne
-- Les deux champs sont supprimés de `ProfileConfig` et `config/profiles.yaml.default`
+- `mcp_timeout` : supprimé ; remplacé par `shell_timeout_seconds` (défaut 30 s) — timeout wall-clock par appel shell (`_HtmlSafeShellBackend.execute`)
+- `mcp_max_tools` : supprimé — DeepAgents gère la liste d'outils en interne
+- Nouveau champ : `max_turn_seconds` (défaut 300 s, 0 = désactivé) — timeout wall-clock pour le tour agentique complet (`AgentExecutor.execute`)
+- Les deux anciens champs sont supprimés de `ProfileConfig` et `config/atelier/profiles.yaml.default`
 
 ### 5a.6 ✅ Multi-provider LLM — `base_url` et `api_key_env` dans `ProfileConfig` DONE (2026-04-01)
 
@@ -340,12 +341,11 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 **Sous-agent natif:** `horloger-manager` (`/horloger` ou `/schedule`) — CRUD YAML de jobs
 **Config:** `config/horloger.yaml.default` — `tick_interval_seconds` (défaut 30), `catch_up_window_seconds` (défaut 120), `jobs_dir`, `db_path`
 
-### 4.3 `aiguilleur/rest/` — Canal REST/SSE + Webhooks HMAC
-**Taxonomie:** Relay (canal Aiguilleur)
-**Reçoit:** HTTP POST `/message` + `POST /webhook/{source}` (HMAC validé)
-**Expose:** SSE `GET /stream/{correlation_id}` pour streaming token-par-token
+### 4.3 ✅ `aiguilleur/channels/rest/` — Canal REST/SSE DONE (2026-04-30)
+**Taxonomie:** Relay (canal Aiguilleur natif Python)
+**Auth:** Bearer token (header `Authorization: Bearer …`)
+**Endpoints:** `POST /v1/message`, `GET /v1/stream/{correlation_id}` (SSE token-par-token), `GET /v1/events` (SSE fan-out), `GET /v1/commands` (catalogue CQRS → Commandant via `relais:commandant:query`)
 **Publie:** `relais:messages:incoming:rest`
-**Fichiers:** adapter.py, webhook_acl.py
 **Dépendance:** FastAPI, aiohttp
 
 ### 4.4 ✅ `forgeron/` — Auto-amélioration skills (BrickBase long-running) DONE
@@ -353,7 +353,7 @@ Nouvelles dépendances : `langchain-openrouter`, `langchain-ollama`, `langchain-
 **Taxonomie:** BrickBase long-running — `autostart=true`, `autorestart=true`.
 
 **Pipeline édition directe :**
-- **SkillEditor** : consomme `relais:skill:trace` (groupe `forgeron_group`) → reçoit SKILL.md + trace scopée → appel LLM unique avec `with_structured_output` → réécrit SKILL.md directement
+- **SkillEditor** : consomme `relais:skill:trace` (groupe `forgeron_group`) → reçoit SKILL.md + trace scopée via `scope_messages_to_skill` (ToolMessage entries depuis `read_skill` calls ; scope vide → skip LLM) → appel LLM unique avec `with_structured_output` → réponse avec flag `relevant` (False = conversation hors-sujet, skip) + flag `changed` → réécrit SKILL.md seulement si `relevant=True` et `changed=True`
 - Trigger : `edit_min_tool_errors`, `edit_call_threshold` (défaut 10), success-after-failure, aborted turn
 - Rate-limité : `relais:skill:edit_cooldown:{skill_name}` (TTL `edit_cooldown_seconds`)
 - `skill_paths: dict[str, str]` dans `SkillTraceCtx` — chemins absolus pour bundle skills
@@ -559,11 +559,11 @@ prometheus-client = ">=0.20"
 **Timeout:** 2s par intercepteur
 **Fichiers:** main.py, events.py, extension_base.py
 
-### 9.3 `tableau/` — TUI Textual bidirectionnel
-**Taxonomie:** Admin + Relay
-**Dépendance:** Textual ≥ 1.0
-**Fichiers:** main.py, app.py, screens/, widgets/
-**Priorité supervisord:** 30 (autostart=false)
+### 9.3 ✅ `tools/tui-ts/` — TUI TypeScript React Ink DONE (2026-04-30)
+**Taxonomie:** Client externe (TypeScript, hors pipeline Redis)
+**Dépendance:** React Ink, TypeScript
+**Auto-complétion:** `GET /v1/commands` (catalogue CQRS via REST adapter → Commandant)
+**Note:** Remplace l'architecture `tableau/` Textual initialement prévue
 
 ### 9.4 `scrutateur/` — Monitoring Prometheus/Loki
 **Taxonomie:** Pure Observer

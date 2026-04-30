@@ -31,15 +31,17 @@ Key classes:
   calls; dead sessions (``BrokenPipeError``, ``ConnectionError``, ``EOFError``)
   evicted and re-established on next call; closed on shutdown via ``close()``.
 * ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
-  and filters MCP tool definitions (enforces ``mcp_max_tools``).
+  and filters MCP tool definitions by role-level ``allowed_mcp_tools`` patterns.
 * ``SoulAssembler`` (atelier.soul_assembler) — resolves and validates
   multi-layer prompt file paths (soul / role / user / channel), returning
   them as a ``memory_paths: list[str]`` for ``create_deep_agent(memory=)``.
   File reading is delegated to DeepAgents; this module only validates paths.
 * ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
-  ``atelier/profiles.yaml``); selects model, temperature,
-  max_tokens, mcp_timeout, mcp_max_tools per request.  Optional field
-  ``parallel_tool_calls: bool | None`` forwards the OpenAI-compatible
+  ``atelier/profiles.yaml``); selects model, temperature, max_tokens per
+  request.  ``shell_timeout_seconds`` (default 30) caps individual shell tool
+  calls; ``max_turn_seconds`` (default 300, 0 = disabled) caps the total turn.
+  Optional field ``parallel_tool_calls: bool | None`` forwards the
+  OpenAI-compatible
   ``parallel_tool_calls`` parameter to the model (useful to disable it for
   providers like Mistral that emit broken parallel calls).  When ``None``
   (default) the parameter is not forwarded and the provider default applies.
@@ -77,7 +79,12 @@ Key classes:
 
 Helper modules extracted from agent_executor.py (re-exported for compat):
 * ``atelier.profile_model`` — ``_resolve_profile_model()`` builds
-  ``BaseChatModel | str`` from a ``ProfileConfig``.
+  ``BaseChatModel | str`` from a ``ProfileConfig`` by dispatching to the
+  first matching ``ModelHandler`` in ``_HANDLER_REGISTRY``
+  (``DeepSeekModelHandler`` → ``DefaultModelHandler``).  Provider-specific
+  handlers raise ``ImportError`` when their required library is absent
+  (e.g. ``langchain_deepseek`` for ``deepseek:`` models) instead of
+  silently falling back.
 * ``atelier.prompts`` — system-prompt constants and builders
   (``LONG_TERM_MEMORY_PROMPT``, ``SELF_DIAGNOSIS_PROMPT``,
   ``build_project_context_prompt``, ``_build_execution_context``,
@@ -110,7 +117,11 @@ Produced:
   - relais:messages:streaming:{channel}:{corr_id}  — streaming token chunks
   - relais:memory:request      — archive action with full messages_raw for Souvenir
   - relais:skill:trace         — per-turn skill execution trace → Forgeron (fire-and-forget,
-                                  only when skills were used).  Published in two cases:
+                                  only when skills were actually invoked).  ``skills_used``
+                                  is derived by scanning ``messages_raw`` for AIMessage
+                                  tool_calls where name == "read_skill"
+                                  (``extract_read_skill_names`` from ``atelier.message_serializer``); only skills that were
+                                  genuinely read appear here.  Published in two cases:
                                   (a) after a successful turn when tool_call_count > 0;
                                   (b) on the DLQ path (AgentExecutionError) with
                                   tool_error_count=-1 (sentinel: aborted turn) and
@@ -247,6 +258,7 @@ from common.redis_client import RedisClient  # noqa: F401 — kept for test name
 from common.envelope import Envelope
 from common.config_reload import watch_and_reload
 from common.profile_loader import load_profiles, resolve_profile
+from atelier.message_serializer import extract_read_skill_names
 from atelier.mcp_loader import load_for_sdk
 from atelier.soul_assembler import assemble_system_prompt
 from atelier.agent_executor import AgentExecutor, AgentExecutionError, AgentResult, CompactResult, build_project_context_prompt, format_diagnostic_trace, _render_diagnostic_trace
@@ -418,8 +430,7 @@ class Atelier(BrickBase):
         """
         self._checkpointer = await stack.enter_async_context(self._checkpointer_cm)
 
-        # Start the singleton McpSessionManager.
-        # Use the "default" profile for mcp_timeout (best-effort default).
+        # Start the singleton McpSessionManager using the "default" profile.
         # Guard against test objects created via __new__ that skip __init__.
         profiles = getattr(self, "_profiles", {})
         mcp_servers = getattr(self, "_mcp_servers_default", {})
@@ -791,6 +802,56 @@ class Atelier(BrickBase):
         return True
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _publish_skill_trace(
+        self,
+        redis_conn: Any,
+        envelope: Envelope,
+        sender: str,
+        skill_names: list[str],
+        tool_call_count: int,
+        tool_error_count: int,
+        messages_raw: list[dict],
+        skill_paths: dict[str, str],
+        *,
+        subagent_name: str | None = None,
+    ) -> None:
+        """Build and publish one skill-trace envelope to STREAM_SKILL_TRACE.
+
+        Args:
+            redis_conn: Active Redis connection.
+            envelope: Parent envelope (provides session_id, correlation_id).
+            sender: Originating sender_id string.
+            skill_names: Skill directory names involved in this trace.
+            tool_call_count: Number of tool calls made.
+            tool_error_count: Number of tool errors (-1 = aborted/timeout sentinel).
+            messages_raw: Serialised LangChain message list for this turn.
+            skill_paths: Mapping of skill name → bundle-relative path.
+            subagent_name: When set, marks this as a subagent-level trace.
+        """
+        ctx: dict = {
+            "skill_names": skill_names,
+            "tool_call_count": tool_call_count,
+            "tool_error_count": tool_error_count,
+            "messages_raw": messages_raw,
+            "skill_paths": skill_paths,
+        }
+        if subagent_name is not None:
+            ctx["subagent_name"] = subagent_name
+        trace_env = Envelope(
+            content="",
+            sender_id=f"atelier:{sender}",
+            channel="internal",
+            session_id=envelope.session_id,
+            correlation_id=envelope.correlation_id,
+            action=ACTION_SKILL_TRACE,
+            context={CTX_SKILL_TRACE: ctx},
+        )
+        await redis_conn.xadd(STREAM_SKILL_TRACE, {"payload": trace_env.to_json()})
+
+    # ------------------------------------------------------------------
     # Core message handler
     # ------------------------------------------------------------------
 
@@ -812,6 +873,7 @@ class Atelier(BrickBase):
         corr = envelope.correlation_id
         sender = envelope.sender_id
         skills_used: list[str] = []  # hoisted so the DLQ path can publish a failure trace
+        skill_paths: dict[str, str] = {}  # hoisted alongside skills_used (may be unset on early timeout)
         try:
             logger.info(
                 "[TASK] received — corr=%s sender=%s channel=%s content='%s'",
@@ -950,11 +1012,16 @@ class Atelier(BrickBase):
                 corr, streaming, profile.model,
             )
 
-            agent_result = await agent_executor.execute(
-                envelope=envelope,
-                stream_callback=stream_pub.push_chunk if streaming else None,
-                progress_callback=stream_pub.push_progress,
+            _turn_timeout: float | None = profile.max_turn_seconds if profile.max_turn_seconds > 0 else None
+            agent_result = await asyncio.wait_for(
+                agent_executor.execute(
+                    envelope=envelope,
+                    stream_callback=stream_pub.push_chunk if streaming else None,
+                    progress_callback=stream_pub.push_progress,
+                ),
+                timeout=_turn_timeout,
             )
+            skills_used = extract_read_skill_names(agent_result.messages_raw)
             reply_text = agent_result.reply_text
             logger.info(
                 "[TASK] agent done — corr=%s reply_len=%d tool_calls=%d "
@@ -965,23 +1032,13 @@ class Atelier(BrickBase):
 
             # 7. Publish skill trace for Forgeron (fire-and-forget)
             if skills_used and agent_result.tool_call_count > 0:
-                trace_env = Envelope(
-                    content="",
-                    sender_id=f"atelier:{sender}",
-                    channel="internal",
-                    session_id=envelope.session_id,
-                    correlation_id=corr,
-                    action=ACTION_SKILL_TRACE,
-                    context={CTX_SKILL_TRACE: {
-                        "skill_names": skills_used,
-                        "tool_call_count": agent_result.tool_call_count,
-                        "tool_error_count": agent_result.tool_error_count,
-                        "messages_raw": agent_result.messages_raw,
-                        "skill_paths": skill_paths,
-                    }},
-                )
-                await redis_conn.xadd(
-                    STREAM_SKILL_TRACE, {"payload": trace_env.to_json()}
+                await self._publish_skill_trace(
+                    redis_conn, envelope, sender,
+                    skill_names=skills_used,
+                    tool_call_count=agent_result.tool_call_count,
+                    tool_error_count=agent_result.tool_error_count,
+                    messages_raw=agent_result.messages_raw,
+                    skill_paths=skill_paths,
                 )
                 logger.info(
                     "[TASK] skill trace published — corr=%s skills=%s "
@@ -1008,23 +1065,14 @@ class Atelier(BrickBase):
                         p = Path(skill_path).resolve()
                         if p.is_relative_to(_bundles_dir):
                             sa_skill_paths[p.name] = skill_path
-                sa_trace_env = Envelope(
-                    content="",
-                    sender_id=f"atelier:{sender}",
-                    channel="internal",
-                    session_id=envelope.session_id,
-                    correlation_id=corr,
-                    action=ACTION_SKILL_TRACE,
-                    context={CTX_SKILL_TRACE: {
-                        "skill_names": sa_trace.skill_names,
-                        "tool_call_count": sa_trace.tool_call_count,
-                        "tool_error_count": sa_trace.tool_error_count,
-                        "messages_raw": sa_trace.messages_raw,
-                        "skill_paths": sa_skill_paths,
-                    }},
-                )
-                await redis_conn.xadd(
-                    STREAM_SKILL_TRACE, {"payload": sa_trace_env.to_json()}
+                await self._publish_skill_trace(
+                    redis_conn, envelope, sender,
+                    skill_names=sa_trace.skill_names,
+                    tool_call_count=sa_trace.tool_call_count,
+                    tool_error_count=sa_trace.tool_error_count,
+                    messages_raw=sa_trace.messages_raw,
+                    skill_paths=sa_skill_paths,
+                    subagent_name=sa_trace.subagent_name,
                 )
                 logger.info(
                     "[TASK] subagent skill trace published — corr=%s subagent=%s "
@@ -1046,7 +1094,8 @@ class Atelier(BrickBase):
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
             out_stream = STREAM_OUTGOING_PENDING
-            await redis_conn.xadd(out_stream, {"payload": response_env.to_json()})
+            response_json = response_env.to_json()
+            await redis_conn.xadd(out_stream, {"payload": response_json})
             logger.info(
                 "[TASK] response published — corr=%s stream=%s reply='%s'",
                 corr, out_stream, reply_text[:80],
@@ -1061,7 +1110,7 @@ class Atelier(BrickBase):
                 correlation_id=corr,
                 action=ACTION_MEMORY_ARCHIVE,
                 context={CTX_SOUVENIR_REQUEST: {
-                    "envelope_json": response_env.to_json(),
+                    "envelope_json": response_json,
                     "messages_raw": agent_result.messages_raw,
                 }},
             )
@@ -1077,6 +1126,50 @@ class Atelier(BrickBase):
                 "[TASK] DONE — corr=%s sender=%s model=%s reply_len=%d",
                 corr, sender, profile.model, len(reply_text),
             )
+            return True
+
+        except asyncio.TimeoutError:
+            # Turn exceeded max_turn_seconds — treat like AgentExecutionError
+            logger.error(
+                "[TASK] turn TIMEOUT — corr=%s max_turn_seconds=%s skills=%s",
+                corr, profile.max_turn_seconds, skills_used,
+            )
+            dlq_entry_timeout: dict = {
+                "payload": envelope.to_json(),
+                "reason": f"turn timeout after {profile.max_turn_seconds}s",
+                "failed_at": str(time.time()),
+            }
+            await redis_conn.xadd(STREAM_TASKS_FAILED, dlq_entry_timeout)
+
+            # Publish a plain error reply — no ErrorSynthesizer (no messages_raw available)
+            timeout_msg = (
+                "La requête a pris trop de temps et a été interrompue. "
+                "Merci de réessayer ou de simplifier votre demande."
+            )
+            timeout_env = Envelope.from_parent(parent=envelope, content=timeout_msg)
+            timeout_env.action = ACTION_MESSAGE_OUTGOING_PENDING
+            await redis_conn.xadd(STREAM_OUTGOING_PENDING, {"payload": timeout_env.to_json()})
+
+            # Publish failure trace so Forgeron can detect timeout patterns
+            if skills_used:
+                try:
+                    await self._publish_skill_trace(
+                        redis_conn, envelope, sender,
+                        skill_names=skills_used,
+                        tool_call_count=0,
+                        tool_error_count=-1,  # sentinel: timeout/aborted turn
+                        messages_raw=[],
+                        skill_paths=skill_paths,
+                    )
+                    logger.info(
+                        "[TASK] timeout trace published — corr=%s skills=%s",
+                        corr, skills_used,
+                    )
+                except Exception as trace_exc:
+                    logger.warning(
+                        "[TASK] timeout trace FAILED — corr=%s error=%s",
+                        corr, trace_exc,
+                    )
             return True
 
         except AgentExecutionError as exc:
@@ -1141,23 +1234,13 @@ class Atelier(BrickBase):
             # Publish failure trace so Forgeron can analyze aborted turns
             if skills_used:
                 try:
-                    failure_trace_env = Envelope(
-                        content="",
-                        sender_id=f"atelier:{sender}",
-                        channel="internal",
-                        session_id=envelope.session_id,
-                        correlation_id=corr,
-                        action=ACTION_SKILL_TRACE,
-                        context={CTX_SKILL_TRACE: {
-                            "skill_names": skills_used,
-                            "tool_call_count": exc.tool_call_count,
-                            "tool_error_count": -1,  # sentinel: aborted turn
-                            "messages_raw": exc.messages_raw,
-                            "skill_paths": skill_paths,
-                        }},
-                    )
-                    await redis_conn.xadd(
-                        STREAM_SKILL_TRACE, {"payload": failure_trace_env.to_json()}
+                    await self._publish_skill_trace(
+                        redis_conn, envelope, sender,
+                        skill_names=skills_used,
+                        tool_call_count=exc.tool_call_count,
+                        tool_error_count=-1,  # sentinel: aborted turn
+                        messages_raw=exc.messages_raw,
+                        skill_paths=skill_paths,
                     )
                     logger.info(
                         "[TASK] failure trace published — corr=%s skills=%s "
@@ -1174,6 +1257,29 @@ class Atelier(BrickBase):
                     "[TASK] failure trace SKIP — no skills_used corr=%s",
                     corr,
                 )
+
+            for sa_trace in exc.subagent_traces:
+                if not sa_trace.skill_names:
+                    continue
+                try:
+                    await self._publish_skill_trace(
+                        redis_conn, envelope, sender,
+                        skill_names=sa_trace.skill_names,
+                        tool_call_count=sa_trace.tool_call_count,
+                        tool_error_count=-1,  # sentinel: aborted subagent turn
+                        messages_raw=sa_trace.messages_raw,
+                        skill_paths={},
+                        subagent_name=sa_trace.subagent_name,
+                    )
+                    logger.info(
+                        "[TASK] subagent failure trace published — corr=%s subagent=%s skills=%s",
+                        corr, sa_trace.subagent_name, sa_trace.skill_names,
+                    )
+                except Exception as sa_exc:
+                    logger.warning(
+                        "[TASK] subagent failure trace FAILED — corr=%s subagent=%s error=%s",
+                        corr, sa_trace.subagent_name, sa_exc,
+                    )
             return True
 
         except Exception as exc:

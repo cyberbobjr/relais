@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from atelier.message_serializer import extract_read_skill_names
 from atelier.streaming import (
     REPLY_PLACEHOLDER,
     StreamBuffer,
@@ -240,12 +241,18 @@ def build_subagent_traces(
 ) -> tuple:
     """Build per-subagent execution traces from LangChain callback data.
 
+    ``skill_names`` in each trace reflects skills **actually invoked** via
+    ``read_skill`` calls found in the subagent's captured messages
+    (``extract_read_skill_names``), not the assigned skill list from
+    *subagent_skill_map*.
+
     Returns an empty tuple when *capture* is ``None`` or *ns_to_name* is empty.
 
     Args:
         capture: ``SubagentMessageCapture`` instance (or ``None``).
         ns_to_name: Mapping from DeepAgents namespace IDs to subagent names.
-        subagent_skill_map: Mapping from subagent name to list of skill names.
+        subagent_skill_map: Mapping from subagent name to assigned skill names
+            (kept for callers; no longer used for ``skill_names`` population).
         serialize_messages_fn: Callable that serialises LangChain messages to
             a list of dicts (passed in to avoid a circular import).
 
@@ -261,13 +268,14 @@ def build_subagent_traces(
     traces: list[SubagentTrace] = []
     for ns_id, subagent_name in ns_to_name.items():
         sa_data = capture.get_subagent_data(ns_id)
+        messages_raw = serialize_messages_fn(sa_data.messages)
         traces.append(
             SubagentTrace(
                 subagent_name=subagent_name,
-                skill_names=subagent_skill_map.get(subagent_name, []),
+                skill_names=extract_read_skill_names(messages_raw),
                 tool_call_count=sa_data.tool_calls,
                 tool_error_count=sa_data.tool_errors,
-                messages_raw=serialize_messages_fn(sa_data.messages),
+                messages_raw=messages_raw,
             )
         )
     return tuple(traces)

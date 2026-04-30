@@ -14,6 +14,8 @@ Supported message types:
 
 from __future__ import annotations
 
+import json
+
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -127,3 +129,42 @@ def deserialize_messages(data: list[dict]) -> list[BaseMessage]:
             )
 
     return result
+
+
+def extract_read_skill_names(messages_raw: list[dict]) -> list[str]:
+    """Return skill names actually invoked via read_skill in serialized messages.
+
+    Scans serialized LangChain message dicts for AI messages with tool_calls
+    where name == "read_skill", collecting skill_name argument values
+    deduplicated in call order.
+
+    Args:
+        messages_raw: Serialized LangChain message list (as produced by
+            ``serialize_messages()``).
+
+    Returns:
+        Deduplicated list of skill names that were read, in call order.
+    """
+    seen: dict[str, None] = {}
+    for msg in messages_raw:
+        if not isinstance(msg, dict):
+            continue
+        msg_type = msg.get("type", msg.get("role", ""))
+        if msg_type not in ("ai", "AIMessage", "assistant"):
+            continue
+        tool_calls = msg.get("tool_calls") or []
+        for tc in tool_calls:
+            if not isinstance(tc, dict) or tc.get("name") != "read_skill":
+                continue
+            args = tc.get("args") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (ValueError, TypeError):
+                    continue
+            skill_name = (
+                args.get("skill_name") or args.get("name") or args.get("skill") or ""
+            )
+            if skill_name:
+                seen[skill_name] = None
+    return list(seen)

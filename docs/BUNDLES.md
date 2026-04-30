@@ -78,7 +78,16 @@ Tool modules must only import from prefixes that are on the allowed list (`aigui
 
 Skill directories placed in `skills/` are loaded globally. A skill directory must contain at least a `SKILL.md` file. Once loaded, the skill is available to all agents via the `list_skills` / `read_skill` mechanism provided by DeepAgents.
 
-Subagent-local skills placed under `subagents/<name>/skills/` are only exposed to that specific subagent.
+**Flat layout only.** `ToolPolicy` scans exactly one level deep inside `skills/`. A skill placed inside another skill's directory (e.g. `skills/parent-skill/child-skill/`) will never be discovered. Every skill must be a direct child of `skills/`:
+
+- CORRECT: `my-bundle/skills/jw-send-summary/SKILL.md`
+- WRONG:   `my-bundle/skills/jw-media-scraper/jw-send-summary/SKILL.md`
+
+If one skill depends on another, express that relationship in the `metadata.depends_on` YAML field inside `SKILL.md` and in the skill name (e.g. `jw-send-summary` to signal it builds on `jw-media-scraper`). Do not use subdirectories.
+
+`WriteSkillTool` (used by the `skill-designer` subagent) enforces this constraint at write time and returns an error for any path that is not a direct child of the skills root.
+
+Subagent-local skills placed under `subagents/<name>/skills/` are only exposed to that specific subagent. The same flat-layout constraint applies there.
 
 ### subagents/
 

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from common.profile_loader import ProfileConfig, ResilienceConfig, load_profiles, resolve_profile
-from atelier.agent_executor import _resolve_profile_model
+from atelier.profile_model import _resolve_profile_model
 
 # Path to the actual project default profiles file (used for integration-style tests
 # that must verify the shipped configuration, not a fixture YAML).
@@ -687,7 +687,7 @@ def test_resolve_profile_model_returns_string_when_no_overrides() -> None:
     profile = ProfileConfig(
         model="anthropic:claude-haiku-4-5",
         temperature=0.5,
-        max_tokens=512,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url=None,
         api_key_env=None,
@@ -713,7 +713,7 @@ def test_resolve_profile_model_calls_init_chat_model_with_base_url(tmp_path: Pat
     profile = ProfileConfig(
         model="openai:my-local-model",
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url="http://localhost:1234/v1",
         api_key_env=None,
@@ -742,7 +742,7 @@ def test_resolve_profile_model_reads_api_key_from_env(monkeypatch: pytest.Monkey
     profile = ProfileConfig(
         model="anthropic:claude-haiku-4-5",
         temperature=0.7,
-        max_tokens=512,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url=None,
         api_key_env="MY_PROVIDER_KEY",
@@ -894,7 +894,7 @@ def test_resolve_profile_model_passes_model_kwargs_when_parallel_tool_calls_set(
     profile = ProfileConfig(
         model="openai:mistral-medium-3.1",
         temperature=0.7,
-        max_tokens=2048,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url="http://openrouter.ai/api/v1",
         api_key_env=None,
@@ -927,7 +927,7 @@ def test_resolve_profile_model_calls_init_when_only_parallel_tool_calls_set() ->
     profile = ProfileConfig(
         model="openai:mistral-medium-3.1",
         temperature=0.7,
-        max_tokens=2048,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url=None,
         api_key_env=None,
@@ -963,7 +963,7 @@ def test_resolve_profile_model_no_model_kwargs_when_parallel_tool_calls_none(
     profile = ProfileConfig(
         model="openai:my-local-model",
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=0,
         resilience=ResilienceConfig(retry_attempts=1, retry_delays=[1]),
         base_url="http://localhost:1234/v1",
         api_key_env=None,
@@ -977,3 +977,151 @@ def test_resolve_profile_model_no_model_kwargs_when_parallel_tool_calls_none(
         "openai:my-local-model",
         base_url="http://localhost:1234/v1",
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — shell_timeout_seconds in ProfileConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_profile_config_shell_timeout_seconds_defaults_to_30() -> None:
+    """ProfileConfig.shell_timeout_seconds must default to 30 when not specified.
+
+    The field must exist on the dataclass and be accessible without passing
+    shell_timeout_seconds explicitly to the constructor.
+    """
+    profile = ProfileConfig(
+        model="anthropic:claude-haiku-4-5",
+        temperature=0.7,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=2, retry_delays=[1, 3]),
+        base_url=None,
+        api_key_env=None,
+    )
+
+    assert profile.shell_timeout_seconds == 30
+
+
+@pytest.mark.unit
+def test_load_profiles_reads_shell_timeout_seconds(tmp_path: Path) -> None:
+    """load_profiles() must read shell_timeout_seconds from the YAML profile.
+
+    When the YAML defines shell_timeout_seconds: 60, the loaded ProfileConfig
+    must reflect that value.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+    """
+    yaml_text = textwrap.dedent(
+        """\
+        profiles:
+          default:
+            model: mistral-small-2603
+            temperature: 0.7
+            max_tokens: 2048
+            shell_timeout_seconds: 60
+            base_url: null
+            api_key_env: null
+            resilience:
+              retry_attempts: 3
+              retry_delays: [2, 5, 15]
+        """
+    )
+    p = tmp_path / "profiles.yaml"
+    p.write_text(yaml_text)
+
+    profiles = load_profiles(config_path=p)
+
+    assert profiles["default"].shell_timeout_seconds == 60
+
+
+@pytest.mark.unit
+def test_load_profiles_defaults_shell_timeout_when_absent(profiles_yaml: Path) -> None:
+    """load_profiles() must use 30 for shell_timeout_seconds when key is absent.
+
+    The MINIMAL_YAML fixture does not include shell_timeout_seconds — all loaded
+    profiles must still expose the default of 30.
+
+    Args:
+        profiles_yaml: Fixture path to the temporary profiles YAML file.
+    """
+    profiles = load_profiles(config_path=profiles_yaml)
+
+    assert profiles["default"].shell_timeout_seconds == 30
+    assert profiles["fast"].shell_timeout_seconds == 30
+    assert profiles["precise"].shell_timeout_seconds == 30
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — max_turn_seconds in ProfileConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_profile_config_max_turn_seconds_defaults_to_300() -> None:
+    """ProfileConfig.max_turn_seconds must default to 300 when not specified.
+
+    The field must exist on the dataclass and be accessible without passing
+    max_turn_seconds explicitly to the constructor.
+    """
+    profile = ProfileConfig(
+        model="anthropic:claude-haiku-4-5",
+        temperature=0.7,
+        max_tokens=1024,
+        resilience=ResilienceConfig(retry_attempts=2, retry_delays=[1, 3]),
+        base_url=None,
+        api_key_env=None,
+    )
+
+    assert profile.max_turn_seconds == 300
+
+
+@pytest.mark.unit
+def test_load_profiles_reads_max_turn_seconds(tmp_path: Path) -> None:
+    """load_profiles() must read max_turn_seconds from the YAML profile.
+
+    When the YAML defines max_turn_seconds: 600, the loaded ProfileConfig
+    must reflect that value.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+    """
+    yaml_text = textwrap.dedent(
+        """\
+        profiles:
+          default:
+            model: mistral-small-2603
+            temperature: 0.7
+            max_tokens: 2048
+            max_turn_seconds: 600
+            base_url: null
+            api_key_env: null
+            resilience:
+              retry_attempts: 3
+              retry_delays: [2, 5, 15]
+        """
+    )
+    p = tmp_path / "profiles.yaml"
+    p.write_text(yaml_text)
+
+    profiles = load_profiles(config_path=p)
+
+    assert profiles["default"].max_turn_seconds == 600
+
+
+@pytest.mark.unit
+def test_load_profiles_defaults_max_turn_when_absent(profiles_yaml: Path) -> None:
+    """load_profiles() must use 300 for max_turn_seconds when key is absent.
+
+    The MINIMAL_YAML fixture does not include max_turn_seconds — all loaded
+    profiles must still expose the default of 300.
+
+    Args:
+        profiles_yaml: Fixture path to the temporary profiles YAML file.
+    """
+    profiles = load_profiles(config_path=profiles_yaml)
+
+    assert profiles["default"].max_turn_seconds == 300
+    assert profiles["fast"].max_turn_seconds == 300
+    assert profiles["precise"].max_turn_seconds == 300

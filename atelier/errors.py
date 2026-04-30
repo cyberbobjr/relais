@@ -27,6 +27,9 @@ class AgentExecutionError(Exception):
         tool_call_count: Total tool invocations during the failed turn.
         tool_error_count: Number of tool errors during the failed turn.
         messages_raw: Serialized LangChain messages captured before abort.
+        subagent_traces: Per-subagent execution traces collected before abort.
+            Each element is a ``SubagentTrace`` instance.  Empty tuple when no
+            subagents were invoked or traces were not yet captured.
     """
 
     def __init__(
@@ -37,12 +40,14 @@ class AgentExecutionError(Exception):
         tool_call_count: int = 0,
         tool_error_count: int = 0,
         messages_raw: list[dict] | None = None,
+        subagent_traces: tuple = (),
     ) -> None:
         super().__init__(message)
         self.response_body = response_body
         self.tool_call_count = tool_call_count
         self.tool_error_count = tool_error_count
         self.messages_raw: list[dict] = messages_raw if messages_raw is not None else []
+        self.subagent_traces: tuple = subagent_traces
 
 
 class ExhaustedRetriesError(AgentExecutionError):

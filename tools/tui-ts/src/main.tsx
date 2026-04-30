@@ -4,7 +4,7 @@ import { createSignal } from "solid-js";
 import { App } from "./app.tsx";
 import { loadConfig, saveConfig, withSessionId } from "./lib/config.ts";
 import { RelaisClient } from "./lib/client.ts";
-import { loadHistory, setHistoryLoading, setErrorBanner, setSessionId as setStoreSessionId } from "./lib/store.ts";
+import { loadHistory, setHistoryLoading, setErrorBanner, setSessionId as setStoreSessionId, setAvailableCommands } from "./lib/store.ts";
 import { initTheme } from "./lib/theme.ts";
 import { logger } from "./lib/logger.ts";
 
@@ -67,3 +67,14 @@ async function hydrateHistory(sessionId: string): Promise<void> {
 }
 
 if (config.lastSessionId) void hydrateHistory(config.lastSessionId);
+
+async function hydrateCommands(): Promise<void> {
+  try {
+    const commands = await client.getCommands();
+    setAvailableCommands(commands);
+    logger.info(`commands loaded: ${commands.length} entries`);
+  } catch (err: unknown) {
+    logger.warn(`commands fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+void hydrateCommands();

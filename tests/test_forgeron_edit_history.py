@@ -200,9 +200,18 @@ async def test_edit_changed_writes_journal(tmp_path):
     config = _make_config(edit_cooldown_seconds=300)
     redis = _make_redis_mock()
 
+    messages_with_skill = [
+        {"type": "human", "content": "use my-skill"},
+        {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [{"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}],
+        },
+        {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+    ]
     mock_result = SkillEditResult(updated_skill="# improved", changed=True, reason="added tip")
     with patch.object(editor, "_call_llm", new=AsyncMock(return_value=mock_result)):
-        result = await editor.edit("my-skill", [], config, redis, trigger_reason="errors", correlation_id="abc123")
+        result = await editor.edit("my-skill", messages_with_skill, config, redis, trigger_reason="errors", correlation_id="abc123")
 
     assert result is True
     rows = _read_history(skill_md)
@@ -225,9 +234,18 @@ async def test_edit_unchanged_writes_journal(tmp_path):
     config = _make_config()
     redis = _make_redis_mock()
 
+    messages_with_skill = [
+        {"type": "human", "content": "use my-skill"},
+        {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [{"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}],
+        },
+        {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+    ]
     mock_result = SkillEditResult(updated_skill="# content", changed=False, reason="nothing new")
     with patch.object(editor, "_call_llm", new=AsyncMock(return_value=mock_result)):
-        result = await editor.edit("my-skill", [], config, redis, correlation_id="xyz")
+        result = await editor.edit("my-skill", messages_with_skill, config, redis, correlation_id="xyz")
 
     assert result is False
     rows = _read_history(skill_md)
@@ -249,8 +267,17 @@ async def test_edit_llm_failure_writes_journal(tmp_path):
     config = _make_config()
     redis = _make_redis_mock()
 
+    messages_with_skill = [
+        {"type": "human", "content": "use my-skill"},
+        {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [{"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}],
+        },
+        {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+    ]
     with patch.object(editor, "_call_llm", new=AsyncMock(return_value=None)):
-        result = await editor.edit("my-skill", [], config, redis, trigger_reason="aborted", correlation_id="fail-1")
+        result = await editor.edit("my-skill", messages_with_skill, config, redis, trigger_reason="aborted", correlation_id="fail-1")
 
     assert result is False
     rows = _read_history(skill_md)
@@ -295,9 +322,18 @@ async def test_edit_default_correlation_id(tmp_path):
     config = _make_config()
     redis = _make_redis_mock()
 
+    messages_with_skill = [
+        {"type": "human", "content": "use my-skill"},
+        {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [{"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}],
+        },
+        {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+    ]
     mock_result = SkillEditResult(updated_skill="# improved", changed=True, reason="tip added")
     with patch.object(editor, "_call_llm", new=AsyncMock(return_value=mock_result)):
-        await editor.edit("my-skill", [], config, redis)
+        await editor.edit("my-skill", messages_with_skill, config, redis)
 
     rows = _read_history(skill_md)
     assert rows[0]["corr"] == ""
@@ -318,9 +354,18 @@ async def test_edit_identical_content_writes_journal(tmp_path):
     config = _make_config()
     redis = _make_redis_mock()
 
+    messages_with_skill = [
+        {"type": "human", "content": "use my-skill"},
+        {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [{"id": "tc-1", "name": "read_skill", "args": {"skill_name": "my-skill"}}],
+        },
+        {"type": "tool", "tool_call_id": "tc-1", "content": "my-skill content"},
+    ]
     mock_result = SkillEditResult(updated_skill=original, changed=True, reason="unchanged")
     with patch.object(editor, "_call_llm", new=AsyncMock(return_value=mock_result)):
-        result = await editor.edit("my-skill", [], config, redis, correlation_id="strip-test")
+        result = await editor.edit("my-skill", messages_with_skill, config, redis, correlation_id="strip-test")
 
     assert result is False
     rows = _read_history(skill_md)

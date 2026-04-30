@@ -140,6 +140,7 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
   - **REST** (`aiguilleur/channels/rest/adapter.py`) — HTTP/JSON and SSE adapter for programmatic clients (CLI, CI, TUI). Exposes:
     - `POST /v1/messages` — Send a message and receive the LLM reply (JSON or SSE streaming)
     - `GET /v1/history?session_id=...&limit=...` — Retrieve a session's history (ownership enforcement via user_id)
+    - `GET /v1/commands` — Return the registered slash-command catalog (CQRS query to Commandant via `relais:commandant:query`; used by TUI for auto-completion). No ACL filtering — Sentinelle enforces authorization at submission time.
     - `GET /v1/events` — Persistent SSE push stream: fan-out outgoing messages to concurrent subscribers (same user ID, different clients). Powered by `PushRegistry` (per-user XREAD reader tasks) and `relais:messages:outgoing:rest:{user_id}` per-user streams.
     - `GET /docs/sse` — Interactive SSE playground
 
@@ -178,6 +179,9 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
 - Assembles the system prompt with `assemble_system_prompt()` (`atelier/soul_assembler.py`), which returns an `AssemblyResult(prompt, issues, is_degraded)`. If `is_degraded=True` (at least one prompt layer missing or unreadable), a WARNING is logged with the issue list, and the degraded prompt is still used (fail-soft).
 - For each request, `AgentExecutor` prepends a `<relais_execution_context>` block to the first user message containing `sender_id`, `channel`, `session_id`, `correlation_id` and `reply_to` extracted from the envelope. This block is strictly technical metadata — skills (notably `channel-setup` for WhatsApp pairing) can read it for correct routing, and the system prompt instructs the model **not** to echo it back to the user.
 - Executes `AgentExecutor` — returns `AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count, subagent_traces)`. `subagent_traces` is a tuple of `SubagentTrace` (one per subagent that used tools) built from `SubagentMessageCapture` callbacks; empty tuple when no subagent is invoked.
+- **Per-profile timeouts** (fields in `ProfileConfig`, loaded from `profiles.yaml`):
+  - `shell_timeout_seconds` (default `30`) — passed to `_HtmlSafeShellBackend`; shell tool calls exceeding this limit are cancelled and return an error string to the model (loop continues).
+  - `max_turn_seconds` (default `300`) — applied via `asyncio.wait_for()` around the entire `AgentExecutor.execute()` call. On `asyncio.TimeoutError`: (1) envelope routed to `relais:tasks:failed` (DLQ), (2) plain timeout error reply published to `relais:messages:outgoing_pending`, (3) skill trace published to `relais:skill:trace` with `tool_error_count=-1` sentinel if `skills_used` is non-empty.
 - Publishes:
   - streaming text/progress to `relais:messages:streaming:{channel}:{correlation_id}`
   - some progress events to `relais:messages:outgoing:{channel}`
@@ -190,7 +194,7 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
   - `atelier/streaming.py` — `StreamBuffer`, `_extract_thinking`, `_has_tool_use_block`, `_extract_block_type`, `TaskArgsTracker`, `ChunkPayload`, `decode_chunk`; token buffering and content block extraction helpers; `TaskArgsTracker` accumulates JSON argument fragments from the `task` tool (streaming token-by-token) to extract the subagent name and maintain a namespace-ID → name mapping over the duration of a `_stream()` call; `ChunkPayload` (NamedTuple) models a validated DeepAgents astream v2 chunk (`chunk_type`, `ns`, `data`, `source` property); `decode_chunk` validates and decodes a raw dict chunk into a `ChunkPayload` or returns `None` for unknown shapes; also `REPLY_PLACEHOLDER`, `_EXECUTE_FAILURE_MARKER`, `_normalise_content` (sentinel constants and content normalisation); all extracted from `agent_executor.py` to keep each module under 800 lines.
   - `atelier/subagents_resolver.py` — pure functions for resolving `tools:` and `skills:` tokens (`_load_tools_from_import`, `_resolve_skill_token`, `_add_tool`, …); uses `common.pattern_matcher.matches` for fnmatch filtering; extracted from `atelier/subagents.py`.
   - `atelier/display_config.py` — `DisplayConfig` (frozen dataclass) loaded from `atelier.yaml` (`display:` section) via `load_display_config()`, replaces the former `progress_config.py`. Validation is per-field: each invalid key emits a WARNING and falls back to its default value (other fields remain applied) via `_validate_bool()` and `_validate_int()`.
-  - `atelier/profile_model.py` — `_resolve_profile_model()`; builds the `BaseChatModel` or returns the `model` string from a `ProfileConfig`; extracted from `agent_executor.py`.
+  - `atelier/profile_model.py` — `_resolve_profile_model()`; builds the `BaseChatModel` or returns the `model` string from a `ProfileConfig`; extracted from `agent_executor.py`. Uses a `ModelHandler` `Protocol` and `_HANDLER_REGISTRY` (factory registry pattern): `DeepSeekModelHandler` (handles `deepseek:` prefix, `always_instantiate = True`, requires `langchain_deepseek`) → `DefaultModelHandler` (catch-all, delegates to `init_chat_model`, `always_instantiate = False`). The `always_instantiate` flag on each handler controls whether model instantiation is forced regardless of profile fields; it is checked first in `needs_init` before `base_url`, `api_key_env`, etc. When a provider-specific library is absent the matching handler raises `ImportError` immediately — there is no silent fallback.
   - `atelier/prompts.py` — prompt builders: `DIAGNOSTIC_MARKER` (runtime constant for diagnostic injection), `SUBAGENT_OPERATIONAL_RULES` (injected into subagent system prompts), `build_project_context_prompt`, `_build_execution_context`, `_build_core_system_prompt` (reads `atelier/SYSTEM_PROMPT.md` once, cached); extracted from `agent_executor.py`.
   - `atelier/SYSTEM_PROMPT.md` — non-user-editable core identity for the RELAIS agent: defines identity, long-term memory instructions, self-diagnosis on tool errors, diagnostic awareness, execution context handling, and operational constraints. Read by `_build_core_system_prompt()` and passed as `system_prompt=` to `create_deep_agent()`. Distinct from user-editable SOUL.md layers passed via `memory=`.
   - `atelier/transient_errors.py` — provider-agnostic transient-error detection: `_TRANSIENT_ERROR_NAMES`, `_TRANSIENT_VALUE_ERROR_PATTERNS`, `_is_transient_provider_error`; extracted from `agent_executor.py`.
@@ -200,11 +204,14 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
 
 ### Commandant
 
-- Inherits from `BrickBase`; `stream_specs()` declares a single stream: `relais:commands` (`commandant_group`, `ack_mode="always"`).
+- Inherits from `BrickBase`; `stream_specs()` declares two streams:
+  - `relais:commands` (`commandant_group`, `ack_mode="always"`) — slash-command dispatch.
+  - `relais:commandant:query` (`commandant_catalog_group`, `ack_mode="always"`) — CQRS read side: responds to catalog queries from REST clients (e.g. TUI auto-completion).
 - `/help` writes directly to `relais:messages:outgoing:{channel}`.
 - `/clear` writes a `clear` action to `relais:memory:request`.
 - `/sessions` writes a `sessions` action to `relais:memory:request` to list the user's recent sessions.
 - `/resume <session_id>` writes a `resume` action to `relais:memory:request` to resume a previous session. Validates that the session_id belongs to the user (ownership enforcement).
+- **Catalog query handler** (`_handle_catalog_query`): on `relais:commandant:query`, responds with `{"commands": [{"name", "description"}, ...]}` via `LPUSH` + `EXPIRE 7s` on `relais:commandant:catalog:{correlation_id}`. The REST adapter retrieves the response via `BRPOP` (5 s timeout).
 
 ### Souvenir
 
@@ -257,12 +264,13 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines a
 #### Direct edit pipeline — Progressive skill improvement
 
 - Consumes `relais:skill:trace` (group `forgeron_group`, `ack_mode="always"` — traces are advisory).
-- Atelier publishes to this stream after each agent turn: skill names used, tool call and error counts, serialised LangChain raw messages (`CTX_SKILL_TRACE`), and `skill_paths` (dict `{skill_name: absolute_path}` for bundle skills). Atelier also publishes a separate trace **per subagent** that used tools (step 7b, `SubagentTrace`), with messages scoped to the subagent's LangGraph namespace via `SubagentMessageCapture`.
+- Atelier publishes to this stream after each agent turn: skill names **actually invoked** via `read_skill` calls (scanned from `messages_raw` by `extract_read_skill_names` in `atelier.message_serializer`), tool call and error counts, serialised LangChain raw messages (`CTX_SKILL_TRACE`), and `skill_paths` (dict `{skill_name: absolute_path}` for bundle skills). Atelier also publishes a separate trace **per subagent** that used tools (step 7b, `SubagentTrace`), with `skill_names` extracted from the subagent's serialised messages via the same `extract_read_skill_names` — not from the subagent's assigned skill list.
 - Forgeron accumulates one row per trace per skill in SQLite via `SkillTraceStore` (inherits from `BaseAsyncStore`).
 
 **Direct edit (`SkillEditor`, LLM precise)**:
-- `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (via `scope_messages_to_skill`). It calls the LLM once with `with_structured_output` to produce a rewritten SKILL.md and a `changed` flag.
-- The SKILL.md is written only if `changed=True` and the content differs from the existing file.
+- `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (via `scope_messages_to_skill`). `scope_messages_to_skill` keeps only ToolMessage entries whose tool_call_id originated from a `read_skill` call for the target skill, or whose content mentions the skill name (content-based signal). It returns `[]` when no evidence of the target skill is found — the editor then skips the LLM call entirely.
+- When a non-empty scope is available, the LLM is called once with `with_structured_output`. The response includes a `relevant` flag: if `False` (the conversation is entirely about something else), the edit is skipped without writing the file. This prevents skill pollution from off-topic conversations.
+- The SKILL.md is written only if `relevant=True`, `changed=True`, and the content differs from the existing file.
 - Every edit attempt (success or failure) is appended to `edit_history.jsonl` next to SKILL.md: Unix timestamp, trigger reason, LLM reason, `changed` flag, and `correlation_id`. The file is capped at 50 entries (oldest pruned) via an atomic tmp-replace write.
 - Triggered by four conditions (as soon as at least one is true):
   1. **Tool errors**: `tool_error_count >= edit_min_tool_errors` (default 1)
@@ -293,7 +301,7 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines a
   2. Sends a user notification to `relais:messages:outgoing_pending` (before BRPOP to avoid any blocking).
   3. Waits for the reply via `_fetch_history_with_retry()` — BRPOP with exponential backoff (max 2 retries, 1s and 2s delays) to handle Souvenir being slow. On timeout, processing is skipped gracefully.
   4. If history arrives, publishes an `ACTION_MESSAGE_TASK` to `relais:tasks` with `force_subagent="skill-designer"` and correction data in `context["forgeron"]` (`corrected_behavior`, `history_turns`, optional `skill_name_hint`).
-- The `skill-designer` native subagent (Atelier) receives this data and generates a revised SKILL.md via the `WriteSkillTool`.
+- The `skill-designer` native subagent (Atelier) receives this data and generates a revised SKILL.md via the `WriteSkillTool`. `WriteSkillTool` enforces a flat-layout constraint: skills must be direct children of `$RELAIS_HOME/skills/` or of a bundle's `skills/` directory — nested subdirectories are rejected because `ToolPolicy` only scans one level deep.
 
 **SQLite files** (in `~/.relais/storage/forgeron.db`):
 

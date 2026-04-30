@@ -301,11 +301,11 @@ def test_commandant_inherits_brick_base():
 
 @pytest.mark.unit
 def test_commandant_stream_spec():
-    """stream_specs must return a single spec for relais:commands."""
+    """stream_specs must return the first spec for relais:commands."""
     from commandant.main import Commandant
     c = Commandant()
     specs = c.stream_specs()
-    assert len(specs) == 1
+    assert len(specs) == 2
     assert specs[0].stream == "relais:commands"
     assert specs[0].group == "commandant_group"
     assert specs[0].consumer == "commandant_1"
@@ -599,3 +599,100 @@ def test_known_commands_includes_sessions_and_resume():
     from commandant.commands import KNOWN_COMMANDS
     assert "sessions" in KNOWN_COMMANDS
     assert "resume" in KNOWN_COMMANDS
+
+
+# ---------------------------------------------------------------------------
+# Tests _handle_catalog_query (CQRS catalog endpoint)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_second_stream_spec_is_catalogquery_stream():
+    """stream_specs()[1] must be the catalog query stream with the right group/consumer."""
+    from commandant.main import Commandant
+    from common.streams import STREAM_COMMANDANT_QUERY
+    c = Commandant()
+    specs = c.stream_specs()
+    assert len(specs) == 2
+    assert specs[1].stream == STREAM_COMMANDANT_QUERY
+    assert specs[1].group == "commandant_catalog_group"
+    assert specs[1].consumer == "commandant_catalog_1"
+    assert specs[1].ack_mode == "always"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_handle_catalog_query_responds_with_catalog(mock_redis):
+    """_handle_catalog_query must LPUSH a JSON payload with a 'commands' list to the per-request key."""
+    from commandant.main import Commandant
+    from common.streams import key_commandant_catalog
+    from common.envelope_actions import ACTION_CATALOG_QUERY
+
+    corr_id = "test-corr-001"
+    envelope = Envelope(
+        content="catalog_query",
+        sender_id="rest:anonymous",
+        channel="rest",
+        session_id=corr_id,
+        correlation_id=corr_id,
+        action=ACTION_CATALOG_QUERY,
+    )
+    commandant = Commandant()
+    result = await commandant._handle_catalog_query(envelope, mock_redis)
+
+    assert result is True
+    expected_key = key_commandant_catalog(corr_id)
+    mock_redis.lpush.assert_called_once()
+    call_args = mock_redis.lpush.call_args
+    assert call_args.args[0] == expected_key
+    payload = json.loads(call_args.args[1])
+    assert "commands" in payload
+    assert isinstance(payload["commands"], list)
+    assert len(payload["commands"]) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_catalog_sorted_alphabetically(mock_redis):
+    """_handle_catalog_query must return commands sorted alphabetically by name."""
+    from commandant.main import Commandant
+    from common.envelope_actions import ACTION_CATALOG_QUERY
+
+    envelope = Envelope(
+        content="catalog_query",
+        sender_id="rest:anonymous",
+        channel="rest",
+        session_id="corr-alpha",
+        correlation_id="corr-alpha",
+        action=ACTION_CATALOG_QUERY,
+    )
+    commandant = Commandant()
+    await commandant._handle_catalog_query(envelope, mock_redis)
+
+    payload = json.loads(mock_redis.lpush.call_args.args[1])
+    names = [cmd["name"] for cmd in payload["commands"]]
+    assert names == sorted(names), f"Commands not sorted: {names}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_catalog_no_handler_field(mock_redis):
+    """_handle_catalog_query must NOT expose 'handler' callables in the catalog items."""
+    from commandant.main import Commandant
+    from common.envelope_actions import ACTION_CATALOG_QUERY
+
+    envelope = Envelope(
+        content="catalog_query",
+        sender_id="rest:anonymous",
+        channel="rest",
+        session_id="corr-handler",
+        correlation_id="corr-handler",
+        action=ACTION_CATALOG_QUERY,
+    )
+    commandant = Commandant()
+    await commandant._handle_catalog_query(envelope, mock_redis)
+
+    payload = json.loads(mock_redis.lpush.call_args.args[1])
+    for item in payload["commands"]:
+        assert "handler" not in item, (
+            f"Command '{item.get('name')}' exposes internal 'handler' field"
+        )

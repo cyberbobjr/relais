@@ -71,6 +71,9 @@ Used for out-of-band operations such as session compaction (/compact)."""
 KEY_WHATSAPP_PAIRING: str = "relais:whatsapp:pairing"
 """Redis key storing the active WhatsApp QR pairing context (JSON, TTL 300s)."""
 
+STREAM_COMMANDANT_QUERY: str = "relais:commandant:query"
+"""Command catalog query requests from any adapter (CQRS read side)."""
+
 # ---------------------------------------------------------------------------
 # Dynamic stream name helpers
 # ---------------------------------------------------------------------------
@@ -132,6 +135,18 @@ def key_active_sessions(sender_id: str) -> str:
         Key such as ``"relais:active_sessions:discord:admin001"``.
     """
     return f"relais:active_sessions:{sender_id}"
+
+
+def key_commandant_catalog(correlation_id: str) -> str:
+    """Return the per-request Redis List key where Commandant publishes the catalog.
+
+    Args:
+        correlation_id: Unique request identifier.
+
+    Returns:
+        Key such as ``"relais:commandant:catalog:some-uuid"``.
+    """
+    return f"relais:commandant:catalog:{correlation_id}"
 
 
 def stream_config_reload(brick: str) -> str:

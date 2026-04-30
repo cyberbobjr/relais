@@ -36,6 +36,8 @@ def _make_profile(mcp_timeout: float = 5.0) -> MagicMock:
     m.mcp_max_tools = 0
     m.model = "anthropic:claude-sonnet-4-6"
     m.max_turns = 10
+    m.max_turn_seconds = 300
+    m.shell_timeout_seconds = 30
     return m
 
 
@@ -362,6 +364,8 @@ def _make_atelier() -> "Atelier":  # type: ignore[name-defined]
     profile_mock.max_turns = 5
     profile_mock.mcp_timeout = 5.0
     profile_mock.mcp_max_tools = 0
+    profile_mock.max_turn_seconds = 300
+    profile_mock.shell_timeout_seconds = 30
 
     with patch("atelier.main.load_profiles", return_value={"default": profile_mock}), \
          patch("atelier.main.load_for_sdk", return_value={}), \
@@ -486,7 +490,7 @@ async def test_handle_envelope_uses_singleton_mcp_tools() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExec, \
          patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)), \
-         patch("atelier.main.resolve_profile", return_value=MagicMock(model="m", max_turns=5, mcp_timeout=5.0, mcp_max_tools=0)), \
+         patch("atelier.main.resolve_profile", return_value=MagicMock(model="m", max_turns=5, mcp_timeout=5.0, mcp_max_tools=0, max_turn_seconds=300, shell_timeout_seconds=30)), \
          patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
 
         mock_exec_instance = AsyncMock()
@@ -537,7 +541,7 @@ async def test_handle_envelope_does_not_instantiate_mcp_manager_per_request() ->
     with patch("atelier.main.McpSessionManager", SpyMcpSessionManager), \
          patch("atelier.main.AgentExecutor") as MockExec, \
          patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)), \
-         patch("atelier.main.resolve_profile", return_value=MagicMock(model="m", max_turns=5, mcp_timeout=5.0, mcp_max_tools=0)), \
+         patch("atelier.main.resolve_profile", return_value=MagicMock(model="m", max_turns=5, mcp_timeout=5.0, mcp_max_tools=0, max_turn_seconds=300, shell_timeout_seconds=30)), \
          patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
 
         mock_exec_instance = AsyncMock()

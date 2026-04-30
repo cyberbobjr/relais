@@ -975,3 +975,117 @@ async def test_agent_execution_error_synthesizer_receives_messages_raw() -> None
 
     assert len(synth_calls) == 1
     assert synth_calls[0]["messages_raw"] == partial_history
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — turn-level timeout (max_turn_seconds)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_xack_sent_and_dlq_on_turn_timeout() -> None:
+    """XACK is sent and DLQ receives the message when the turn exceeds max_turn_seconds.
+
+    asyncio.wait_for() must wrap agent_executor.execute(); a TimeoutError must
+    be treated like AgentExecutionError: ACK the message (avoid PEL poison pill),
+    route to DLQ, and publish an error reply to the user.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope()
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(side_effect=asyncio.TimeoutError())
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            try:
+                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+                            except asyncio.CancelledError:
+                                pass
+
+    redis_conn.xack.assert_awaited_once()
+
+    dlq_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == "relais:tasks:failed"
+    ]
+    assert len(dlq_calls) == 1
+
+    outgoing_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == "relais:messages:outgoing_pending"
+    ]
+    assert len(outgoing_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_publishes_skill_trace_with_sentinel() -> None:
+    """A timed-out turn publishes a skill trace with tool_error_count=-1.
+
+    When skills were used and the turn is aborted by asyncio.TimeoutError, a
+    failure trace envelope must be published to STREAM_SKILL_TRACE with the
+    sentinel tool_error_count=-1, so Forgeron can detect the timeout pattern.
+    """
+    from common.streams import STREAM_SKILL_TRACE
+
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope()
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(side_effect=asyncio.TimeoutError())
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
+                        with patch("atelier.main.load_for_sdk", return_value={}):
+                            # Inject a non-empty skill list so the trace is not skipped
+                            with patch("atelier.main.ToolPolicy") as MockToolPolicy:
+                                mock_policy = MagicMock()
+                                mock_policy.resolve_skills.return_value = ["skills/test-skill"]
+                                mock_policy.parse_mcp_patterns.return_value = []
+                                mock_policy.filter_mcp_tools.return_value = []
+                                MockToolPolicy.return_value = mock_policy
+
+                                try:
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+                                except asyncio.CancelledError:
+                                    pass
+
+    skill_trace_calls = [
+        c for c in redis_conn.xadd.await_args_list
+        if c.args[0] == STREAM_SKILL_TRACE
+    ]
+    assert len(skill_trace_calls) == 1
+
+    payload = json.loads(skill_trace_calls[0].args[1]["payload"])
+    skill_ctx = payload["context"]["skill_trace"]
+    assert skill_ctx["tool_error_count"] == -1
+    assert skill_ctx["skill_names"] == ["test-skill"]

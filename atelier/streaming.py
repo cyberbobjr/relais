@@ -154,6 +154,24 @@ def _extract_thinking(raw: object) -> str:
     return "".join(_extract_block_type(raw, "thinking"))
 
 
+def _has_named_tool_call_start(token: Any) -> bool:
+    """Return True if *token* starts a new named tool call.
+
+    A named tool call chunk signals the agent is beginning a new tool
+    invocation.  Pre-flushing the stream buffer at this boundary ensures
+    any buffered narration text reaches the client before the tool runs.
+
+    Args:
+        token: A LangChain ``AIMessageChunk``.
+
+    Returns:
+        True if ``token.tool_call_chunks`` contains at least one entry with
+        a non-empty ``name`` field.
+    """
+    tcc = getattr(token, "tool_call_chunks", None)
+    return bool(tcc and any(tc.get("name") for tc in tcc))
+
+
 def _has_tool_use_block(raw: object) -> str | None:
     """Return the tool name if the content list contains a ``tool_use`` block.
 

@@ -1,5 +1,6 @@
 import { createStore, produce } from "solid-js/store";
 import type { SSEEvent } from "./sse-parser.ts";
+import type { CommandEntry } from "./client.ts";
 
 export type MessageRole = "user" | "assistant";
 
@@ -29,6 +30,8 @@ export interface ChatState {
   errorBanner: string;
   /** Transient flash message (e.g. "Copied!"), auto-cleared after display */
   copyFlash: string;
+  /** Available slash commands fetched from the server at startup */
+  availableCommands: CommandEntry[];
 }
 
 const [state, setState] = createStore<ChatState>({
@@ -39,6 +42,7 @@ const [state, setState] = createStore<ChatState>({
   historyLoading: false,
   errorBanner: "",
   copyFlash: "",
+  availableCommands: [],
 });
 
 export { state };
@@ -103,6 +107,10 @@ export function setCopyFlash(msg: string): void {
 
 export function setHistoryLoading(v: boolean): void {
   setState("historyLoading", v);
+}
+
+export function setAvailableCommands(commands: CommandEntry[]): void {
+  setState("availableCommands", commands);
 }
 
 export function clearMessages(): void {

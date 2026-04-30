@@ -72,10 +72,14 @@ def test_scoping_keeps_only_relevant_tool_results() -> None:
 
 @pytest.mark.unit
 def test_scoping_always_keeps_human_and_ai_messages() -> None:
-    """HumanMessage and AIMessage are never filtered, regardless of skill."""
+    """HumanMessage and AIMessage are always kept when the target skill is invoked."""
     messages = [
         _human("Do something."),
-        _ai_msg(tool_calls=[_tool_call("read_skill", "other-skill", "tc-other")]),
+        _ai_msg(tool_calls=[
+            _tool_call("read_skill", "mail-agent", "tc-mail"),
+            _tool_call("read_skill", "other-skill", "tc-other"),
+        ]),
+        _tool_msg("tc-mail", "mail-agent content"),
         _tool_msg("tc-other", "other skill content"),
         _ai_msg(content="Done."),
     ]
@@ -90,14 +94,21 @@ def test_scoping_always_keeps_human_and_ai_messages() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — Falls back to full list when filtered result < 3 messages
+# Test 3 — No relevant read_skill calls → scoping returns empty (not a fallback)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_scoping_falls_back_when_too_few_messages() -> None:
-    """When scoping would leave < 3 messages, the full list is returned as fallback."""
-    # Only 2 messages, no tool calls — scoping yields < 3
+def test_scoping_returns_empty_when_no_relevant_calls() -> None:
+    """When the conversation has no read_skill calls for the target skill,
+    scope_messages_to_skill must return [] instead of falling back to the full list.
+
+    Bug: the current implementation returns the full message list as a fallback
+    when fewer than 3 messages survive filtering, which pollutes the LLM prompt
+    with unrelated content.  The correct behavior is to return an empty list so
+    the caller can skip the LLM call altogether.
+    """
+    # Only 2 messages, no tool calls — no read_skill call for mail-agent
     messages = [
         _human("Hi."),
         _ai_msg(content="Hello."),
@@ -105,7 +116,10 @@ def test_scoping_falls_back_when_too_few_messages() -> None:
 
     scoped = scope_messages_to_skill(messages, "mail-agent")
 
-    assert scoped == messages, "Full list returned as fallback when result < 3 messages"
+    assert scoped == [], (
+        "scope_messages_to_skill must return [] when no read_skill call references "
+        "the target skill — fallback to full list pollutes the LLM prompt"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,14 +134,20 @@ def test_scoping_empty_input() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — No relevant tool calls → no ToolMessage filtering
+# Test 5 — Skill not invoked → scoping returns empty (target not called at all)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_scoping_no_read_skill_calls_keeps_all() -> None:
-    """When there are no read_skill calls for the target skill, no ToolMessages
-    match the relevant set, so the filter keeps all messages (fallback path)."""
+def test_scoping_returns_empty_when_target_not_invoked() -> None:
+    """When the conversation uses read_skill for OTHER skills but NOT the target,
+    scope_messages_to_skill must return [] to prevent cross-contamination.
+
+    Bug: the current implementation returns the full message list because
+    relevant_tool_call_ids is empty, and the guard `if relevant_tool_call_ids`
+    disables the ToolMessage filter entirely — causing search-web tool results
+    to appear in the mail-agent LLM prompt.
+    """
     messages = [
         _human("Query 1."),
         _ai_msg(tool_calls=[_tool_call("read_skill", "search-web", "tc-sw")]),
@@ -137,11 +157,11 @@ def test_scoping_no_read_skill_calls_keeps_all() -> None:
 
     scoped = scope_messages_to_skill(messages, "mail-agent")
 
-    # No read_skill call for mail-agent → relevant_tool_call_ids is empty
-    # → ToolMessages are not filtered (condition: `tc_id not in relevant_tool_call_ids`
-    #   only applies when the relevant set is non-empty)
-    assert len(scoped) == len(messages), (
-        "All messages kept when no read_skill calls reference the target skill"
+    # mail-agent was never called via read_skill → scope must be empty
+    assert scoped == [], (
+        "scope_messages_to_skill must return [] when the target skill was never "
+        "invoked — returning all messages leaks search-web content into the "
+        "mail-agent LLM prompt (cross-contamination bug)"
     )
 
 
@@ -206,3 +226,80 @@ def test_scoping_multi_turn_skill_in_second_turn() -> None:
     # Human and AI messages are still present
     human_msgs = [m for m in scoped if m.get("type") == "human"]
     assert len(human_msgs) == 2, "Both human messages must be kept"
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — ToolMessage content referencing the skill name is a valid signal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scoping_content_based_signal() -> None:
+    """A ToolMessage whose content mentions the skill name is treated as a
+    relevant signal even if no explicit read_skill tool_call was made for
+    that skill, while an unrelated ToolMessage is excluded.
+
+    This verifies two things simultaneously:
+    1. Content-based matching picks up the relevant ToolMessage.
+    2. An unrelated ToolMessage (no read_skill call, content does not mention
+       the target skill) is filtered OUT — not kept by the fallback.
+
+    The current implementation does NOT implement content-based matching; it
+    relies on tool_call ID collection from read_skill calls.  When no read_skill
+    call exists, relevant_tool_call_ids is empty and the guard
+    `if relevant_tool_call_ids` disables filtering, so ALL ToolMessages pass
+    through (fallback behavior).  This means the unrelated ToolMessage
+    ("tc-unrelated") is kept — the second assertion will FAIL.
+    """
+    messages = [
+        _human("do something"),
+        _ai_msg(content="Working on it."),  # no tool_calls — no read_skill call
+        _tool_msg("tc-content-ref", "mail-agent skill content here"),  # references target skill
+        _tool_msg("tc-unrelated", "completely unrelated tool output"),  # must be excluded
+        _ai_msg(content="done"),
+    ]
+
+    scoped = scope_messages_to_skill(messages, "mail-agent")
+
+    # The ToolMessage whose content references the target skill must be kept.
+    tool_msgs_in_scoped = [m for m in scoped if m.get("tool_call_id") == "tc-content-ref"]
+    assert len(tool_msgs_in_scoped) == 1, (
+        "The ToolMessage whose content contains the skill name must be included in scoped"
+    )
+
+    # The unrelated ToolMessage must be excluded — this assertion FAILS with the
+    # current buggy fallback that keeps all messages when no read_skill calls match.
+    unrelated_in_scoped = [m for m in scoped if m.get("tool_call_id") == "tc-unrelated"]
+    assert len(unrelated_in_scoped) == 0, (
+        "Unrelated ToolMessage must be filtered out when content-based scoping is used; "
+        "the current fallback keeps it erroneously"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — No read_skill call for target → returns []
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scope_messages_returns_empty_when_no_read_skill_call() -> None:
+    """A conversation that uses read_skill for OTHER skills but never for the
+    target returns an empty list — not the full message list.
+
+    This is an explicit statement of the guard: if the target skill was never
+    invoked, there is nothing to extract, and returning the full conversation
+    would pollute the LLM prompt with completely unrelated context.
+    """
+    messages = [
+        _human("search and email"),
+        _ai_msg(tool_calls=[_tool_call("read_skill", "search-web", "tc-search-web")]),
+        _tool_msg("tc-search-web", "search content"),
+        _ai_msg(content="found"),
+    ]
+
+    scoped = scope_messages_to_skill(messages, "mail-agent")
+
+    assert scoped == [], (
+        "scope_messages_to_skill must return [] when the target skill (mail-agent) "
+        "was never called via read_skill — got non-empty result instead"
+    )

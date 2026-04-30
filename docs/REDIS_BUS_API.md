@@ -197,6 +197,35 @@ is intentionally absent — Sentinelle is the sole gatekeeper for command validi
 
 ---
 
+### `relais:commandant:query`
+
+**Direction**: REST adapter (or any adapter) → Commandant
+**Consumer group**: `commandant_catalog_group`
+**Action**: `catalog.query` (`ACTION_CATALOG_QUERY`)
+
+CQRS read-side stream for fetching the registered slash-command catalog without going
+through the full task pipeline. The REST adapter publishes one envelope per `GET /v1/commands`
+request; Commandant responds asynchronously via a per-request Redis List key.
+
+```
+XADD relais:commandant:query * payload <Envelope JSON>
+```
+
+Envelope fields used:
+
+| Field | Value |
+|-------|-------|
+| `action` | `"catalog.query"` |
+| `correlation_id` | Per-request UUID (used to build the response key) |
+| `content` | `"catalog_query"` (informational only) |
+
+**XACK contract**: `ack_mode="always"` — all messages are ACKed unconditionally.
+
+**Response**: Commandant writes the catalog JSON to `relais:commandant:catalog:{correlation_id}`
+(see key section below) and the caller retrieves it via `BRPOP` within 5 seconds.
+
+---
+
 ### `relais:atelier:control`
 
 **Direction**: Commandant → Atelier
@@ -578,7 +607,7 @@ Published by Atelier after each completed agent turn where skills were used **an
 
 Atelier may publish **multiple** `XADD` calls per turn:
 - One for the **main agent** (step 7 of the pipeline).
-- One **per subagent** that used tools (`tool_call_count > 0`) and had skills assigned (step 7b).  These are published independently so Forgeron can track skill performance at the subagent level.  Per-subagent traces are built from `SubagentMessageCapture` LangChain callbacks injected into the parent `RunnableConfig`; the `messages_raw` field contains only the messages captured in that subagent's LangGraph namespace.
+- One **per subagent** that made `read_skill` calls (step 7b).  These are published independently so Forgeron can track skill performance at the subagent level.  Per-subagent traces are built from `SubagentMessageCapture` LangChain callbacks injected into the parent `RunnableConfig`; `skill_names` reflects actually invoked skills extracted from the subagent's messages (not its assigned skill list); the `messages_raw` field contains only the messages captured in that subagent's LangGraph namespace.
 
 ```
 XADD relais:skill:trace * payload <Envelope JSON>
@@ -588,7 +617,7 @@ XADD relais:skill:trace * payload <Envelope JSON>
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `skill_names` | `list[str]` | Directory names of skills used in the turn (e.g. `["mail-agent"]`) |
+| `skill_names` | `list[str]` | Directory names of skills **actually invoked** via `read_skill` calls during the turn (e.g. `["mail-agent"]`); empty list when no skill was read |
 | `tool_call_count` | `int` | Total tool invocations in the agent turn (`-1` sentinel on aborted DLQ turns) |
 | `tool_error_count` | `int` | Tool invocations that returned an error |
 | `messages_raw` | `list[dict]` | Serialized LangChain message list for the turn (for LLM analysis by Forgeron) |
@@ -736,6 +765,40 @@ for the current field set.
 
 ---
 
+### `relais:commandant:catalog:{correlation_id}` (Redis List)
+
+**Type**: Redis List (LPUSH / BRPOP)
+**TTL**: 7 seconds (EXPIRE set by Commandant immediately after LPUSH)
+**Direction**: Commandant writes, REST adapter reads
+**Key helper**: `common.streams.key_commandant_catalog(correlation_id)`
+
+Per-request response key for the CQRS catalog query flow. Commandant pushes exactly one
+item — a JSON object — and the caller retrieves it via `BRPOP` (timeout 5 s).
+
+```
+LPUSH relais:commandant:catalog:<uuid> '{"commands": [{"name": "clear", "description": "..."}, ...]}'
+```
+
+Response schema:
+
+```json
+{
+  "commands": [
+    {"name": "clear", "description": "Clear conversation history"},
+    {"name": "compact", "description": "Summarise and trim conversation history"},
+    ...
+  ]
+}
+```
+
+Only `name` and `description` are exposed — handler callables are never included.
+Commands are sorted alphabetically by name.
+
+The 7 s TTL (vs 5 s BRPOP timeout) provides 2 s grace for cleanup if the caller dies
+before consuming the response.
+
+---
+
 ## Pub/Sub Channels
 
 ### `relais:streaming:start:{channel}`
@@ -798,6 +861,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:tasks` | `atelier_group` | Atelier |
 | `relais:atelier:control` | `atelier_control_group` | Atelier |
 | `relais:commands` | `commandant_group` | Commandant |
+| `relais:commandant:query` | `commandant_catalog_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group` | Aiguilleur |
 | `relais:messages:outgoing:failed` | none (manual) | — (DLQ) |

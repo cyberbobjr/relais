@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 _STREAM_REQ = STREAM_MEMORY_REQUEST
 _STREAM_RES = STREAM_MEMORY_RESPONSE
 _TIMEOUT_S = 3.0
+_MEMORIES_PREFIX = "/memories/"
 
 
 class SouvenirBackend(BackendProtocol):
@@ -83,6 +84,21 @@ class SouvenirBackend(BackendProtocol):
         """
         self._user_id = user_id
         self._redis: redis_sync.Redis | None = None
+
+    def _ensure_prefix(self, path: str) -> str:
+        """Re-add /memories/ prefix stripped by CompositeBackend routing.
+
+        CompositeBackend strips the matched route prefix before delegating to
+        the routed backend (e.g. ``/memories/notes.md`` → ``/notes.md``).
+        Souvenir's FileWriteHandler requires the full ``/memories/`` prefix,
+        so this method restores it when absent.
+        """
+        if not path or path in ("/", ""):
+            return _MEMORIES_PREFIX
+        if path.startswith(_MEMORIES_PREFIX) or path == _MEMORIES_PREFIX.rstrip("/"):
+            return path
+        bare = path.lstrip("/")
+        return f"{_MEMORIES_PREFIX}{bare}" if bare else _MEMORIES_PREFIX
 
     def _get_redis(self) -> redis_sync.Redis:
         """Return (and create if needed) the synchronous Redis client.
@@ -183,6 +199,7 @@ class SouvenirBackend(BackendProtocol):
         Returns:
             :class:`WriteResult` with ``files_update=None`` (external persistence).
         """
+        file_path = self._ensure_prefix(file_path)
         resp = self._request(ACTION_MEMORY_FILE_WRITE, path=file_path, content=content, overwrite=False)
         if not resp.get("ok"):
             return WriteResult(error=resp.get("error", "write failed"))
@@ -200,7 +217,7 @@ class SouvenirBackend(BackendProtocol):
             File content formatted with line numbers (``cat -n`` format),
             or an error message if the file is not found.
         """
-        resp = self._request(ACTION_MEMORY_FILE_READ, path=file_path)
+        resp = self._request(ACTION_MEMORY_FILE_READ, path=self._ensure_prefix(file_path))
         if not resp.get("ok"):
             return f"Error: {resp.get('error', 'read failed')}"
         raw: str = resp.get("content") or ""
@@ -229,6 +246,7 @@ class SouvenirBackend(BackendProtocol):
         Returns:
             :class:`EditResult` with ``files_update=None`` (external persistence).
         """
+        file_path = self._ensure_prefix(file_path)
         read_resp = self._request(ACTION_MEMORY_FILE_READ, path=file_path)
         if not read_resp.get("ok"):
             return EditResult(error=read_resp.get("error", "file not found"))
@@ -262,7 +280,8 @@ class SouvenirBackend(BackendProtocol):
             List of :class:`FileInfo` containing ``path``, ``size`` and
             ``modified_at`` for each file.
         """
-        prefix = path if path.endswith("/") else path + "/"
+        prefixed = self._ensure_prefix(path)
+        prefix = prefixed if prefixed.endswith("/") else prefixed + "/"
         resp = self._request(ACTION_MEMORY_FILE_LIST, path=prefix)
         if not resp.get("ok"):
             return []
@@ -310,7 +329,7 @@ class SouvenirBackend(BackendProtocol):
         Returns:
             List of :class:`GrepMatch` or an error message string.
         """
-        search_path = path or "/memories/"
+        search_path = self._ensure_prefix(path) if path else _MEMORIES_PREFIX
         candidates = self.ls_info(search_path)
         if glob:
             candidates = [f for f in candidates if fnmatch.fnmatch(f["path"], glob)]
@@ -337,6 +356,7 @@ class SouvenirBackend(BackendProtocol):
         """
         results: list[FileUploadResponse] = []
         for fpath, content_bytes in files:
+            fpath = self._ensure_prefix(fpath)
             try:
                 content = content_bytes.decode("utf-8")
             except UnicodeDecodeError:
@@ -360,6 +380,7 @@ class SouvenirBackend(BackendProtocol):
         """
         results: list[FileDownloadResponse] = []
         for fpath in paths:
+            fpath = self._ensure_prefix(fpath)
             resp = self._request(ACTION_MEMORY_FILE_READ, path=fpath)
             if resp.get("ok"):
                 content: str = resp.get("content") or ""

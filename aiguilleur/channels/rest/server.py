@@ -44,9 +44,11 @@ from aiohttp import web
 
 from common.contexts import CTX_AIGUILLEUR
 from common.envelope import Envelope, MediaRef
-from common.envelope_actions import ACTION_MESSAGE_INCOMING
+from common.envelope_actions import ACTION_CATALOG_QUERY, ACTION_MESSAGE_INCOMING
 from common.streams import (
+    STREAM_COMMANDANT_QUERY,
     STREAM_INCOMING,
+    key_commandant_catalog,
     stream_streaming,
 )
 
@@ -304,6 +306,43 @@ _OPENAPI_SPEC: dict = {
                 },
             }
         },
+        "/commands": {
+            "get": {
+                "summary": "List available slash commands",
+                "operationId": "getCommands",
+                "security": [{"bearerAuth": []}],
+                "description": (
+                    "Returns the registered command catalog via an async CQRS query to Commandant. "
+                    "No ACL filtering — Sentinelle enforces authorization at submission time."
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Command catalog",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "commands": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "name": {"type": "string", "example": "clear"},
+                                                    "description": {"type": "string"},
+                                                },
+                                            },
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "401": {"description": "Unauthorized"},
+                    "503": {"description": "Commandant did not respond in time"},
+                },
+            }
+        },
     },
 }
 
@@ -454,6 +493,11 @@ def create_app(
         A fully-configured ``web.Application`` ready for ``AppRunner``.
     """
     cors_origins: list[str] = config.get("cors_origins", ["*"])
+    request_timeout: float = float(config.get("request_timeout", 30))
+    _max_total_cfg = config.get("max_total_timeout")
+    max_total_timeout: float | None = float(_max_total_cfg) if _max_total_cfg is not None else None
+    include_traces: bool = bool(config.get("include_traces", False))
+
     if "*" in cors_origins:
         logger.warning(
             "REST adapter: cors_origins=['*'] — all origins are allowed. "
@@ -602,13 +646,10 @@ def create_app(
             },
         )
 
-        request_timeout: float = float(config.get("request_timeout", 30))
-        include_traces: bool = bool(config.get("include_traces", False))
-
         if is_sse:
             return await _handle_sse(
                 request, envelope, correlation_id, session_id,
-                redis_conn, correlator, request_timeout,
+                redis_conn, correlator, request_timeout, max_total_timeout,
             )
 
         # --- Classic JSON mode ---
@@ -645,6 +686,50 @@ def create_app(
 
         return web.json_response(response_body)
 
+    async def get_commands(request: web.Request) -> web.Response:
+        """Handle GET /v1/commands — return the registered slash-command catalog.
+
+        Publishes a CQRS query to relais:commandant:query and waits for Commandant
+        to respond via BRPOP on a per-request key for up to 5 seconds.
+
+        No ACL filtering: Sentinelle enforces authorization at submission time.
+        Showing an unauthorized command in auto-complete is acceptable UX.
+
+        Args:
+            request: Authenticated incoming request (user_record set by middleware).
+
+        Returns:
+            200 JSON ``{"commands": [{"name": str, "description": str}, ...]}``.
+            503 JSON ``{"error": "..."}`` when Commandant does not respond in time.
+        """
+        user_record = request.get("user_record")
+        user_id = user_record.user_id if user_record else "anonymous"
+        correlation_id = str(uuid.uuid4())
+
+        envelope = Envelope(
+            content="catalog_query",
+            sender_id=f"rest:{user_id}",
+            channel=_CHANNEL,
+            session_id=correlation_id,
+            correlation_id=correlation_id,
+            action=ACTION_CATALOG_QUERY,
+        )
+
+        await redis_conn.xadd(STREAM_COMMANDANT_QUERY, {"payload": envelope.to_json()})
+
+        response_key = key_commandant_catalog(correlation_id)
+        result = await redis_conn.brpop(response_key, timeout=5)
+
+        if result is None:
+            logger.warning("Catalog query timed out corr=%s", correlation_id[:8])
+            return web.json_response(
+                {"error": "Command catalog not available (timeout)"},
+                status=503,
+            )
+
+        _, payload = result
+        return web.json_response(json.loads(payload))
+
     # --- App assembly ---
     # Auth middleware only applies to routes that need it
     app = web.Application(middlewares=[options_middleware, cors_middleware])
@@ -674,6 +759,7 @@ def create_app(
     api_app.router.add_post("/messages", post_message)
     api_app.router.add_get("/history", get_history)
     api_app.router.add_get("/events", events_handler)
+    api_app.router.add_get("/commands", get_commands)
     if push_registry is not None:
         api_app["_push_registry"] = push_registry
     app.add_subapp("/v1", api_app)
@@ -694,12 +780,21 @@ async def _handle_sse(
     redis_conn: Any,
     correlator: "ResponseCorrelator",
     request_timeout: float,
+    max_total_timeout: float | None = None,
 ) -> web.StreamResponse:
     """Handle SSE streaming mode for POST /v1/messages.
 
     Publishes the envelope, then streams token chunks from
     ``relais:messages:streaming:rest:{correlation_id}`` until the final
     outgoing message is detected.
+
+    The rolling ``deadline`` is reset whenever activity is seen on the
+    streaming stream **or** whenever a HEARTBEAT keepalive is sent to the
+    client (confirming the client is still connected and waiting). This
+    prevents spurious timeouts during long tool-call gaps where Atelier
+    publishes nothing but the client is alive. A hard ``max_deadline``
+    (default: ``max(3600 s, request_timeout × 10)``) caps the total
+    wall-clock duration regardless of activity.
 
     Args:
         request: Authenticated incoming request.
@@ -708,7 +803,10 @@ async def _handle_sse(
         session_id: Session ID for this request.
         redis_conn: Async Redis connection.
         correlator: Response correlator.
-        request_timeout: Max seconds to wait for the full response.
+        request_timeout: Inactivity window in seconds; resets on any
+            Atelier stream activity or on each HEARTBEAT sent to the client.
+        max_total_timeout: Hard cap on total wall-clock seconds for the
+            entire request.  Defaults to ``max(3600.0, request_timeout * 10)``.
 
     Returns:
         An open ``web.StreamResponse`` with SSE frames.
@@ -726,15 +824,18 @@ async def _handle_sse(
         await redis_conn.xadd(_STREAM_IN, {"payload": envelope.to_json()})
 
         # Stream tokens and progress events.
-        # Any activity on the streaming stream resets the deadline so that
-        # long-running tool-call sequences don't timeout as long as
-        # Atelier is publishing progress events.
+        # The rolling deadline is reset both when Atelier publishes to the
+        # streaming stream AND when we send a HEARTBEAT to the client.
+        # This ensures that long tool-call gaps (where Atelier is executing
+        # a tool but not yet streaming output) do not cause spurious timeouts
+        # as long as the client is still connected.
         last_id = "0"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request_timeout
+        max_deadline = loop.time() + (max_total_timeout if max_total_timeout is not None else max(3600.0, request_timeout * 10))
         seen_final = False
 
-        while True:
+        while loop.time() < max_deadline:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
@@ -748,16 +849,24 @@ async def _handle_sse(
                     timeout=min(1.0, remaining),
                 )
             except asyncio.TimeoutError:
+                # No Atelier data within the poll window — send a keepalive.
+                # Resetting the deadline here means "the client is still
+                # listening, so keep the request alive".
+                deadline = loop.time() + request_timeout
                 await response.write(HEARTBEAT)
                 if future.done():
                     break
                 continue
             except Exception as exc:
                 logger.warning("SSE xread error corr=%s: %s", correlation_id[:8], exc)
+                deadline = loop.time() + request_timeout
                 await response.write(HEARTBEAT)
                 continue
 
             if not results:
+                # xread returned an empty list (e.g. stream does not exist yet).
+                # Same treatment: client is alive, extend the deadline.
+                deadline = loop.time() + request_timeout
                 await response.write(HEARTBEAT)
                 if future.done():
                     break
@@ -829,7 +938,13 @@ async def _handle_sse(
         else:
             # Timeout or cancelled — send an error event so the client
             # knows the stream ended abnormally (not just an EOF).
-            reason = "Request timed out" if not future.done() else "Request cancelled"
+            if not future.done():
+                if loop.time() >= max_deadline:
+                    reason = "Request exceeded maximum allowed duration"
+                else:
+                    reason = "Request timed out"
+            else:
+                reason = "Request cancelled"
             logger.warning("SSE error event corr=%s: %s", correlation_id[:8], reason)
             frame = format_sse("error", json.dumps({
                 "error": reason,
