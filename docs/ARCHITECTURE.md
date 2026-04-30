@@ -140,6 +140,7 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
   - **REST** (`aiguilleur/channels/rest/adapter.py`) — HTTP/JSON and SSE adapter for programmatic clients (CLI, CI, TUI). Exposes:
     - `POST /v1/messages` — Send a message and receive the LLM reply (JSON or SSE streaming)
     - `GET /v1/history?session_id=...&limit=...` — Retrieve a session's history (ownership enforcement via user_id)
+    - `GET /v1/commands` — Return the registered slash-command catalog (CQRS query to Commandant via `relais:commandant:query`; used by TUI for auto-completion). No ACL filtering — Sentinelle enforces authorization at submission time.
     - `GET /v1/events` — Persistent SSE push stream: fan-out outgoing messages to concurrent subscribers (same user ID, different clients). Powered by `PushRegistry` (per-user XREAD reader tasks) and `relais:messages:outgoing:rest:{user_id}` per-user streams.
     - `GET /docs/sse` — Interactive SSE playground
 
@@ -178,6 +179,9 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
 - Assembles the system prompt with `assemble_system_prompt()` (`atelier/soul_assembler.py`), which returns an `AssemblyResult(prompt, issues, is_degraded)`. If `is_degraded=True` (at least one prompt layer missing or unreadable), a WARNING is logged with the issue list, and the degraded prompt is still used (fail-soft).
 - For each request, `AgentExecutor` prepends a `<relais_execution_context>` block to the first user message containing `sender_id`, `channel`, `session_id`, `correlation_id` and `reply_to` extracted from the envelope. This block is strictly technical metadata — skills (notably `channel-setup` for WhatsApp pairing) can read it for correct routing, and the system prompt instructs the model **not** to echo it back to the user.
 - Executes `AgentExecutor` — returns `AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count, subagent_traces)`. `subagent_traces` is a tuple of `SubagentTrace` (one per subagent that used tools) built from `SubagentMessageCapture` callbacks; empty tuple when no subagent is invoked.
+- **Per-profile timeouts** (fields in `ProfileConfig`, loaded from `profiles.yaml`):
+  - `shell_timeout_seconds` (default `30`) — passed to `_HtmlSafeShellBackend`; shell tool calls exceeding this limit are cancelled and return an error string to the model (loop continues).
+  - `max_turn_seconds` (default `300`) — applied via `asyncio.wait_for()` around the entire `AgentExecutor.execute()` call. On `asyncio.TimeoutError`: (1) envelope routed to `relais:tasks:failed` (DLQ), (2) plain timeout error reply published to `relais:messages:outgoing_pending`, (3) skill trace published to `relais:skill:trace` with `tool_error_count=-1` sentinel if `skills_used` is non-empty.
 - Publishes:
   - streaming text/progress to `relais:messages:streaming:{channel}:{correlation_id}`
   - some progress events to `relais:messages:outgoing:{channel}`
@@ -200,11 +204,14 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
 
 ### Commandant
 
-- Inherits from `BrickBase`; `stream_specs()` declares a single stream: `relais:commands` (`commandant_group`, `ack_mode="always"`).
+- Inherits from `BrickBase`; `stream_specs()` declares two streams:
+  - `relais:commands` (`commandant_group`, `ack_mode="always"`) — slash-command dispatch.
+  - `relais:commandant:query` (`commandant_catalog_group`, `ack_mode="always"`) — CQRS read side: responds to catalog queries from REST clients (e.g. TUI auto-completion).
 - `/help` writes directly to `relais:messages:outgoing:{channel}`.
 - `/clear` writes a `clear` action to `relais:memory:request`.
 - `/sessions` writes a `sessions` action to `relais:memory:request` to list the user's recent sessions.
 - `/resume <session_id>` writes a `resume` action to `relais:memory:request` to resume a previous session. Validates that the session_id belongs to the user (ownership enforcement).
+- **Catalog query handler** (`_handle_catalog_query`): on `relais:commandant:query`, responds with `{"commands": [{"name", "description"}, ...]}` via `LPUSH` + `EXPIRE 7s` on `relais:commandant:catalog:{correlation_id}`. The REST adapter retrieves the response via `BRPOP` (5 s timeout).
 
 ### Souvenir
 

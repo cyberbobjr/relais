@@ -197,6 +197,35 @@ is intentionally absent — Sentinelle is the sole gatekeeper for command validi
 
 ---
 
+### `relais:commandant:query`
+
+**Direction**: REST adapter (or any adapter) → Commandant
+**Consumer group**: `commandant_catalog_group`
+**Action**: `catalog.query` (`ACTION_CATALOG_QUERY`)
+
+CQRS read-side stream for fetching the registered slash-command catalog without going
+through the full task pipeline. The REST adapter publishes one envelope per `GET /v1/commands`
+request; Commandant responds asynchronously via a per-request Redis List key.
+
+```
+XADD relais:commandant:query * payload <Envelope JSON>
+```
+
+Envelope fields used:
+
+| Field | Value |
+|-------|-------|
+| `action` | `"catalog.query"` |
+| `correlation_id` | Per-request UUID (used to build the response key) |
+| `content` | `"catalog_query"` (informational only) |
+
+**XACK contract**: `ack_mode="always"` — all messages are ACKed unconditionally.
+
+**Response**: Commandant writes the catalog JSON to `relais:commandant:catalog:{correlation_id}`
+(see key section below) and the caller retrieves it via `BRPOP` within 5 seconds.
+
+---
+
 ### `relais:atelier:control`
 
 **Direction**: Commandant → Atelier
@@ -736,6 +765,40 @@ for the current field set.
 
 ---
 
+### `relais:commandant:catalog:{correlation_id}` (Redis List)
+
+**Type**: Redis List (LPUSH / BRPOP)
+**TTL**: 7 seconds (EXPIRE set by Commandant immediately after LPUSH)
+**Direction**: Commandant writes, REST adapter reads
+**Key helper**: `common.streams.key_commandant_catalog(correlation_id)`
+
+Per-request response key for the CQRS catalog query flow. Commandant pushes exactly one
+item — a JSON object — and the caller retrieves it via `BRPOP` (timeout 5 s).
+
+```
+LPUSH relais:commandant:catalog:<uuid> '{"commands": [{"name": "clear", "description": "..."}, ...]}'
+```
+
+Response schema:
+
+```json
+{
+  "commands": [
+    {"name": "clear", "description": "Clear conversation history"},
+    {"name": "compact", "description": "Summarise and trim conversation history"},
+    ...
+  ]
+}
+```
+
+Only `name` and `description` are exposed — handler callables are never included.
+Commands are sorted alphabetically by name.
+
+The 7 s TTL (vs 5 s BRPOP timeout) provides 2 s grace for cleanup if the caller dies
+before consuming the response.
+
+---
+
 ## Pub/Sub Channels
 
 ### `relais:streaming:start:{channel}`
@@ -798,6 +861,7 @@ PUBLISH relais:events:task_received <EventPayload JSON>
 | `relais:tasks` | `atelier_group` | Atelier |
 | `relais:atelier:control` | `atelier_control_group` | Atelier |
 | `relais:commands` | `commandant_group` | Commandant |
+| `relais:commandant:query` | `commandant_catalog_group` | Commandant |
 | `relais:messages:outgoing_pending` | `sentinelle_outgoing_group` | Sentinelle |
 | `relais:messages:outgoing:{channel}` | `{channel}_relay_group` | Aiguilleur |
 | `relais:messages:outgoing:failed` | none (manual) | — (DLQ) |

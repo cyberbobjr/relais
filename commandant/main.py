@@ -1,29 +1,38 @@
 """Commandant brick — interprets global out-of-LLM commands.
 
-Consumes ``relais:commands`` (routed by Sentinelle) via its own consumer group.
+Consumes ``relais:commands`` (routed by Sentinelle) and ``relais:commandant:query``
+(CQRS catalog endpoint used by the REST adapter and TUI auto-completion).
 Dispatches known commands to their handlers and ACKs all messages.
 
 Technical overview
 ------------------
-* ``Commandant`` — ``BrickBase`` subclass; single consumer loop on
-  ``relais:commands``.
+* ``Commandant`` — ``BrickBase`` subclass; two consumer loops:
+  - ``relais:commands`` → command dispatch via ``COMMAND_REGISTRY``
+  - ``relais:commandant:query`` → catalog query handler (CQRS read side)
 * Command dispatch via ``COMMAND_REGISTRY`` (see ``commandant/commands.py``).
 
 Redis channels
 --------------
 Consumed:
-  - relais:commands  (consumer group: commandant_group)
+  - relais:commands          (consumer group: commandant_group)
+  - relais:commandant:query  (consumer group: commandant_catalog_group)
 
 Produced (by handlers):
-  - relais:memory:request      — /clear delegates to Souvenir
-  - relais:messages:outgoing:* — /help replies directly
-    (the response envelope is stamped with
-    ``ACTION_MESSAGE_OUTGOING`` before publication; ``Envelope.to_json()``
-    now raises if ``action`` is unset)
+  - relais:memory:request           — /clear delegates to Souvenir
+  - relais:messages:outgoing:*      — /help replies directly
+  - relais:commandant:catalog:{id}  — catalog query response (LPUSH, TTL 7 s)
 
 XACK contract
 -------------
-  - ``ack_mode="always"`` — all messages are ACKed unconditionally.
+  - ``ack_mode="always"`` — all messages on both streams are ACKed unconditionally.
+
+Catalog query (CQRS)
+--------------------
+The REST adapter issues a query envelope (``action=catalog.query``) to
+``relais:commandant:query``.  Commandant responds by LPUSH-ing a JSON payload
+to ``relais:commandant:catalog:{correlation_id}`` (TTL 7 s so the REST handler
+can BRPOP with a 5 s timeout).  Only ``name`` and ``description`` are exposed;
+internal handler callables are omitted.
 
 Channel install/pair commands
 -----------------------------
