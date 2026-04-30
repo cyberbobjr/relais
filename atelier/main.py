@@ -31,15 +31,17 @@ Key classes:
   calls; dead sessions (``BrokenPipeError``, ``ConnectionError``, ``EOFError``)
   evicted and re-established on next call; closed on shutdown via ``close()``.
 * ``ToolPolicy`` (atelier.tool_policy) — resolves skill directories per role
-  and filters MCP tool definitions (enforces ``mcp_max_tools``).
+  and filters MCP tool definitions by role-level ``allowed_mcp_tools`` patterns.
 * ``SoulAssembler`` (atelier.soul_assembler) — resolves and validates
   multi-layer prompt file paths (soul / role / user / channel), returning
   them as a ``memory_paths: list[str]`` for ``create_deep_agent(memory=)``.
   File reading is delegated to DeepAgents; this module only validates paths.
 * ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
-  ``atelier/profiles.yaml``); selects model, temperature,
-  max_tokens, mcp_timeout, mcp_max_tools per request.  Optional field
-  ``parallel_tool_calls: bool | None`` forwards the OpenAI-compatible
+  ``atelier/profiles.yaml``); selects model, temperature, max_tokens per
+  request.  ``shell_timeout_seconds`` (default 30) caps individual shell tool
+  calls; ``max_turn_seconds`` (default 300, 0 = disabled) caps the total turn.
+  Optional field ``parallel_tool_calls: bool | None`` forwards the
+  OpenAI-compatible
   ``parallel_tool_calls`` parameter to the model (useful to disable it for
   providers like Mistral that emit broken parallel calls).  When ``None``
   (default) the parameter is not forwarded and the provider default applies.
@@ -118,7 +120,7 @@ Produced:
                                   only when skills were actually invoked).  ``skills_used``
                                   is derived by scanning ``messages_raw`` for AIMessage
                                   tool_calls where name == "read_skill"
-                                  (``_extract_invoked_skill_names``); only skills that were
+                                  (``extract_read_skill_names`` from ``atelier.message_serializer``); only skills that were
                                   genuinely read appear here.  Published in two cases:
                                   (a) after a successful turn when tool_call_count > 0;
                                   (b) on the DLQ path (AgentExecutionError) with
@@ -428,8 +430,7 @@ class Atelier(BrickBase):
         """
         self._checkpointer = await stack.enter_async_context(self._checkpointer_cm)
 
-        # Start the singleton McpSessionManager.
-        # Use the "default" profile for mcp_timeout (best-effort default).
+        # Start the singleton McpSessionManager using the "default" profile.
         # Guard against test objects created via __new__ that skip __init__.
         profiles = getattr(self, "_profiles", {})
         mcp_servers = getattr(self, "_mcp_servers_default", {})

@@ -264,12 +264,13 @@ Forgeron is the skill self-improvement brick. It has two independent pipelines a
 #### Direct edit pipeline — Progressive skill improvement
 
 - Consumes `relais:skill:trace` (group `forgeron_group`, `ack_mode="always"` — traces are advisory).
-- Atelier publishes to this stream after each agent turn: skill names used, tool call and error counts, serialised LangChain raw messages (`CTX_SKILL_TRACE`), and `skill_paths` (dict `{skill_name: absolute_path}` for bundle skills). Atelier also publishes a separate trace **per subagent** that used tools (step 7b, `SubagentTrace`), with messages scoped to the subagent's LangGraph namespace via `SubagentMessageCapture`.
+- Atelier publishes to this stream after each agent turn: skill names **actually invoked** via `read_skill` calls (scanned from `messages_raw` by `extract_read_skill_names` in `atelier.message_serializer`), tool call and error counts, serialised LangChain raw messages (`CTX_SKILL_TRACE`), and `skill_paths` (dict `{skill_name: absolute_path}` for bundle skills). Atelier also publishes a separate trace **per subagent** that used tools (step 7b, `SubagentTrace`), with `skill_names` extracted from the subagent's serialised messages via the same `extract_read_skill_names` — not from the subagent's assigned skill list.
 - Forgeron accumulates one row per trace per skill in SQLite via `SkillTraceStore` (inherits from `BaseAsyncStore`).
 
 **Direct edit (`SkillEditor`, LLM precise)**:
-- `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (via `scope_messages_to_skill`). It calls the LLM once with `with_structured_output` to produce a rewritten SKILL.md and a `changed` flag.
-- The SKILL.md is written only if `changed=True` and the content differs from the existing file.
+- `SkillEditor` receives the current SKILL.md + the conversation trace scoped to the target skill (via `scope_messages_to_skill`). `scope_messages_to_skill` keeps only ToolMessage entries whose tool_call_id originated from a `read_skill` call for the target skill, or whose content mentions the skill name (content-based signal). It returns `[]` when no evidence of the target skill is found — the editor then skips the LLM call entirely.
+- When a non-empty scope is available, the LLM is called once with `with_structured_output`. The response includes a `relevant` flag: if `False` (the conversation is entirely about something else), the edit is skipped without writing the file. This prevents skill pollution from off-topic conversations.
+- The SKILL.md is written only if `relevant=True`, `changed=True`, and the content differs from the existing file.
 - Every edit attempt (success or failure) is appended to `edit_history.jsonl` next to SKILL.md: Unix timestamp, trigger reason, LLM reason, `changed` flag, and `correlation_id`. The file is capped at 50 entries (oldest pruned) via an atomic tmp-replace write.
 - Triggered by four conditions (as soon as at least one is true):
   1. **Tool errors**: `tool_error_count >= edit_min_tool_errors` (default 1)

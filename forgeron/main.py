@@ -13,8 +13,10 @@ Skill improvement — trigger rules
 ----------------------------------
 Atelier publishes a trace on ``relais:skill:trace`` after every agent turn
 that used skills and made at least one tool call.  The trace carries
-``skill_names``, ``tool_call_count``, ``tool_error_count``, and the full
-``messages_raw`` conversation history.
+``skill_names`` (skills **actually invoked** via ``read_skill`` calls, scanned
+from ``messages_raw`` by ``extract_read_skill_names`` in
+``atelier.message_serializer``), ``tool_call_count``, ``tool_error_count``,
+and the full ``messages_raw`` conversation history.
 
 For each skill in the trace, Forgeron evaluates **four** trigger conditions.
 Analysis fires when **any one** is true (AND ``edit_mode`` is enabled):
@@ -43,10 +45,17 @@ of the condition that fired.
 Skill improvement — single-step direct edit
 -------------------------------------------
 ``SkillEditor`` receives the current SKILL.md + the conversation trace scoped
-to the target skill (via ``scope_messages_to_skill``).  It calls the LLM once
-with ``with_structured_output`` to produce a rewritten SKILL.md and a
-``changed`` flag.  SKILL.md is only written when ``changed=True`` and the
-content differs from the current file.
+to the target skill (via ``scope_messages_to_skill``).
+``scope_messages_to_skill`` keeps only ``ToolMessage`` entries whose
+``tool_call_id`` originated from a ``read_skill`` call for the target skill,
+or whose content mentions the skill name (content-based fallback).  When no
+evidence of the target skill is found the scope is empty (``[]``) and the LLM
+call is skipped entirely.  When a non-empty scope is available, the LLM is
+called once with ``with_structured_output``; the response includes a
+``relevant`` flag — if ``False`` (conversation is unrelated to the skill)
+the edit is skipped without writing the file.  SKILL.md is written only when
+``relevant=True``, ``changed=True``, and the content differs from the current
+file.
 
 Every attempt — success or failure — is appended to ``edit_history.jsonl``
 (next to ``SKILL.md``), recording: Unix timestamp, trigger reason, LLM reason,
