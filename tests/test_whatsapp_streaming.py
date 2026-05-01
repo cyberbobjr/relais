@@ -1,12 +1,10 @@
 """Tests for WhatsApp adapter — Phase 4 streaming uniformization.
 
-TDD — tests written before implementation.
-Phase 4 behaviour:
+Phase 4 behaviour (via StreamingMixin):
   - Atelier always publishes token-by-token to relais:messages:streaming:whatsapp:{corr_id}
-  - The adapter subscribes to relais:streaming:start:whatsapp pub/sub
-  - On each start signal: spawn _consume_streaming_reply() task that reads
-    the streaming stream, buffers chunks, sends the complete message once
-    is_final=1 is received
+  - The adapter subscribes to relais:streaming:start:whatsapp pub/sub via StreamingMixin
+  - On each start signal: spawn _consume_stream() task that reads the streaming stream,
+    buffers chunks, calls _deliver() once is_final=1 is received
   - When outgoing:whatsapp receives an envelope with context["atelier"]["streamed"]=True,
     _process_outgoing returns True (ACK) without calling _send_message
 """
@@ -14,6 +12,7 @@ Phase 4 behaviour:
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +24,8 @@ from common.envelope_actions import (
 )
 from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
 from common.streams import stream_streaming
+
+_LOG = logging.getLogger("test.whatsapp")
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ def _make_client() -> "_RelaisWhatsAppClient":
     client.consumer_name = "whatsapp_test"
     client._http = None
     client._site = None
+    client._streaming_tasks: set = set()
 
     from collections import OrderedDict
     client.seen_message_ids = OrderedDict()
@@ -153,17 +155,17 @@ async def test_whatsapp_process_outgoing_delivers_when_not_streamed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.2 — _consume_streaming_reply buffers tokens and sends complete message
+# Phase 4.2 — _consume_stream (mixin) buffers tokens and calls _deliver
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_whatsapp_consume_streaming_reply_buffers_and_sends() -> None:
-    """_consume_streaming_reply reads token entries and sends the assembled message.
+    """_consume_stream reads token entries and delivers assembled message via _deliver.
 
     Given a streaming stream with three chunks followed by is_final=1, the
-    method must concatenate them and deliver a single WhatsApp message.
+    mixin must concatenate them and call _deliver with the assembled text.
     """
     client = _make_client()
 
@@ -211,7 +213,7 @@ async def test_whatsapp_consume_streaming_reply_buffers_and_sends() -> None:
         return "msg-id-ok"
 
     with patch.object(client, "_send_message", side_effect=mock_send):
-        await client._consume_streaming_reply(envelope)
+        await client._consume_stream(client._redis, "whatsapp", envelope, _LOG)
 
     assert len(sent_calls) == 1
     assert sent_calls[0][0] == "33611111111@s.whatsapp.net"
@@ -252,21 +254,21 @@ async def test_whatsapp_consume_streaming_reply_ignores_empty_final_chunk() -> N
         return "msg-id-ok"
 
     with patch.object(client, "_send_message", side_effect=mock_send):
-        await client._consume_streaming_reply(envelope)
+        await client._consume_stream(client._redis, "whatsapp", envelope, _LOG)
 
     assert len(sent_calls) == 1
     assert sent_calls[0][1] == "Final"
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.3 — _subscribe_streaming_start pub/sub listener
+# Phase 4.3 — subscribe_streaming_start (mixin) pub/sub listener
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_whatsapp_subscribe_streaming_start_spawns_task() -> None:
-    """_subscribe_streaming_start spawns _consume_streaming_reply for each start message."""
+    """subscribe_streaming_start spawns _consume_stream for each start message."""
     client = _make_client()
 
     envelope = Envelope(
@@ -292,11 +294,11 @@ async def test_whatsapp_subscribe_streaming_start_spawns_task() -> None:
 
     spawned: list[Envelope] = []
 
-    async def fake_consume(env: Envelope) -> None:
+    async def fake_consume(redis_conn, channel_name, env: Envelope, log) -> None:
         spawned.append(env)
 
-    with patch.object(client, "_consume_streaming_reply", side_effect=fake_consume):
-        await client._subscribe_streaming_start()
+    with patch.object(client, "_consume_stream", side_effect=fake_consume):
+        await client.subscribe_streaming_start(client._redis, "whatsapp", client._streaming_tasks, _LOG)
         # Yield to the event loop so the spawned task can run
         await asyncio.sleep(0)
 
@@ -307,7 +309,7 @@ async def test_whatsapp_subscribe_streaming_start_spawns_task() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_whatsapp_subscribe_streaming_start_subscribes_correct_channel() -> None:
-    """_subscribe_streaming_start subscribes to relais:streaming:start:whatsapp."""
+    """subscribe_streaming_start subscribes to relais:streaming:start:whatsapp."""
     client = _make_client()
 
     subscribed: list[str] = []
@@ -326,7 +328,7 @@ async def test_whatsapp_subscribe_streaming_start_subscribes_correct_channel() -
 
     client._redis.pubsub = MagicMock(return_value=mock_pubsub)
 
-    await client._subscribe_streaming_start()
+    await client.subscribe_streaming_start(client._redis, "whatsapp", client._streaming_tasks, _LOG)
 
     assert "relais:streaming:start:whatsapp" in subscribed
 
@@ -334,7 +336,7 @@ async def test_whatsapp_subscribe_streaming_start_subscribes_correct_channel() -
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_whatsapp_subscribe_streaming_start_ignores_non_message_events() -> None:
-    """_subscribe_streaming_start ignores pub/sub subscription confirmation events."""
+    """subscribe_streaming_start ignores pub/sub subscription confirmation events."""
     client = _make_client()
 
     messages = [
@@ -354,8 +356,8 @@ async def test_whatsapp_subscribe_streaming_start_ignores_non_message_events() -
 
     spawned: list = []
 
-    with patch.object(client, "_consume_streaming_reply", side_effect=lambda e: spawned.append(e)):
-        await client._subscribe_streaming_start()
+    with patch.object(client, "_consume_stream", side_effect=lambda *a: spawned.append(a)):
+        await client.subscribe_streaming_start(client._redis, "whatsapp", client._streaming_tasks, _LOG)
 
     assert spawned == []
 
@@ -368,7 +370,7 @@ async def test_whatsapp_subscribe_streaming_start_ignores_non_message_events() -
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_whatsapp_start_includes_streaming_subscriber() -> None:
-    """start() must pass _subscribe_streaming_start to asyncio.gather.
+    """start() must pass subscribe_streaming_start to asyncio.gather.
 
     The streaming subscriber must run alongside _consume_outgoing so that
     token streams are consumed before the final outgoing envelope arrives.
@@ -401,8 +403,6 @@ async def test_whatsapp_start_includes_streaming_subscriber() -> None:
     mock_aiohttp.web = mock_web
 
     import sys
-    original_aiohttp = sys.modules.get("aiohttp")
-    original_web = sys.modules.get("aiohttp.web")
 
     # Patch aiohttp inside the adapter module so local imports in start() see the mock
     with (
@@ -414,9 +414,9 @@ async def test_whatsapp_start_includes_streaming_subscriber() -> None:
             await client.start()
 
     assert mock_gather.called
-    # Verify that the coroutines passed to gather include _subscribe_streaming_start
+    # Verify that the coroutines passed to gather include subscribe_streaming_start
     args = mock_gather.call_args[0]
     coro_names = [getattr(a, "__name__", repr(a)) for a in args]
-    assert "_subscribe_streaming_start" in coro_names, (
-        f"_subscribe_streaming_start not found in gather args: {coro_names}"
+    assert "subscribe_streaming_start" in coro_names, (
+        f"subscribe_streaming_start not found in gather args: {coro_names}"
     )

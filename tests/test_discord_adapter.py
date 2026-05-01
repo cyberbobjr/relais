@@ -1,12 +1,10 @@
 """Tests for Discord adapter — Phase 2 streaming uniformization.
 
-TDD — tests are written before the implementation.
 Phase 2 behaviour:
   - Atelier always publishes token-by-token to relais:messages:streaming:discord:{corr_id}
-  - The adapter subscribes to relais:streaming:start:discord pub/sub
-  - On each start signal: spawn _consume_streaming_reply() task that reads
-    the streaming stream, buffers chunks, sends the complete message once
-    is_final=1 is received
+  - The adapter subscribes to relais:streaming:start:discord pub/sub via StreamingMixin
+  - On each start signal: spawn _consume_stream() task (mixin) that reads
+    the streaming stream, buffers chunks, calls _deliver() once is_final=1
   - When outgoing:discord receives an envelope with context["atelier"]["streamed"]=True,
     the envelope is silently dropped (the streaming consumer already delivered it)
 """
@@ -14,7 +12,8 @@ Phase 2 behaviour:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, call
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,10 +21,11 @@ from common.envelope import Envelope
 from common.envelope_actions import (
     ACTION_MESSAGE_INCOMING,
     ACTION_MESSAGE_OUTGOING,
-    ACTION_MESSAGE_PROGRESS,
 )
 from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER
 from common.streams import stream_streaming
+
+_LOG = logging.getLogger("test.discord")
 
 
 # ---------------------------------------------------------------------------
@@ -125,17 +125,17 @@ async def test_discord_skips_outgoing_without_resolving_channel() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.2 — _consume_streaming_reply buffers tokens and sends complete message
+# Phase 2.2 — _consume_stream (mixin) buffers tokens and calls _deliver
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_discord_consume_streaming_reply_buffers_and_sends() -> None:
-    """_consume_streaming_reply reads token entries and sends assembled message.
+    """_consume_stream reads token entries and delivers assembled message via _deliver.
 
     Given a streaming stream with three chunks followed by is_final=1, the
-    method must concatenate them and deliver a single Discord message.
+    mixin must concatenate them and call _deliver with the full text.
     """
     client = _make_client()
 
@@ -179,7 +179,7 @@ async def test_discord_consume_streaming_reply_buffers_and_sends() -> None:
     mock_channel = AsyncMock()
 
     with patch.object(client, "_resolve_discord_channel", return_value=mock_channel):
-        await client._consume_streaming_reply(envelope)
+        await client._consume_stream(client._redis_conn, "discord", envelope, _LOG)
 
     mock_channel.send.assert_called_once_with("Bonjour le monde")
 
@@ -187,7 +187,7 @@ async def test_discord_consume_streaming_reply_buffers_and_sends() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_discord_consume_streaming_reply_cancels_typing() -> None:
-    """_consume_streaming_reply cancels the typing indicator after delivery."""
+    """_consume_stream cancels the typing indicator after delivery."""
     client = _make_client()
 
     envelope = Envelope(
@@ -213,7 +213,7 @@ async def test_discord_consume_streaming_reply_cancels_typing() -> None:
     mock_channel = AsyncMock()
 
     with patch.object(client, "_resolve_discord_channel", return_value=mock_channel):
-        await client._consume_streaming_reply(envelope)
+        await client._consume_stream(client._redis_conn, "discord", envelope, _LOG)
 
     # Typing task must have been cancelled
     fake_task.cancel.assert_called_once()
@@ -249,20 +249,20 @@ async def test_discord_consume_streaming_reply_ignores_empty_final_chunk() -> No
     mock_channel = AsyncMock()
 
     with patch.object(client, "_resolve_discord_channel", return_value=mock_channel):
-        await client._consume_streaming_reply(envelope)
+        await client._consume_stream(client._redis_conn, "discord", envelope, _LOG)
 
     mock_channel.send.assert_called_once_with("Final")
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.3 — _subscribe_streaming_start pub/sub listener
+# Phase 2.3 — subscribe_streaming_start (mixin) pub/sub listener
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_discord_subscribe_streaming_start_spawns_task() -> None:
-    """_subscribe_streaming_start spawns _consume_streaming_reply for each start message."""
+    """subscribe_streaming_start spawns _consume_stream for each start message."""
     client = _make_client()
 
     envelope = Envelope(
@@ -288,11 +288,11 @@ async def test_discord_subscribe_streaming_start_spawns_task() -> None:
 
     spawned: list[Envelope] = []
 
-    async def fake_consume(env: Envelope) -> None:
+    async def fake_consume(redis_conn, channel_name, env: Envelope, log) -> None:
         spawned.append(env)
 
-    with patch.object(client, "_consume_streaming_reply", side_effect=fake_consume):
-        await client._subscribe_streaming_start()
+    with patch.object(client, "_consume_stream", side_effect=fake_consume):
+        await client.subscribe_streaming_start(client._redis_conn, "discord", client._streaming_tasks, _LOG)
         # Yield to the event loop so the spawned task can run
         await asyncio.sleep(0)
 
@@ -303,7 +303,7 @@ async def test_discord_subscribe_streaming_start_spawns_task() -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_discord_subscribe_streaming_start_subscribes_correct_channel() -> None:
-    """_subscribe_streaming_start subscribes to relais:streaming:start:discord."""
+    """subscribe_streaming_start subscribes to relais:streaming:start:discord."""
     client = _make_client()
 
     subscribed: list[str] = []
@@ -322,7 +322,7 @@ async def test_discord_subscribe_streaming_start_subscribes_correct_channel() ->
 
     client._redis_conn.pubsub = MagicMock(return_value=mock_pubsub)
 
-    await client._subscribe_streaming_start()
+    await client.subscribe_streaming_start(client._redis_conn, "discord", client._streaming_tasks, _LOG)
 
     assert "relais:streaming:start:discord" in subscribed
 
@@ -330,7 +330,7 @@ async def test_discord_subscribe_streaming_start_subscribes_correct_channel() ->
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_discord_subscribe_streaming_start_ignores_non_message_events() -> None:
-    """_subscribe_streaming_start ignores pub/sub subscription confirmation events."""
+    """subscribe_streaming_start ignores pub/sub subscription confirmation events."""
     client = _make_client()
 
     messages = [
@@ -350,8 +350,8 @@ async def test_discord_subscribe_streaming_start_ignores_non_message_events() ->
 
     spawned: list = []
 
-    with patch.object(client, "_consume_streaming_reply", side_effect=lambda e: spawned.append(e)):
-        await client._subscribe_streaming_start()
+    with patch.object(client, "_consume_stream", side_effect=lambda *a: spawned.append(a)):
+        await client.subscribe_streaming_start(client._redis_conn, "discord", client._streaming_tasks, _LOG)
 
     assert spawned == []
 
@@ -364,7 +364,7 @@ async def test_discord_subscribe_streaming_start_ignores_non_message_events() ->
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_discord_setup_hook_creates_streaming_subscriber_task() -> None:
-    """setup_hook must create a background task for _subscribe_streaming_start.
+    """setup_hook must create a background task for subscribe_streaming_start.
 
     The streaming subscriber must be running alongside _consume_outgoing_stream
     so that streaming replies are buffered before the final outgoing:discord
@@ -392,11 +392,11 @@ async def test_discord_setup_hook_creates_streaming_subscriber_task() -> None:
 
     with (
         patch.object(client, "_consume_outgoing_stream", new_callable=AsyncMock),
-        patch.object(client, "_subscribe_streaming_start", new_callable=AsyncMock),
+        patch.object(client, "subscribe_streaming_start", new_callable=AsyncMock),
         patch.object(client, "loop", create=True) as mock_loop,
     ):
         mock_loop.create_task = mock_create_task
         await client.setup_hook()
 
-    # Two tasks: _consume_outgoing_stream + _subscribe_streaming_start
+    # Two tasks: _consume_outgoing_stream + subscribe_streaming_start
     assert len(created_tasks) == 2

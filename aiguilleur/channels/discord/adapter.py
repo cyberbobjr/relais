@@ -6,10 +6,10 @@ Bridges the Discord API and the RELAIS Redis bus:
 - Subscribes: relais:streaming:start:discord        (Pub/Sub — streaming start signal)
 - Reads:      relais:messages:streaming:discord:{corr_id}  (per-request token chunks)
 
-Streaming is handled by buffering: the adapter subscribes to
+Streaming is handled by ``StreamingMixin``: the adapter subscribes to
 ``relais:streaming:start:discord`` (Pub/Sub); for each signal it spawns a
-``_consume_streaming_reply`` task that reads token chunks via XREAD until
-``is_final=1``, then sends a single assembled Discord message.  Outgoing
+consumer task that reads token chunks via XREAD until ``is_final=1``, then
+calls ``_deliver`` to send a single assembled Discord message.  Outgoing
 envelopes with ``context["atelier"]["streamed"] == True`` are silently dropped
 to avoid duplicate delivery.
 
@@ -40,9 +40,10 @@ from common.envelope import Envelope
 from common.envelope_actions import ACTION_MESSAGE_INCOMING, ACTION_MESSAGE_PROGRESS
 from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER, AiguilleurCtx, AtelierCtx
 from common.config_loader import get_default_llm_profile
-from common.streams import STREAM_OUTGOING_FAILED, pubsub_streaming_start, stream_streaming
+from common.streams import STREAM_OUTGOING_FAILED
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
+from aiguilleur.streaming_mixin import StreamingMixin
 
 logger = logging.getLogger("aiguilleur.discord")
 
@@ -121,7 +122,7 @@ class DiscordAiguilleur(NativeAiguilleur):
 # ---------------------------------------------------------------------------
 
 
-class _RelaisDiscordClient(discord.Client):
+class _RelaisDiscordClient(StreamingMixin, discord.Client):
     """Internal Discord client — not exposed outside this module.
 
     Manages two concerns:
@@ -256,7 +257,9 @@ class _RelaisDiscordClient(discord.Client):
             },
         )
         self.loop.create_task(self._consume_outgoing_stream())
-        _sub_task = self.loop.create_task(self._subscribe_streaming_start())
+        _sub_task = self.loop.create_task(
+            self.subscribe_streaming_start(self._redis_conn, "discord", self._streaming_tasks, logger)
+        )
         self._streaming_tasks.add(_sub_task)
         _sub_task.add_done_callback(self._streaming_tasks.discard)
 
@@ -484,97 +487,21 @@ class _RelaisDiscordClient(discord.Client):
         for part in _split_discord_message(envelope.content):
             await channel.send(part)
 
-    async def _consume_streaming_reply(self, envelope: Envelope) -> None:
-        """Buffer token-by-token chunks from the streaming stream and send once complete.
+    async def _deliver(self, envelope: Envelope, full_text: str) -> None:
+        """Send the fully assembled streaming reply to the Discord channel.
 
-        Reads from ``relais:messages:streaming:discord:{corr_id}`` via XREAD
-        until an entry with ``is_final=1`` is received, then assembles all
-        chunks into a single message and delivers it to Discord.
+        Called by StreamingMixin once is_final=1 is received. Cancels the
+        typing indicator and sends the assembled text, splitting if necessary.
 
         Args:
-            envelope: The original request envelope (for corr_id, reply_to, etc.).
+            envelope:  Original request envelope (corr_id, reply_to metadata).
+            full_text: Fully assembled reply text.
         """
-        if self._redis_conn is None:
-            logger.error("Redis connection unavailable for streaming reply consumer")
-            return
-
-        corr_id = envelope.correlation_id
-        stream_key = stream_streaming("discord", corr_id)
-        last_id = "0-0"
-        buffer: list[str] = []
-        deadline = asyncio.get_running_loop().time() + 300
-
-        try:
-            while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    logger.warning("Streaming reply timed out for %s", corr_id[:8])
-                    return
-
-                results = await self._redis_conn.xread(
-                    streams={stream_key: last_id},
-                    count=50,
-                    block=min(5000, int(remaining * 1000)),
-                )
-                if not results:
-                    continue
-
-                for _, entries in results:
-                    for entry_id, fields in entries:
-                        last_id = entry_id
-                        chunk = fields.get("chunk", "")
-                        is_final = fields.get("is_final", "0") == "1"
-
-                        if chunk:
-                            buffer.append(chunk)
-
-                        if is_final:
-                            full_text = "".join(buffer)
-                            self._cancel_typing(corr_id)
-
-                            channel = await self._resolve_discord_channel(envelope)
-                            if channel and full_text.strip():
-                                for part in _split_discord_message(full_text):
-                                    await channel.send(part)
-                            return
-        except Exception as exc:
-            logger.error("Streaming reply consumer error for %s: %s", corr_id[:8], exc)
-
-    async def _subscribe_streaming_start(self) -> None:
-        """Subscribe to relais:streaming:start:discord and spawn reply consumers.
-
-        Listens on the Pub/Sub channel that Atelier publishes to before starting
-        agent execution. For each start signal, the original request envelope is
-        parsed and a ``_consume_streaming_reply`` task is spawned.
-        """
-        if self._redis_conn is None:
-            logger.error("Redis connection unavailable for streaming start subscriber")
-            return
-
-        pubsub = self._redis_conn.pubsub()
-        await pubsub.subscribe(pubsub_streaming_start("discord"))
-        logger.info("Subscribed to %s", pubsub_streaming_start("discord"))
-
-        try:
-            async for message in pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                try:
-                    data = message.get("data", b"")
-                    if isinstance(data, bytes):
-                        data = data.decode()
-                    envelope = Envelope.from_json(data)
-                except Exception as exc:
-                    logger.error("Failed to parse streaming start envelope: %s", exc)
-                    continue
-
-                task = asyncio.get_running_loop().create_task(
-                    self._consume_streaming_reply(envelope)
-                )
-                self._streaming_tasks.add(task)
-                task.add_done_callback(self._streaming_tasks.discard)
-        except Exception as exc:
-            logger.error("Streaming start subscriber error: %s", exc)
+        self._cancel_typing(envelope.correlation_id)
+        channel = await self._resolve_discord_channel(envelope)
+        if channel and full_text.strip():
+            for part in _split_discord_message(full_text):
+                await channel.send(part)
 
     async def _consume_outgoing_stream(self) -> None:
         """Background task: consume final answers from Atelier and send to Discord.
