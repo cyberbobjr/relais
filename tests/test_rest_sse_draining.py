@@ -70,7 +70,6 @@ def adapter_mock():
     config = ChannelConfig(
         name="rest",
         enabled=True,
-        streaming=True,
         extras={
             "bind": "127.0.0.1",
             "port": 8080,

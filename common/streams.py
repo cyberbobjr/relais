@@ -159,3 +159,18 @@ def stream_config_reload(brick: str) -> str:
         Channel name such as ``"relais:config:reload:portail"``.
     """
     return f"relais:config:reload:{brick}"
+
+
+def pubsub_streaming_start(channel: str) -> str:
+    """Return the Pub/Sub channel Atelier publishes to before streaming a reply.
+
+    Adapters subscribe to this channel to know when to start consuming the
+    per-request streaming token stream.
+
+    Args:
+        channel: Channel identifier (e.g. ``"discord"``).
+
+    Returns:
+        Channel name such as ``"relais:streaming:start:discord"``.
+    """
+    return f"relais:streaming:start:{channel}"

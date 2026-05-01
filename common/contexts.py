@@ -56,7 +56,6 @@ class AiguilleurCtx(TypedDict, total=False):
     reply_to: str               # Channel/thread ID for reply routing
     content_type: str           # "text" | "image" | …
     access_context: str         # "dm" | "server" — ACL scope hint
-    streaming: bool             # True if this channel supports token-by-token streaming
 
 
 class PortailCtx(TypedDict, total=False):

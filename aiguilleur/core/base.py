@@ -15,6 +15,8 @@ from aiguilleur.channel_config import ChannelConfig
 
 logger = logging.getLogger(__name__)
 
+_RESTART_STOP_TIMEOUT: float = 8.0
+
 
 class BaseAiguilleur(abc.ABC):
     """Abstract base for channel adapters.
@@ -65,7 +67,7 @@ class BaseAiguilleur(abc.ABC):
             backoff,
         )
         try:
-            self.stop(timeout=8.0)
+            self.stop(timeout=_RESTART_STOP_TIMEOUT)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Error stopping %s before restart: %s", self.config.name, exc)
 

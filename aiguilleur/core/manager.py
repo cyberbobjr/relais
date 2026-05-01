@@ -17,7 +17,7 @@ import signal
 import threading
 import time
 
-from aiguilleur.channel_config import ChannelConfig, load_channels_config
+from aiguilleur.channel_config import CHANNELS_CONFIG_FILE, ChannelConfig, load_channels_config
 from aiguilleur.core.base import BaseAiguilleur
 from common.config_loader import resolve_config_path
 
@@ -199,13 +199,12 @@ class AiguilleurManager:
                 old_cfg = adapter.config
 
                 # Replace adapter.config first so that concurrent on_message() calls
-                # immediately see the new prompt_path/streaming alongside the new profile.
+                # immediately see the new prompt_path alongside the new profile.
                 # profile_ref is updated AFTER the swap so profile is never ahead of
                 # prompt_path (eliminating the TOCTOU window).
                 updated_cfg = ChannelConfig(
                     name=new_cfg.name,
                     enabled=new_cfg.enabled,
-                    streaming=new_cfg.streaming,
                     type=new_cfg.type,
                     command=new_cfg.command,
                     args=new_cfg.args,
@@ -268,7 +267,7 @@ class AiguilleurManager:
             return
 
         try:
-            channels_yaml_path = str(resolve_config_path("aiguilleur.yaml"))
+            channels_yaml_path = str(resolve_config_path(CHANNELS_CONFIG_FILE))
         except FileNotFoundError:
             logger.warning("aiguilleur.yaml not found — hot-reload disabled.")
             return

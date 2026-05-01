@@ -208,7 +208,6 @@ class TestProcessSingleMessage:
         adapter.config = MagicMock()
         adapter.config.profile = "default"
         adapter.config.prompt_path = "channels/whatsapp_default.md"
-        adapter.config.streaming = False
 
         redis_mock = AsyncMock()
         redis_mock.xadd = AsyncMock()
@@ -325,7 +324,6 @@ class TestSelfChatIdentity:
         adapter.config = MagicMock()
         adapter.config.profile = "default"
         adapter.config.prompt_path = None
-        adapter.config.streaming = False
 
         redis_mock = AsyncMock()
 
@@ -560,13 +558,11 @@ class TestLiveConfig:
         config1 = MagicMock()
         config1.profile = "default"
         config1.prompt_path = None
-        config1.streaming = False
 
         # Second config
         config2 = MagicMock()
         config2.profile = "fast"
         config2.prompt_path = "channels/whatsapp_default.md"
-        config2.streaming = True
 
         adapter.config = config1
 
@@ -597,4 +593,3 @@ class TestLiveConfig:
         await client._process_single_message(msg2)
         env2 = Envelope.from_json(redis_mock.xadd.call_args[0][1]["payload"])
         assert env2.context[CTX_AIGUILLEUR]["channel_profile"] == "fast"
-        assert env2.context[CTX_AIGUILLEUR]["streaming"] is True

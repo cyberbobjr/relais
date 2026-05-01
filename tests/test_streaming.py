@@ -1,68 +1,9 @@
-"""Unit tests for atelier.streaming — TDD RED first.
-
-Tests StreamBuffer, _extract_block_type, _extract_thinking, and _has_tool_use_block.
+"""Unit tests for atelier.streaming — _extract_block_type, _extract_thinking, _has_tool_use_block.
 """
 
 from __future__ import annotations
 
 import pytest
-
-
-# ---------------------------------------------------------------------------
-# StreamBuffer
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_stream_buffer_flushes_when_threshold_reached() -> None:
-    """StreamBuffer.add() calls callback when buffer reaches threshold."""
-    received: list[str] = []
-
-    async def cb(chunk: str) -> None:
-        received.append(chunk)
-
-    from atelier.streaming import StreamBuffer
-
-    buf = StreamBuffer(flush_threshold=5, callback=cb)
-    await buf.add("hello")  # len == 5, threshold reached
-    assert received == ["hello"]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_stream_buffer_does_not_flush_below_threshold() -> None:
-    """StreamBuffer.add() does not flush when buffer is below threshold."""
-    received: list[str] = []
-
-    async def cb(chunk: str) -> None:
-        received.append(chunk)
-
-    from atelier.streaming import StreamBuffer
-
-    buf = StreamBuffer(flush_threshold=10, callback=cb)
-    await buf.add("hi")  # len == 2, below threshold
-    assert received == []
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_stream_buffer_flush_empties_buffer() -> None:
-    """StreamBuffer.flush() drains the buffer exactly once."""
-    received: list[str] = []
-
-    async def cb(chunk: str) -> None:
-        received.append(chunk)
-
-    from atelier.streaming import StreamBuffer
-
-    buf = StreamBuffer(flush_threshold=100, callback=cb)
-    await buf.add("abc")
-    await buf.flush()
-    assert received == ["abc"]
-    # Second flush should not emit empty string
-    await buf.flush()
-    assert received == ["abc"]
 
 
 # ---------------------------------------------------------------------------

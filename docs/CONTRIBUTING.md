@@ -203,7 +203,6 @@ Declare in `aiguilleur.yaml`:
 channels:
   mychannel:
     enabled: true
-    streaming: false
     type: external
     command: node
     args:

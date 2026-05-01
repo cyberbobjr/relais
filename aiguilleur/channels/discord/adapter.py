@@ -1,21 +1,23 @@
 """Discord channel adapter — NativeAiguilleur implementation.
 
 Bridges the Discord API and the RELAIS Redis bus:
-- Produces:   relais:messages:incoming         (new user messages)
-- Consumes:   relais:messages:outgoing:discord (bot replies + progress events)
+- Produces:   relais:messages:incoming             (new user messages)
+- Consumes:   relais:messages:outgoing:discord      (bot replies + progress events)
+- Subscribes: relais:streaming:start:discord        (Pub/Sub — streaming start signal)
+- Reads:      relais:messages:streaming:discord:{corr_id}  (per-request token chunks)
 
-Two envelope types are consumed from relais:messages:outgoing:discord:
-- Normal reply (action != ACTION_MESSAGE_PROGRESS): sent as a single Discord
-  message once the full LLM response is ready.
-- Progress event (action == ACTION_MESSAGE_PROGRESS): sent as an inline
-  notification while Atelier is still running (tool calls, tool results, …).
-  Format: ``{event} : [{detail}]``.  The typing indicator is NOT cancelled on
-  progress events — it continues until the final reply arrives.
+Streaming is handled by ``StreamingMixin``: the adapter subscribes to
+``relais:streaming:start:discord`` (Pub/Sub); for each signal it spawns a
+consumer task that reads token chunks via XREAD until ``is_final=1``, then
+calls ``_deliver`` to send a single assembled Discord message.  Outgoing
+envelopes with ``context["atelier"]["streamed"] == True`` are silently dropped
+to avoid duplicate delivery.
 
-Progressive streaming (token-by-token) is disabled on this channel.  Atelier
-publishes the full response to relais:messages:outgoing:discord after the
-agentic execution completes.  Progress event publishing is controlled by
-``DisplayConfig`` (config/atelier.yaml, section ``display:``).
+Progress events (``action == ACTION_MESSAGE_PROGRESS``) are consumed from
+``relais:messages:outgoing:discord`` and sent as inline notifications while
+Atelier is still running.  The typing indicator is NOT cancelled on progress
+events — it continues until the final reply arrives.  Progress event publishing
+is controlled by ``DisplayConfig`` (config/atelier.yaml, section ``display:``).
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from common.config_loader import get_default_llm_profile
 from common.streams import STREAM_OUTGOING_FAILED
 from aiguilleur.channel_config import ChannelConfig
 from aiguilleur.core.native import NativeAiguilleur
+from aiguilleur.streaming_mixin import StreamingMixin
 
 logger = logging.getLogger("aiguilleur.discord")
 
@@ -119,16 +122,15 @@ class DiscordAiguilleur(NativeAiguilleur):
 # ---------------------------------------------------------------------------
 
 
-class _RelaisDiscordClient(discord.Client):
+class _RelaisDiscordClient(StreamingMixin, discord.Client):
     """Internal Discord client — not exposed outside this module.
 
     Manages two concerns:
     - Receiving Discord messages and publishing them to ``relais:messages:incoming``.
     - Consuming ``relais:messages:outgoing:discord`` and sending the final reply.
 
-    Streaming is intentionally disabled on this adapter: responses are sent as
-    a single message once Atelier finishes. Set ``streaming: false`` in
-    ``aiguilleur.yaml`` to prevent Atelier from publishing partial chunks.
+    Tokens are buffered internally: the adapter reads the streaming stream
+    and sends a single Discord message once Atelier finishes.
     """
 
     def __init__(
@@ -143,12 +145,12 @@ class _RelaisDiscordClient(discord.Client):
             stop_event: Optional event to signal the adapter should stop.
             channel_config: Optional channel configuration snapshot. Only used
                 when ``adapter`` is ``None``; prefer passing ``adapter`` so
-                that hot-reloaded config (``prompt_path``, ``streaming``, …)
-                is always read from the live ``adapter.config``.
+                that hot-reloaded config (``prompt_path``, …) is always read
+                from the live ``adapter.config``.
             adapter: The owning ``DiscordAiguilleur`` instance. When provided,
                 ``_get_channel_config()`` delegates to ``adapter.config`` so
-                that soft-field changes (``prompt_path``, ``streaming``) take
-                effect immediately without restarting the Discord client.
+                that soft-field changes (``prompt_path``) take effect
+                immediately without restarting the Discord client.
         """
         intents = discord.Intents.default()
         intents.message_content = True
@@ -167,14 +169,16 @@ class _RelaisDiscordClient(discord.Client):
         self._channel_config = channel_config
         # Active typing indicator tasks keyed by correlation_id
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        # Strong references to in-flight streaming consumer tasks (prevents GC)
+        self._streaming_tasks: set[asyncio.Task] = set()
 
     def _get_channel_config(self) -> ChannelConfig | None:
         """Return the current channel config, always using the live adapter.config.
 
         When ``_adapter`` is set (normal runtime path), reads ``adapter.config``
-        so that hot-reloaded soft fields (``prompt_path``, ``streaming``) are
-        immediately visible to the next ``on_message`` call without restarting
-        the Discord client.
+        so that hot-reloaded soft fields (``prompt_path``) are immediately
+        visible to the next ``on_message`` call without restarting the Discord
+        client.
 
         Falls back to the ``_channel_config`` snapshot when ``_adapter`` is
         ``None`` (e.g. unit tests that construct the client directly).
@@ -241,7 +245,7 @@ class _RelaisDiscordClient(discord.Client):
 
         Called by discord.py once the client is ready to connect.
         Creates the Redis connection, logs the startup event, and launches
-        the outgoing-stream consumer task.
+        the outgoing-stream consumer task and the streaming start subscriber.
         """
         self._redis_conn = await self._redis_client.get_connection()
         await self._redis_conn.xadd(
@@ -253,6 +257,11 @@ class _RelaisDiscordClient(discord.Client):
             },
         )
         self.loop.create_task(self._consume_outgoing_stream())
+        _sub_task = self.loop.create_task(
+            self.subscribe_streaming_start(self._redis_conn, "discord", self._streaming_tasks, logger)
+        )
+        self._streaming_tasks.add(_sub_task)
+        _sub_task.add_done_callback(self._streaming_tasks.discard)
 
     async def on_ready(self) -> None:
         """Log successful Discord login."""
@@ -290,18 +299,16 @@ class _RelaisDiscordClient(discord.Client):
         )
 
         # Read config dynamically so hot-reloaded soft fields (profile,
-        # prompt_path, streaming) take effect immediately without restarting.
+        # prompt_path) take effect immediately without restarting.
         cfg = self._get_channel_config()
         if cfg is not None:
             current_profile: str | None = cfg.profile_ref.profile
             if current_profile is None:
                 current_profile = get_default_llm_profile()
             current_prompt_path: str | None = cfg.prompt_path
-            current_streaming: bool = cfg.streaming
         else:
             current_profile = get_default_llm_profile()
             current_prompt_path = None
-            current_streaming = False
 
         envelope = Envelope(
             channel="discord",
@@ -316,7 +323,6 @@ class _RelaisDiscordClient(discord.Client):
                     "access_context": "dm" if is_dm else "server",
                     "channel_profile": current_profile,
                     "channel_prompt_path": current_prompt_path,
-                    "streaming": current_streaming,
                 }
             },
         )
@@ -425,11 +431,12 @@ class _RelaisDiscordClient(discord.Client):
     async def _deliver_outgoing_message(self, data: dict) -> None:
         """Parse and deliver a single outgoing envelope to Discord.
 
-        Deserialises the ``payload`` field. If the envelope is a progress event
-        (``envelope.action == ACTION_MESSAGE_PROGRESS``), delegates to
-        ``_deliver_progress_event`` and returns without cancelling the typing
-        indicator. For final replies, cancels typing, guards against empty
-        content, and splits long messages to respect the 2000-character limit.
+        Deserialises the ``payload`` field. Envelopes with
+        ``context["atelier"]["streamed"] == True`` are silently dropped: the
+        streaming consumer already assembled and delivered the reply.
+        If the envelope is a progress event (``ACTION_MESSAGE_PROGRESS``),
+        delegates to ``_deliver_progress_event``. For all other final replies,
+        cancels typing and sends via Discord API.
 
         Args:
             data: Raw Redis stream entry fields. Must contain a ``"payload"``
@@ -439,6 +446,15 @@ class _RelaisDiscordClient(discord.Client):
             envelope = Envelope.from_json(data.get("payload", "{}"))
         except (ValueError, KeyError) as exc:
             logger.error("Malformed envelope payload, skipping: %s", exc)
+            return
+
+        # LLM reply already delivered via streaming stream — skip to avoid duplicate
+        atelier_ctx: AtelierCtx = envelope.context.get(CTX_ATELIER, {})  # type: ignore[assignment]
+        if atelier_ctx.get("streamed"):
+            logger.debug(
+                "Skipping outgoing:discord for %s — already delivered via streaming",
+                envelope.correlation_id[:8],
+            )
             return
 
         if envelope.action == ACTION_MESSAGE_PROGRESS:
@@ -470,6 +486,22 @@ class _RelaisDiscordClient(discord.Client):
 
         for part in _split_discord_message(envelope.content):
             await channel.send(part)
+
+    async def _deliver(self, envelope: Envelope, full_text: str) -> None:
+        """Send the fully assembled streaming reply to the Discord channel.
+
+        Called by StreamingMixin once is_final=1 is received. Cancels the
+        typing indicator and sends the assembled text, splitting if necessary.
+
+        Args:
+            envelope:  Original request envelope (corr_id, reply_to metadata).
+            full_text: Fully assembled reply text.
+        """
+        self._cancel_typing(envelope.correlation_id)
+        channel = await self._resolve_discord_channel(envelope)
+        if channel and full_text.strip():
+            for part in _split_discord_message(full_text):
+                await channel.send(part)
 
     async def _consume_outgoing_stream(self) -> None:
         """Background task: consume final answers from Atelier and send to Discord.

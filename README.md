@@ -148,7 +148,7 @@ flowchart TD
 - `Portail` consumes `relais:messages:incoming`, resolves the user via `UserRegistry`, writes `context["portail"]["user_record"]`, `context["portail"]["user_id"]` and `context["portail"]["llm_profile"]` (from `channel_profile` or `"default"`), then publishes to `relais:security`.
 - `Sentinelle` consumes `relais:security`, applies ACLs, routes normal messages to `relais:tasks` and slash commands to `relais:commands`. Unknown or unauthorized commands generate a direct inline response on `relais:messages:outgoing:{channel}`.
 - `Commandant` consumes two streams: `relais:commands` (slash-command dispatch — `/help`, `/clear`, `/sessions`, `/resume`) and `relais:commandant:query` (CQRS read side — responds to catalog queries from the REST adapter via `LPUSH` on a per-request key `relais:commandant:catalog:{correlation_id}`, TTL 7 s). The catalog endpoint (`GET /v1/commands`) uses this CQRS flow for TUI auto-completion without going through the full task pipeline.
-- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), optionally publishes streaming to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, then the final response to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD), `horloger-manager` (CRUD of Horloger job YAML files, accessible via `/horloger` or `/schedule`), `general-purpose` (overrides deepagents' built-in worker to enforce a strict no-user-facing-output contract; inherits all parent MCP tools), and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
+- `Atelier` consumes `relais:tasks`, manages conversational history via the persistent LangGraph checkpointer (`AsyncSqliteSaver`, `checkpoints.db`, keyed by `user_id`), always publishes a streaming start signal to `relais:streaming:start:{channel}` (Pub/Sub) then streams token-by-token to `relais:messages:streaming:{channel}:{correlation_id}`, progress events to `relais:messages:outgoing:{channel}`, and the final envelope to `relais:messages:outgoing_pending`. Atelier supports a 2-tier sub-agent architecture: user sub-agents in `$RELAIS_HOME/config/atelier/subagents/<name>/` (one directory per sub-agent, with `subagent.yaml`, optional `tools/*.py`), and native sub-agents in `atelier/subagents/<name>/` (shipped with source). Shipped native sub-agents: `relais-config` (channel/profile configuration CRUD), `horloger-manager` (CRUD of Horloger job YAML files, accessible via `/horloger` or `/schedule`), `general-purpose` (overrides deepagents' built-in worker to enforce a strict no-user-facing-output contract; inherits all parent MCP tools), and `skill-designer` (interactive SKILL.md creation from a user correction). Role access is controlled via `allowed_subagents` in `portail.yaml` (fnmatch patterns). Hot-reload supported for real-time modifications.
 - `Souvenir` consumes `relais:memory:request` (actions: `archive`, `clear`, `file_write`, `file_read`, `file_list`, `sessions`, `resume`). The `archive` action is published by Atelier with the full turn content and `messages_raw` for archiving in SQLite. The `sessions` and `resume` actions return data to the user via `relais:messages:outgoing:{channel}` (with ownership enforcement). File actions are triggered by agents via `SouvenirBackend`. Short-term history is managed by the Atelier LangGraph checkpointer (keyed by `user_id:session_id`).
 - `Archiviste` observes `relais:logs`, `relais:events:*` and a partial list of pipeline streams. It does not literally observe all streams.
 - `Forgeron` has three autonomous pipelines:
@@ -532,16 +532,13 @@ Example:
 channels:
   discord:
     enabled: true
-    streaming: false
 
   telegram:
     enabled: false
-    streaming: true
     profile: fast
 
   whatsapp:
     enabled: false          # enable in ~/.relais/config/aiguilleur.yaml
-    streaming: false        # baileys-api does not support streaming in MVP
     profile: default
     prompt_path: "channels/whatsapp_default.md"
     max_restarts: 5
@@ -549,7 +546,7 @@ channels:
 
 Key points:
 
-- `streaming` is read by each adapter and stamped into `context.aiguilleur["streaming"]`; Atelier reads this value per message (no startup cache)
+- Atelier always streams token-by-token; adapters subscribe to `relais:streaming:start:{channel}` (Pub/Sub) to know when to start consuming the per-request stream and buffer or forward tokens as appropriate for their channel — the `streaming` flag has been removed from `ChannelConfig`
 - `profile` forces an LLM profile for all messages from the channel
 - `prompt_path` forces a channel prompt overlay (Layer 4)
 - `type: external`, `command`, `args`, `class_path` and `max_restarts` are supported by the adapter supervisor

@@ -40,11 +40,6 @@ Each adapter stamps context keys under ``CTX_AIGUILLEUR`` on every outbound enve
   ``ChannelConfig.prompt_path`` (aiguilleur.yaml).  ``None`` when the channel
   has no ``prompt_path`` configured; in that case no channel formatting
   overlay is loaded by Atelier.
-* ``envelope.context[CTX_AIGUILLEUR]["streaming"]`` — ``bool`` from
-  ``ChannelConfig.streaming`` (aiguilleur.yaml); read by Atelier to decide
-  whether to stream tokens to ``relais:messages:streaming:{channel}:{corr_id}``
-  or publish a single outgoing envelope after the full reply is assembled.
-
 Redis channels
 --------------
 Produced (by each adapter):
@@ -71,12 +66,11 @@ Hot-reload — soft vs hard fields
 ---------------------------------
 aiguilleur.yaml changes are classified into two categories:
 
-* **Soft fields** (``profile``, ``prompt_path``, ``streaming``): applied
-  live without restarting the adapter.  ``profile`` is updated through
-  the ``ProfileRef`` object embedded in ``ChannelConfig`` so that all
-  concurrent reader threads see the new value atomically.  Adapters read
-  ``adapter.config`` on every inbound message so ``prompt_path`` and
-  ``streaming`` are also effective immediately.
+* **Soft fields** (``profile``, ``prompt_path``): applied live without
+  restarting the adapter.  ``profile`` is updated through the ``ProfileRef``
+  object embedded in ``ChannelConfig`` so that all concurrent reader threads
+  see the new value atomically.  Adapters read ``adapter.config`` on every
+  inbound message so ``prompt_path`` is also effective immediately.
 
 * **Hard fields** (``type``, ``class_path``, ``enabled``, ``command``):
   changing these emits a WARNING and requires a full process restart to

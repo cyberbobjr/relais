@@ -1243,7 +1243,6 @@ Redis ACL is in `config/redis.conf`. RELAIS bricks use per-brick passwords with 
 
     whatsapp:
       enabled: false          # disabled by default; user enables in ~/.relais/config/aiguilleur.yaml
-      streaming: false        # baileys-api does not support streaming in MVP
       profile: default
       prompt_path: "channels/whatsapp_default.md"
       max_restarts: 5

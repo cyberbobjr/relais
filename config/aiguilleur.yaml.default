@@ -6,9 +6,6 @@
 # Fields per channel:
 #   enabled     (bool)   — Whether the adapter is started by the Aiguilleur process.
 #                          A disabled channel exits cleanly at startup (exit 0).
-#   streaming   (bool)   — Whether the channel supports real-time chunk rendering.
-#                          Atelier reads this flag to decide whether to publish
-#                          incremental chunks on relais:messages:streaming:{channel}:{cid}.
 #   type        (str)    — "native" (Python, runs in a thread) or
 #                          "external" (subprocess, e.g. Node.js / Java).
 #                          Defaults to "native" if omitted.
@@ -39,24 +36,20 @@ channels:
 
   discord:
     enabled: true
-    streaming: false
     # profile not set → falls back to config.yaml > llm.default_profile
     # prompt_path: "channels/discord_default.md"   # uncomment to load channel overlay
 
   telegram:
     enabled: false
-    streaming: true
     profile: fast
     # prompt_path: "channels/telegram_default.md"  # uncomment to load channel overlay
 
   slack:
     enabled: false
-    streaming: false
     # prompt_path: "channels/slack_default.md"     # uncomment to load channel overlay
 
   rest:
     enabled: false
-    streaming: true
     type: native
     bind: "127.0.0.1"
     port: 8080
@@ -67,11 +60,9 @@ channels:
 
   tui:
     enabled: false
-    streaming: true
 
   whatsapp:
     enabled: false          # disabled by default; enable in ~/.relais/config/aiguilleur.yaml
-    streaming: false        # baileys-api does not support streaming in MVP
     profile: default
     prompt_path: "channels/whatsapp_default.md"
     max_restarts: 5

@@ -61,7 +61,6 @@ Read the current config, then show the diff and wait for confirmation:
 channels:
   rest:
     enabled: true           # was: false
-    streaming: true
     type: native
     bind: "127.0.0.1"       # change to "0.0.0.0" to expose on LAN
     port: 8080

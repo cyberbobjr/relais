@@ -5,8 +5,9 @@ Tests validate:
 - execute() uses astream with v2 format (stream_mode, subgraphs, version)
 - execute() returns the full assembled reply from AI text tokens
 - execute() builds messages from context + envelope correctly
-- Buffer of STREAM_BUFFER_CHARS chars is respected before flushing to stream_callback
-- Remaining buffer is flushed at stream end
+- Each token is forwarded directly to stream_callback without intermediate buffering
+- Multiple tokens each trigger a separate stream_callback call
+- Tokens are forwarded to stream_callback before the tool_call progress event fires
 - Transient errors (RateLimitError, InternalServerError, APIConnectionError) raise ExhaustedRetriesError after retries
 - ValueError with rate-limit message is classified as transient by _is_transient_provider_error
 - Retry loop succeeds on second attempt when first raises a transient error
@@ -124,6 +125,32 @@ def test_agent_executor_imports() -> None:
     from atelier.agent_executor import AgentExecutor, AgentExecutionError  # noqa: F401
 
 
+@pytest.mark.unit
+def test_html_safe_shell_backend_removed() -> None:
+    """_HtmlSafeShellBackend must no longer exist in atelier.agent_executor.
+
+    HTML encoding is now handled at the prompt level via HarnessProfile
+    (deepagents 0.5.4+), so the runtime unescape workaround is obsolete.
+    """
+    import atelier.agent_executor as mod
+
+    assert not hasattr(mod, "_HtmlSafeShellBackend"), (
+        "_HtmlSafeShellBackend must be removed — use HarnessProfile instead"
+    )
+
+
+@pytest.mark.unit
+def test_html_unescape_import_removed() -> None:
+    """html.unescape must not be imported in atelier.agent_executor."""
+    import inspect
+    import atelier.agent_executor as mod
+
+    source = inspect.getsource(mod)
+    assert "from html import unescape" not in source and "html.unescape" not in source, (
+        "html.unescape must be removed from agent_executor"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Streaming with v2 format (always uses astream)
 # ---------------------------------------------------------------------------
@@ -207,17 +234,16 @@ async def test_execute_streaming_calls_stream_callback() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_streaming_buffers_below_threshold() -> None:
-    """Chunks below STREAM_BUFFER_CHARS are held in the buffer until stream ends.
+async def test_execute_streaming_forwards_token_immediately() -> None:
+    """Each token is forwarded directly to stream_callback without buffering.
 
-    Uses DisplayConfig(final_only=False) so tokens flow through StreamBuffer
-    in real-time rather than being accumulated until the last tool call.
+    With the buffer removed, stream_callback is called once per token rather
+    than being held until a threshold is reached.
     """
     from atelier.agent_executor import AgentExecutor
     from atelier.display_config import DisplayConfig
-    from atelier.streaming import STREAM_BUFFER_CHARS
 
-    short_text = "A" * (STREAM_BUFFER_CHARS - 1)  # below threshold
+    short_text = "A" * 9  # arbitrary text, no threshold semantics any more
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         yield _v2_chunk("messages", (), (_ai_token(short_text), {}))
@@ -243,28 +269,25 @@ async def test_execute_streaming_buffers_below_threshold() -> None:
             _make_envelope("Hi"), stream_callback=callback
         )
 
-    # Called exactly once at the end (flush remaining)
+    # Called once immediately when the token arrives (no buffering)
     assert callback_count == 1
     assert result.reply_text == short_text
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_streaming_flushes_at_threshold() -> None:
-    """Buffer flushes when it reaches STREAM_BUFFER_CHARS, then remainder is flushed at end.
+async def test_execute_streaming_each_token_calls_callback_once() -> None:
+    """With no buffer, each token triggers a separate stream_callback call.
 
-    Uses DisplayConfig(final_only=False) so tokens flow through StreamBuffer
-    in real-time rather than being accumulated until the last tool call.
+    Three tokens → three separate callback invocations, each receiving the
+    individual token text rather than a batched accumulation.
     """
     from atelier.agent_executor import AgentExecutor
     from atelier.display_config import DisplayConfig
-    from atelier.streaming import STREAM_BUFFER_CHARS
 
-    # Two chunks that together exactly hit the threshold, plus a short remainder.
-    half = STREAM_BUFFER_CHARS // 2
-    chunk_a = "B" * half
-    chunk_b = "C" * half
-    remainder = "D" * (STREAM_BUFFER_CHARS - 1)  # below threshold — flushed at end
+    chunk_a = "BBBBB"
+    chunk_b = "CCCCC"
+    remainder = "DDDDD"
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
         yield _v2_chunk("messages", (), (_ai_token(chunk_a), {}))
@@ -291,46 +314,46 @@ async def test_execute_streaming_flushes_at_threshold() -> None:
             _make_envelope("Hi"), stream_callback=callback
         )
 
-    assert len(received) == 2
-    assert received[0] == chunk_a + chunk_b
-    assert received[1] == remainder
+    # Each token is forwarded immediately, not batched
+    assert len(received) == 3
+    assert received[0] == chunk_a
+    assert received[1] == chunk_b
+    assert received[2] == remainder
     assert result.reply_text == chunk_a + chunk_b + remainder
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_execute_streaming_flushes_buffer_on_tool_call_start() -> None:
-    """Buffer is flushed immediately when a tool call name is detected.
+async def test_execute_streaming_token_forwarded_before_tool_call_progress() -> None:
+    """Text tokens are forwarded to stream_callback before the tool_call progress event.
 
-    Pre-tool narration (below threshold) must reach the callback before the
-    tool runs, not only at the end of the full agent turn.
-    Uses DisplayConfig(final_only=False) so tokens flow through StreamBuffer.
+    Since tokens are sent immediately (no buffer), the stream_callback fires
+    as soon as the text token is processed — before handle_tool_call_chunks
+    emits the tool_call progress event for the following tool-call chunk.
     """
     from atelier.agent_executor import AgentExecutor
     from atelier.display_config import DisplayConfig
-    from atelier.streaming import STREAM_BUFFER_CHARS
 
-    pre_tool_text = "X" * (STREAM_BUFFER_CHARS - 1)  # stays buffered without the fix
+    pre_tool_text = "NarrationBeforeTool"
 
-    flush_order: list[str] = []  # track when callback is called vs "tool_started"
+    event_order: list[str] = []
 
     async def fake_astream(input_data: dict, **kwargs) -> AsyncIterator:
-        # Root agent produces text below threshold
+        # Root agent produces a text token
         yield _v2_chunk("messages", (), (_ai_token(pre_tool_text), {}))
-        # Root agent calls a tool — name chunk triggers flush
+        # Root agent calls a tool
         yield _v2_chunk("messages", (), (_ai_token("", [{"name": "task", "args": ""}]), {}))
-        # No more tokens after the tool call (sub-agent would normally run here)
 
     mock_agent = MagicMock()
     mock_agent.astream = fake_astream
     mock_agent.aget_state = AsyncMock(return_value=_make_agent_state())
 
     async def callback(chunk: str) -> None:
-        flush_order.append(f"flush:{chunk}")
+        event_order.append(f"token:{chunk}")
 
     async def progress(event: str, detail: str) -> None:
         if event == "tool_call":
-            flush_order.append("tool_started")
+            event_order.append("tool_started")
 
     with patch("atelier.agent_executor.create_deep_agent", return_value=mock_agent):
         executor = AgentExecutor(
@@ -343,12 +366,12 @@ async def test_execute_streaming_flushes_buffer_on_tool_call_start() -> None:
             _make_envelope("Hi"), stream_callback=callback, progress_callback=progress,
         )
 
-    # The callback must fire before "tool_started", not after.
-    assert f"flush:{pre_tool_text}" in flush_order, "pre-tool text was never flushed"
-    flush_idx = flush_order.index(f"flush:{pre_tool_text}")
-    tool_idx = flush_order.index("tool_started")
-    assert flush_idx < tool_idx, (
-        f"buffer flush (idx={flush_idx}) must precede tool_started (idx={tool_idx})"
+    # The token callback must fire before "tool_started".
+    assert f"token:{pre_tool_text}" in event_order, "pre-tool text was never forwarded"
+    token_idx = event_order.index(f"token:{pre_tool_text}")
+    tool_idx = event_order.index("tool_started")
+    assert token_idx < tool_idx, (
+        f"token (idx={token_idx}) must precede tool_started (idx={tool_idx})"
     )
 
 
@@ -595,46 +618,6 @@ def test_executor_defaults_skills_to_empty_list() -> None:
     call_kwargs = mock_create.call_args.kwargs
     assert call_kwargs.get("skills", "NOT_SET") == []
 
-
-# ---------------------------------------------------------------------------
-# Phase 1 — _HtmlSafeShellBackend shell_timeout auto-injection
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_html_safe_shell_backend_auto_applies_stored_timeout() -> None:
-    """_HtmlSafeShellBackend must forward the stored shell_timeout on every execute() call.
-
-    After construction with shell_timeout=42, every call to .execute() must pass
-    timeout=42 to LocalShellBackend.execute — even when the caller omits timeout.
-    """
-    from atelier.agent_executor import _HtmlSafeShellBackend
-
-    with patch("atelier.agent_executor.LocalShellBackend.__init__", return_value=None), \
-         patch("atelier.agent_executor.LocalShellBackend.execute", return_value="") as mock_exec:
-        backend = _HtmlSafeShellBackend(shell_timeout=42)
-        backend.execute("echo hello")
-
-    mock_exec.assert_called_once()
-    kwargs = mock_exec.call_args.kwargs
-    assert kwargs.get("timeout") == 42
-
-
-@pytest.mark.unit
-def test_html_safe_shell_backend_no_timeout_when_none() -> None:
-    """When shell_timeout=None, _HtmlSafeShellBackend passes timeout=None to super().
-
-    A stored None means no wall-clock limit on shell commands.
-    """
-    from atelier.agent_executor import _HtmlSafeShellBackend
-
-    with patch("atelier.agent_executor.LocalShellBackend.__init__", return_value=None), \
-         patch("atelier.agent_executor.LocalShellBackend.execute", return_value="") as mock_exec:
-        backend = _HtmlSafeShellBackend(shell_timeout=None)
-        backend.execute("echo hello")
-
-    kwargs = mock_exec.call_args.kwargs
-    assert kwargs.get("timeout") is None
 
 
 # ---------------------------------------------------------------------------

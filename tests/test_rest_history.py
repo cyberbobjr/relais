@@ -61,7 +61,6 @@ def _make_adapter_mock() -> MagicMock:
     config = ChannelConfig(
         name="rest",
         enabled=True,
-        streaming=False,
         extras={
             "bind": "127.0.0.1",
             "port": 8080,

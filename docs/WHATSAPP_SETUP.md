@@ -72,7 +72,6 @@ Edit `~/.relais/config/aiguilleur.yaml`:
 channels:
   whatsapp:
     enabled: true
-    streaming: false
     profile: default
     prompt_path: "channels/whatsapp_default.md"
 ```

@@ -29,7 +29,6 @@ def test_channel_config_defaults():
     """ChannelConfig default values match spec."""
     cfg = ChannelConfig(name="discord")
     assert cfg.enabled is True
-    assert cfg.streaming is False
     assert cfg.type == "native"
     assert cfg.command is None
     assert cfg.args == []
@@ -43,16 +42,14 @@ def test_channel_config_defaults():
 
 
 @pytest.mark.unit
-def test_load_channels_config_parses_enabled_and_streaming():
-    """enabled and streaming flags are parsed correctly for each channel."""
+def test_load_channels_config_parses_enabled_flag():
+    """enabled flag is parsed correctly for each channel."""
     yaml_content = """
 channels:
   discord:
     enabled: true
-    streaming: true
   telegram:
     enabled: false
-    streaming: true
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(yaml_content)
@@ -62,9 +59,7 @@ channels:
         configs = load_channels_config()
 
     assert configs["discord"].enabled is True
-    assert configs["discord"].streaming is True
     assert configs["telegram"].enabled is False
-    assert configs["telegram"].streaming is True
 
 
 @pytest.mark.unit
@@ -74,7 +69,6 @@ def test_load_channels_config_name_field_matches_yaml_key():
 channels:
   discord:
     enabled: true
-    streaming: true
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(yaml_content)
@@ -93,7 +87,6 @@ def test_load_channels_config_external_type_with_command_and_args():
 channels:
   whatsapp:
     enabled: true
-    streaming: false
     type: external
     command: node
     args:
@@ -118,7 +111,6 @@ def test_load_channels_config_class_override():
 channels:
   custom:
     enabled: true
-    streaming: false
     class: mycompany.adapters.custom.CustomAiguilleur
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -138,7 +130,6 @@ def test_load_channels_config_max_restarts_override():
 channels:
   discord:
     enabled: true
-    streaming: true
     max_restarts: 10
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -157,17 +148,14 @@ channels:
 
 
 @pytest.mark.unit
-def test_load_channels_config_missing_file_returns_discord_fallback():
-    """When aiguilleur.yaml is missing, fall back to discord enabled + streaming."""
+def test_load_channels_config_missing_file_raises():
+    """When aiguilleur.yaml is missing, FileNotFoundError must propagate."""
     with patch(
         "aiguilleur.channel_config.resolve_config_path",
         side_effect=FileNotFoundError("not found"),
     ):
-        configs = load_channels_config()
-
-    assert "discord" in configs
-    assert configs["discord"].enabled is True
-    assert configs["discord"].streaming is True
+        with pytest.raises(FileNotFoundError):
+            load_channels_config()
 
 
 @pytest.mark.unit
@@ -177,10 +165,8 @@ def test_load_channels_config_returns_dict_keyed_by_channel_name():
 channels:
   discord:
     enabled: true
-    streaming: true
   telegram:
     enabled: false
-    streaming: false
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(yaml_content)
@@ -219,7 +205,6 @@ def test_load_channels_config_parses_profile_when_present():
 channels:
   telegram:
     enabled: false
-    streaming: true
     profile: fast
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -239,7 +224,6 @@ def test_load_channels_config_profile_is_none_when_absent():
 channels:
   discord:
     enabled: true
-    streaming: false
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(yaml_content)
@@ -258,10 +242,8 @@ def test_load_channels_config_mixed_profile_and_no_profile():
 channels:
   discord:
     enabled: true
-    streaming: false
   telegram:
     enabled: false
-    streaming: true
     profile: precise
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

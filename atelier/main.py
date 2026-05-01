@@ -38,8 +38,10 @@ Key classes:
   File reading is delegated to DeepAgents; this module only validates paths.
 * ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
   ``atelier/profiles.yaml``); selects model, temperature, max_tokens per
-  request.  ``shell_timeout_seconds`` (default 30) caps individual shell tool
-  calls; ``max_turn_seconds`` (default 300, 0 = disabled) caps the total turn.
+  request.  ``shell_timeout_seconds`` (default 30) is defined in ProfileConfig
+  but currently not applied (``_HtmlSafeShellBackend`` removed 2026-05-01;
+  Grok HTML-encoding workaround now via ``register_harness_profile``);
+  ``max_turn_seconds`` (default 300, 0 = disabled) caps the total turn.
   Optional field ``parallel_tool_calls: bool | None`` forwards the
   OpenAI-compatible
   ``parallel_tool_calls`` parameter to the model (useful to disable it for
@@ -58,8 +60,6 @@ Key classes:
 * ``ToolErrorGuard`` (atelier.agent_executor) — tracks consecutive and total
   tool errors during the agentic loop; raises ``AgentExecutionError`` when
   limits are exceeded to prevent runaway loops.
-* ``StreamBuffer`` (atelier.streaming) — accumulates text tokens and
-  flushes to a callback when a character threshold is reached.
 * ``SubagentMessageCapture`` (atelier.subagent_capture) — LangChain
   ``BaseCallbackHandler`` injected into the parent ``RunnableConfig`` so
   LangGraph propagates it to all child invocations including subagents.
@@ -108,6 +108,9 @@ Consumed:
   - relais:config:reload:atelier  (Pub/Sub channel for hot-reload trigger)
 
 Produced:
+  - relais:streaming:start:{channel}   — Pub/Sub: published unconditionally before every agent
+                                  execution so adapters know when to start consuming the
+                                  per-request streaming token stream (Discord, WhatsApp, …).
   - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw).
                                   Also used for synthesized error replies: on AgentExecutionError,
                                   ``ErrorSynthesizer`` (atelier/error_synthesizer.py) performs a
@@ -156,13 +159,10 @@ Message flow (one task at a time):
     │      _mcp_lock); apply ToolPolicy.filter_mcp_tools() per allowed_mcp_tools
     │  (5) resolve subagents + delegation prompt from SubagentRegistry,
     │      filtered by user's allowed_subagents patterns (fnmatch)
-    │  (6) Read streaming flag from context["aiguilleur"]["streaming"]; if True,
-    │      create per-request display_config = replace(_display_config, final_only=False)
-    │      so emit_text() flushes each token immediately instead of accumulating the
-    │      full reply.  Pass this override to both AgentExecutor and StreamPublisher.
+    │  (6) Execute — always streaming; adapters decide whether to buffer or forward
     │      AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
     │      backend=SouvenirBackend, checkpointer, subagents, delegation_prompt,
-    │      display_config=display_config, progress_callback=…)
+    │      progress_callback=…)
     │      ├── token chunks    ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ──► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count,
@@ -212,12 +212,11 @@ exhausted, ``ExhaustedRetriesError`` (a subclass of ``AgentExecutionError``) is
 raised — which routes the message to the DLQ and ACKs it, preventing indefinite
 PEL poisoning.
 
-Streaming mode is determined by ``context["aiguilleur"]["streaming"]`` (stamped
-by the channel adapter from ``ChannelConfig.streaming`` in aiguilleur.yaml) —
-Atelier no longer loads aiguilleur.yaml per-request.  For streaming-capable
-channels each text chunk is also published via StreamPublisher for real-time
-rendering before the full reply is ready.  Discord receives a final reply only,
-with live progress events (tool_call, tool_result, subagent_start) sent to
+Atelier always streams token-by-token.  Each adapter buffers or forwards tokens
+as appropriate for its channel.  Each text chunk is published via StreamPublisher
+for real-time rendering before the full reply is ready.  Discord receives a
+final reply only, with live progress events (tool_call, tool_result,
+subagent_start) sent to
 ``relais:messages:outgoing:{channel}`` as ``message_type=progress`` envelopes.
 Publishing is governed by ``DisplayConfig`` (atelier.yaml ``display:`` section).
 """
@@ -232,6 +231,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from deepagents import HarnessProfile, register_harness_profile
+
 from common.brick_base import BrickBase, StreamSpec
 from common.streams import (
     STREAM_ATELIER_CONTROL,
@@ -240,6 +241,7 @@ from common.streams import (
     STREAM_SKILL_TRACE,
     STREAM_TASKS,
     STREAM_TASKS_FAILED,
+    pubsub_streaming_start,
 )
 from common.contexts import (
     CTX_AIGUILLEUR,
@@ -280,6 +282,24 @@ logger = logging.getLogger("atelier")
 # even if configure_logging_once() was skipped or root-level handlers were
 # removed.  This guarantees that logger.info() calls always appear in the
 # supervisord stdout log file.
+
+# Some Grok variants emit HTML-encoded characters in tool-call arguments
+# (e.g. `&amp;&amp;` instead of `&&`), a training-data artifact that breaks
+# shell execution.  Registering a HarnessProfile nudges the model to emit
+# raw characters instead.  See: https://github.com/langchain-ai/deepagents/issues/2956
+_GROK_RAW_ARGS_NUDGE = (
+    "## Tool-Argument Encoding\n"
+    "Pass tool-call arguments as raw characters. Do not HTML-encode special "
+    "characters when serializing JSON values:\n"
+    "- Use `&&`, not `&amp;&amp;`, in shell commands.\n"
+    '- Use `"`, not `&quot;`, inside string values.\n'
+    "- Use `<` and `>`, not `&lt;` and `&gt;`.\n"
+    "- Use `'`, not `&apos;` or `&#39;`."
+)
+register_harness_profile(
+    "openrouter:x-ai/grok-4.1-fast",
+    HarnessProfile(system_prompt_suffix=_GROK_RAW_ARGS_NUDGE),
+)
 
 # Directory containing soul/channels/roles/policies prompts.
 # Resolved via the config cascade so users can override in ~/.relais/prompts/.
@@ -977,13 +997,8 @@ class Atelier(BrickBase):
                         force_subagent_name, corr,
                     )
 
-            # 6. Execute
-            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
-            streaming = aig_ctx.get("streaming", False)
-            # When streaming to the client, tokens must be emitted token-by-token
-            # rather than accumulated; override final_only so emit_text() flushes
-            # each chunk immediately instead of batching the full reply.
-            display_config = replace(self._display_config, final_only=False) if streaming else self._display_config
+            # 6. Execute — always streaming; adapters decide whether to buffer or forward
+            display_config = replace(self._display_config, final_only=False)
             agent_executor = AgentExecutor(
                 profile=profile,
                 memory_paths=memory_paths,
@@ -1002,21 +1017,20 @@ class Atelier(BrickBase):
                 source_envelope=envelope,
                 display_config=display_config,
             )
-            if streaming:
-                await redis_conn.publish(
-                    f"relais:streaming:start:{envelope.channel}",
-                    envelope.to_json(),
-                )
+            await redis_conn.publish(
+                pubsub_streaming_start(envelope.channel),
+                envelope.to_json(),
+            )
             logger.info(
-                "[TASK] executing agent — corr=%s streaming=%s model=%s",
-                corr, streaming, profile.model,
+                "[TASK] executing agent — corr=%s model=%s",
+                corr, profile.model,
             )
 
             _turn_timeout: float | None = profile.max_turn_seconds if profile.max_turn_seconds > 0 else None
             agent_result = await asyncio.wait_for(
                 agent_executor.execute(
                     envelope=envelope,
-                    stream_callback=stream_pub.push_chunk if streaming else None,
+                    stream_callback=stream_pub.push_chunk,
                     progress_callback=stream_pub.push_progress,
                 ),
                 timeout=_turn_timeout,
@@ -1088,9 +1102,8 @@ class Atelier(BrickBase):
             atelier_ctx["user_message"] = envelope.content
             if skills_used:
                 atelier_ctx["skills_used"] = skills_used
-            if streaming:
-                await stream_pub.finalize()
-                atelier_ctx["streamed"] = True
+            await stream_pub.finalize()
+            atelier_ctx["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
             out_stream = STREAM_OUTGOING_PENDING

@@ -402,7 +402,6 @@ Les autres canaux visibles dans `aiguilleur.yaml.default` sont des cibles de con
 channels:
   discord:
     enabled: true                    # Activé/désactivé
-    streaming: false                 # Discord final-only dans l'implémentation actuelle
     type: native                     # "native" (Python, thread+asyncio) | "external" (subprocess)
     class_path: null                 # Override : "aiguilleur.channels.discord.adapter.DiscordAiguilleur"
     max_restarts: 5
@@ -410,7 +409,6 @@ channels:
 
   telegram:
     enabled: false
-    streaming: true
     type: native
     class_path: null
     max_restarts: 5
@@ -418,28 +416,24 @@ channels:
 
   slack:
     enabled: false
-    streaming: false
     type: native
     class_path: null
     max_restarts: 5
 
   rest:
     enabled: false
-    streaming: false
     type: native
     class_path: null
     max_restarts: 5
 
   tui:
     enabled: false
-    streaming: true
     type: native
     class_path: null
     max_restarts: 5
 
   whatsapp:
     enabled: false
-    streaming: false
     profile: default
     prompt_path: "channels/whatsapp_default.md"
     max_restarts: 5
@@ -451,7 +445,6 @@ channels:
 
 **Paramètres clés :**
 - `enabled` — toggle sans suppression de code
-- `streaming` — flag utilisé par L'Atelier pour `STREAMING_CAPABLE_CHANNELS`
 - `type` — `native` (thread Python + asyncio) ou `external` (subprocess)
 - `class_path` — override de la classe adaptateur
 - `max_restarts` — max avant abandon, restart avec backoff exponentiel
@@ -473,13 +466,13 @@ channels:
 
 ### Streaming progressif — édition temps réel
 
-L'Atelier publie les chunks token-by-token et les événements de progression dans `relais:messages:streaming:{channel}:{correlation_id}` via `StreamPublisher`.
+L'Atelier publie les chunks token-by-token dans `relais:messages:streaming:{channel}:{correlation_id}` via `StreamPublisher` **pour tous les canaux** (sans condition). Avant chaque exécution, un signal Pub/Sub `relais:streaming:start:{channel}` est émis pour signaler aux adaptateurs de démarrer la consommation.
 
-Dans l'état actuel du code :
-- Discord n'édite pas de message en temps réel ; il envoie une réponse finale sur `relais:messages:outgoing:discord`
-- l'adaptateur Discord maintient un indicateur de frappe tant que la requête est en vol
-- `StreamPublisher.push_progress()` publie aussi des enveloppes `message_type=progress` sur `relais:messages:outgoing:{channel}` pour les canaux non-streaming
-- un signal Pub/Sub `relais:streaming:start:{channel}` est émis au début d'un stream
+Architecture des adaptateurs :
+- Chaque adaptateur hérite de `StreamingMixin` et s'abonne à `relais:streaming:start:{channel}` (Pub/Sub) via `subscribe_streaming_start` ; pour chaque signal reçu, une tâche `_consume_stream` (mixin) est spawnée
+- La tâche lit les chunks via XREAD jusqu'à `is_final=1`, assemble la réponse complète, puis appelle `_deliver` (hook abstrait implémenté par chaque adaptateur) pour envoyer à l'API externe en une seule fois (buffering)
+- Les enveloppes de `relais:messages:outgoing:{channel}` avec `context["atelier"]["streamed"] == True` sont ignorées (drop silencieux) pour éviter la double livraison
+- Les événements de progression (`action == ACTION_MESSAGE_PROGRESS`) restent consommés depuis `relais:messages:outgoing:{channel}`
 
 Chaque entrée du stream de streaming contient :
 - `type=token` ou `type=progress`
@@ -624,7 +617,7 @@ Execute via AgentExecutor (boucle multi-tour explicite)
   ├─ Merge internal tools + MCP tools
   └─ Loop: stream → tool calls → results → next turn, until end_turn or max_turns
   ↓
-If streaming capable: publish chunks to relais:messages:streaming:{channel}:{correlation_id}
+Publish start signal to relais:streaming:start:{channel} (Pub/Sub) then stream chunks to relais:messages:streaming:{channel}:{correlation_id}
   ↓
 Publish response to relais:messages:outgoing_pending  (→ Sentinelle outgoing → outgoing:{channel})
   ↓
@@ -999,7 +992,7 @@ profiles:
 - `base_url`
 - `api_key_env`
 - `fallback_model`
-- `shell_timeout_seconds` (défaut 30) — timeout wall-clock par appel shell (`_HtmlSafeShellBackend.execute`)
+- `shell_timeout_seconds` (défaut 30) — défini dans `ProfileConfig` mais actuellement non appliqué ; `_HtmlSafeShellBackend` (qui appliquait ce timeout) supprimé au profit de `LocalShellBackend`
 - `max_turn_seconds` (défaut 300) — timeout wall-clock pour le tour agentique complet (`AgentExecutor.execute`) ; 0 = désactivé
 - `resilience.retry_attempts`
 - `resilience.retry_delays`

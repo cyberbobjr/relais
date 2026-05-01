@@ -138,7 +138,7 @@ Transient errors leave the envelope in the PEL (no XACK). `AgentExecutionError` 
 The streaming loop uses `agent.astream(stream_mode=["updates","messages"], subgraphs=True, version="v2")`:
 
 - **"updates" chunks**: tool call starts, subagent delegations, tool results — used to update `ToolErrorGuard` counters and emit progress events.
-- **"messages" chunks**: AIMessage token fragments — accumulated in `StreamBuffer` and flushed to `stream_callback` when `STREAM_BUFFER_CHARS` threshold is reached (or on the final token).
+- **"messages" chunks**: AIMessage token fragments — forwarded directly to `stream_callback` without intermediate buffering.
 
 `ToolErrorGuard` tracks tool errors:
 - `max_consecutive=5`: if the same tool fails 5 times in a row → `AgentExecutionError`
@@ -301,7 +301,7 @@ Final entry:      {"token": "",    "done": true}
 TTL: set by the adapter consumer (typically 30s after done=true)
 ```
 
-`StreamBuffer` accumulates tokens and flushes when the buffer reaches `STREAM_BUFFER_CHARS` characters or when the stream ends. This amortises the cost of individual `XADD` calls without introducing noticeable latency.
+Tokens are forwarded directly to `stream_callback` as they arrive, without intermediate buffering. Each token triggers one `XADD` call to the Redis stream.
 
 `DisplayConfig` (populated from `aiguilleur.yaml`) controls whether progress events (tool call names, subagent starts) are emitted alongside tokens, or whether only the final reply is published (`final_only=True`).
 
@@ -439,7 +439,6 @@ atelier:
 | `SubagentTrace` | `atelier/agent_executor.py` | Frozen dataclass: per-delegated-subagent metrics captured by `SubagentMessageCapture` |
 | `CompactResult` | `atelier/agent_executor.py` | Frozen dataclass: `messages_before`, `messages_after`, `cutoff_index` (session compaction output) |
 | `ToolErrorGuard` | `atelier/agent_executor.py` | Tracks consecutive and total tool errors; raises `AgentExecutionError` at thresholds |
-| `StreamBuffer` | `atelier/agent_executor.py` | Accumulates tokens and flushes to `stream_callback` at `STREAM_BUFFER_CHARS` threshold |
 | `SubagentMessageCapture` | `atelier/agent_executor.py` | LangChain callback handler that captures per-subagent metrics into `SubagentTrace` instances |
 | `SoulAssembler` | `atelier/soul_assembler.py` | Validates 4-layer prompt file paths; returns `memory_paths: list[str]` for `create_deep_agent(memory=)` |
 | `ToolPolicy` | `atelier/tool_policy.py` | Resolves skill directories and filters MCP tools per role |

@@ -21,9 +21,15 @@ Request flow (SSE streaming mode):
     Accept: text/event-stream triggers streaming mode. The handler opens a
     StreamResponse and forwards token chunks from
     relais:messages:streaming:rest:{correlation_id} until the final reply
-    arrives on relais:messages:outgoing:rest. When the is_final sentinel is
-    received but the outgoing envelope is still in transit through Sentinelle,
-    a 5 s grace period is applied before concluding the request timed out.
+    arrives on relais:messages:outgoing:rest. SSE event types emitted:
+      - token    {"t": "chunk"}                                    live token
+      - progress {"event": ..., "detail": ...}                    tool-call progress
+      - message  {"content": "...", "correlation_id": ...}        assembled text on is_final
+      - done     {"content": ..., "correlation_id": ..., "session_id": ...}  pipeline confirmed
+      - error    {"error": "...", "correlation_id": ...}          timeout or failure
+    When the is_final sentinel is received but the outgoing envelope is still
+    in transit through Sentinelle, a 5 s grace period is applied before
+    concluding the request timed out.
 
 Background task (_consume_outgoing):
     Reads relais:messages:outgoing:rest via consumer group rest_relay_group
@@ -69,6 +75,7 @@ _STREAM_IN = STREAM_INCOMING
 
 # Maximum allowed size for the 'content' field (bytes, UTF-8 encoded)
 _MAX_CONTENT_BYTES = 32_768  # 32 KB
+_SSE_BUFFER_CAP = 1_048_576  # 1 MB — max chars buffered for the assembled `message` SSE event
 
 # Allowed pattern for caller-supplied session_id values
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
@@ -641,7 +648,6 @@ def create_app(
                     "correlation_id": correlation_id,
                     "channel_profile": channel_profile,
                     "channel_prompt_path": channel_prompt_path,
-                    "streaming": is_sse,
                 }
             },
         )
@@ -834,6 +840,13 @@ async def _handle_sse(
         deadline = loop.time() + request_timeout
         max_deadline = loop.time() + (max_total_timeout if max_total_timeout is not None else max(3600.0, request_timeout * 10))
         seen_final = False
+        # Accumulates token chunks for the assembled `message` SSE event on is_final.
+        # Unlike StreamingMixin._consume_stream (which only needs the assembled text),
+        # this handler must also forward each token immediately via SSE, so buffering
+        # here is not duplicating that mixin — it is a different concern (assembly for
+        # the `message` event).  The 1 MB cap prevents unbounded growth on long replies.
+        buffer: list[str] = []
+        buffer_bytes: int = 0
 
         while loop.time() < max_deadline:
             remaining = deadline - loop.time()
@@ -882,6 +895,13 @@ async def _handle_sse(
                     if isinstance(is_final_raw, bytes):
                         is_final_raw = is_final_raw.decode()
                     if is_final_raw == "1":
+                        assembled = "".join(buffer)
+                        if assembled.strip():
+                            frame = format_sse("message", json.dumps({
+                                "content": assembled,
+                                "correlation_id": correlation_id,
+                            }))
+                            await response.write(frame)
                         seen_final = True
                         break
 
@@ -894,6 +914,10 @@ async def _handle_sse(
                         if isinstance(chunk, bytes):
                             chunk = chunk.decode()
                         if chunk:
+                            chunk_len = len(chunk)
+                            if buffer_bytes + chunk_len <= _SSE_BUFFER_CAP:
+                                buffer.append(chunk)
+                                buffer_bytes += chunk_len
                             frame = format_sse("token", json.dumps({"t": chunk}))
                             await response.write(frame)
                             # Yield to the event loop so the transport flushes

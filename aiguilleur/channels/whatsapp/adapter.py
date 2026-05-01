@@ -1,8 +1,17 @@
 """WhatsApp channel adapter — NativeAiguilleur implementation (Baileys gateway).
 
 Bridges the Baileys HTTP gateway (fazer-ai/baileys-api) and the RELAIS Redis bus:
-- Produces:   relais:messages:incoming         (new user messages)
-- Consumes:   relais:messages:outgoing:whatsapp (bot replies)
+- Produces:   relais:messages:incoming              (new user messages)
+- Consumes:   relais:messages:outgoing:whatsapp      (bot replies + progress events)
+- Subscribes: relais:streaming:start:whatsapp        (Pub/Sub — streaming start signal)
+- Reads:      relais:messages:streaming:whatsapp:{corr_id}  (per-request token chunks)
+
+Streaming is handled by ``StreamingMixin``: the adapter subscribes to
+``relais:streaming:start:whatsapp`` (Pub/Sub); for each signal it spawns a
+consumer task that reads token chunks via XREAD until ``is_final=1``, then
+calls ``_deliver`` to send a single assembled WhatsApp message.  Outgoing
+envelopes with ``context["atelier"]["streamed"] == True`` are ACKed and dropped
+to avoid duplicate delivery.
 
 Uses an aiohttp webhook server to receive events from the gateway, and an
 aiohttp client to send messages back via the gateway REST API.
@@ -18,7 +27,7 @@ import os
 from collections import OrderedDict
 from typing import Any
 
-from common.contexts import CTX_AIGUILLEUR, AiguilleurCtx, ensure_ctx
+from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER, AiguilleurCtx, AtelierCtx, ensure_ctx
 from common.envelope import Envelope
 from common.envelope_actions import (
     ACTION_MESSAGE_INCOMING,
@@ -34,6 +43,7 @@ from common.streams import (
     stream_outgoing,
 )
 from aiguilleur.core.native import NativeAiguilleur
+from aiguilleur.streaming_mixin import StreamingMixin
 
 logger = logging.getLogger("relais.whatsapp")
 
@@ -175,7 +185,7 @@ class WhatsAppAiguilleur(NativeAiguilleur):
 # Business logic
 # ---------------------------------------------------------------------------
 
-class _RelaisWhatsAppClient:
+class _RelaisWhatsAppClient(StreamingMixin):
     """Core WhatsApp adapter logic — webhook server + outgoing consumer.
 
     Attributes:
@@ -205,6 +215,8 @@ class _RelaisWhatsAppClient:
 
         self._http: Any = None  # aiohttp.ClientSession, created in start()
         self._site: Any = None  # aiohttp.web.TCPSite
+        # Strong references to in-flight streaming consumer tasks (prevents GC)
+        self._streaming_tasks: set[asyncio.Task] = set()
 
     async def ensure_gateway_ready(self) -> None:
         """Poll the gateway health endpoint until reachable (max 30s).
@@ -265,6 +277,7 @@ class _RelaisWhatsAppClient:
             await asyncio.gather(
                 self._consume_outgoing(),
                 self._stop_watcher(),
+                self.subscribe_streaming_start(self._redis, "whatsapp", self._streaming_tasks, self._log),
             )
         finally:
             await runner.cleanup()
@@ -579,7 +592,6 @@ class _RelaisWhatsAppClient:
         ctx: AiguilleurCtx = ensure_ctx(envelope, CTX_AIGUILLEUR)  # type: ignore[assignment]
         ctx["channel_profile"] = config.profile
         ctx["channel_prompt_path"] = config.prompt_path
-        ctx["streaming"] = config.streaming
         ctx["content_type"] = "text"
         ctx["reply_to"] = reply_jid
 
@@ -684,6 +696,15 @@ class _RelaisWhatsAppClient:
         if envelope.action == ACTION_MESSAGE_PROGRESS:
             return True  # ACK — nothing to deliver
 
+        # LLM reply already delivered via streaming stream — skip to avoid duplicate
+        atelier_ctx: AtelierCtx = envelope.context.get(CTX_ATELIER, {})  # type: ignore[assignment]
+        if atelier_ctx.get("streamed"):
+            self._log.debug(
+                "Skipping outgoing:whatsapp for %s — already delivered via streaming",
+                envelope.correlation_id[:8],
+            )
+            return True  # ACK — streaming consumer already sent the reply
+
         aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
         to_jid = aig_ctx.get("reply_to", "")
         if not to_jid:
@@ -715,6 +736,23 @@ class _RelaisWhatsAppClient:
                 return True  # ACK — routed to DLQ
 
         return True  # ACK — all parts sent successfully
+
+    async def _deliver(self, envelope: Envelope, full_text: str) -> None:
+        """Send the fully assembled streaming reply via WhatsApp.
+
+        Called by StreamingMixin once is_final=1 is received. Resolves the
+        recipient JID from the envelope context and sends the text, splitting
+        if necessary.
+
+        Args:
+            envelope:  Original request envelope (reply_to metadata).
+            full_text: Fully assembled reply text.
+        """
+        aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
+        to_jid = aig_ctx.get("reply_to", "")
+        if to_jid and full_text.strip():
+            for part in _split_whatsapp_message(full_text):
+                await self._send_message(to_jid, part)
 
     async def _send_message(self, to_jid: str, text: str) -> str | None:
         """Send a text message via baileys-api.

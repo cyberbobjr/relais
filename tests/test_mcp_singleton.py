@@ -476,12 +476,14 @@ async def test_handle_envelope_uses_singleton_mcp_tools() -> None:
     atelier._mcp_manager = mock_mgr
     atelier._mcp_tools = mock_mgr.tools
 
+    from common.envelope_actions import ACTION_MESSAGE_INCOMING
     envelope = Envelope(
         content="hello",
         sender_id="discord:99",
         channel="discord",
         session_id="s1",
         correlation_id="c1",
+        action=ACTION_MESSAGE_INCOMING,
         context={CTX_PORTAIL: {"user_record": {}, "llm_profile": "default"}},
     )
     redis_conn = AsyncMock()

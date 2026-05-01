@@ -40,9 +40,9 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 |---|----------|----------|
 | 1 | LiteLLM : garder ou supprimer ? | **Supprimer dès la migration** — DeepAgents appelle les providers directement |
 | 2 | Async : si DeepAgents sync-only ? | **Non-bloquant** — DeepAgents est async natif (`ainvoke`/`astream`) via LangGraph |
-| 3 | MCP : `langchain-mcp-adapters` ou wrapper manuel ? | **Wrapper manuel `_McpTool(BaseTool)`** — `McpSessionManager` reste inchangé, wrappers LangChain générés par `mcp_adapter.py` |
+| 3 | MCP : `langchain-mcp-adapters` ou wrapper manuel ? | **`langchain-mcp-adapters` + `_BoundMcpTool`** — `load_mcp_tools()` fournit les schémas Pydantic ; `_BoundMcpTool` rebinde l'exécution sur `McpSessionManager.call_tool()` pour conserver lock/timeout/eviction (refactorisé 2026-05-01) |
 | 4 | Cycle de vie MCP sessions | **Singleton brick-level** — `McpSessionManager.start()` au démarrage de la brique, partagé entre toutes les requêtes; per-server locks; dead sessions évincées; restart atomique au hot-reload via `_restart_mcp_sessions()` |
-| 5 | Streaming : granularité vers Redis | **Buffer 80 chars** (`STREAM_BUFFER_CHARS = 80`) — `StreamPublisher` inchangé, buffer dans `AgentExecutor._stream()` |
+| 5 | Streaming : granularité vers Redis | **Direct callback** — `StreamBuffer` supprimé (2026-05-01) ; tokens forwarded directement via `stream_callback` sans buffering intermédiaire ; `StreamPublisher` reçoit chaque token individuellement |
 | 6 | Migration tests | **Réécriture in-place** — `test_sdk_executor.py` → `test_agent_executor.py`, mocks anthropic remplacés par mocks DeepAgents |
 
 ### Contrat d'interface `AgentExecutor`
@@ -72,7 +72,7 @@ class AgentExecutor:
 ```
 
 - `_TRANSIENT_ERROR_NAMES` : `frozenset{"RateLimitError", "InternalServerError", "APIConnectionError", "APITimeoutError", "ServiceUnavailableError"}` — détectés par nom de classe (provider-agnostic)
-- Streaming : `agent.astream(input_data, stream_mode="messages")`, buffer `STREAM_BUFFER_CHARS = 80`
+- Streaming : `agent.astream(input_data, stream_mode=["updates", "messages"])`, tokens forwarded directement via `stream_callback` sans `StreamBuffer` intermédiaire
 - Erreurs transitoires → propagées unwrapped → `main.py` retourne `False` → message reste en PEL
 - Autres exceptions → `AgentExecutionError` → DLQ `relais:tasks:failed` → ACK
 
@@ -84,8 +84,9 @@ async def make_mcp_tools(session_manager: Any) -> list[BaseTool]
 
 - Itère `session_manager.sessions` (dict `server_name → MCP ClientSession`)
 - Convention nommage : `{server_name}__{tool_name}`
-- Si `list_tools()` lève pour un serveur → warning + skip, autres serveurs traités
-- `_McpTool(BaseTool)` : `_arun(**kwargs)` délègue à `session_manager.call_tool(prefixed_name, kwargs)` ; exceptions retournées comme string (loop vivante)
+- Si `_load_mcp_tools()` lève pour un serveur → warning + skip, autres serveurs traités
+- `_BoundMcpTool(BaseTool)` : schéma Pydantic de `load_mcp_tools()`, `_arun(**kwargs)` délègue à `session_manager.call_tool(prefixed_name, kwargs)` ; exceptions retournées comme string (loop vivante)
+- `_ADAPTER_AVAILABLE` : garde ImportError ; `make_mcp_tools()` retourne `[]` si `langchain-mcp-adapters` absent
 
 ### Contrat `ToolPolicy`
 
@@ -251,7 +252,7 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 **Architecture actuelle :**
 - `McpSessionManager` (`atelier/mcp_session_manager.py`) : cycle de vie MCP (démarrage stdio/SSE, sessions internes, dispatch avec `asyncio.wait_for`, timeout configurable)
-- `mcp_adapter.py::make_mcp_tools(session_manager)` : génère des wrappers `_McpTool(BaseTool)` depuis les sessions actives
+- `mcp_adapter.py::make_mcp_tools(session_manager)` : utilise `load_mcp_tools()` de `langchain-mcp-adapters` pour les schémas Pydantic, puis génère des `_BoundMcpTool(BaseTool)` qui rebindent l'exécution sur `McpSessionManager.call_tool()`
 - `AgentExecutor` reçoit une `list[BaseTool]` directement — ignorant la nature MCP ou interne des outils
 
 **Tests MCP :** `tests/test_mcp_session_manager.py` (6 tests), `tests/test_mcp_adapter.py`
@@ -259,7 +260,7 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 ### 5a.5 ✅ `mcp_timeout` et `mcp_max_tools` — supprimés avec migration DeepAgents
 
 Ces champs existaient dans `ProfileConfig` pour le SDKExecutor (limite d'outils MCP passés au modèle Anthropic, timeout par appel). Avec la migration DeepAgents :
-- `mcp_timeout` : supprimé ; remplacé par `shell_timeout_seconds` (défaut 30 s) — timeout wall-clock par appel shell (`_HtmlSafeShellBackend.execute`)
+- `mcp_timeout` : supprimé ; remplacé par `shell_timeout_seconds` (défaut 30 s dans `ProfileConfig`) — initialement appliqué via `_HtmlSafeShellBackend.execute` ; cette classe a été supprimée (2026-05-01), remplacée par `LocalShellBackend` standard ; le workaround HTML-encoding pour Grok est maintenant géré via `register_harness_profile` dans `atelier/main.py`
 - `mcp_max_tools` : supprimé — DeepAgents gère la liste d'outils en interne
 - Nouveau champ : `max_turn_seconds` (défaut 300 s, 0 = désactivé) — timeout wall-clock pour le tour agentique complet (`AgentExecutor.execute`)
 - Les deux anciens champs sont supprimés de `ProfileConfig` et `config/atelier/profiles.yaml.default`
@@ -423,7 +424,7 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 
 ### 6.2 ✅ Architecture AIGUILLEUR configurable (2026-03-30) DONE
 
-`AiguilleurManager` charge les canaux depuis `aiguilleur.yaml` (enabled/disabled, streaming flag, type, restart policy). Adapter discovery par convention : `aiguilleur.channels.{name}.adapter` ou `class_path` override. Restart automatique avec backoff exponentiel.
+`AiguilleurManager` charge les canaux depuis `aiguilleur.yaml` (enabled/disabled, type, restart policy). Le champ `streaming` a été supprimé de `ChannelConfig` et `AiguilleurCtx` — Atelier streame toujours token-by-token ; chaque adaptateur s'abonne à `relais:streaming:start:{channel}` (Pub/Sub) pour spawner un consumer qui bufferise les chunks jusqu'à `is_final=1`. Adapter discovery par convention : `aiguilleur.channels.{name}.adapter` ou `class_path` override. Restart automatique avec backoff exponentiel.
 
 ---
 
@@ -477,7 +478,7 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 **Fichiers de test Atelier (migration DeepAgents) :**
 - `tests/test_agent_executor.py` — remplace `test_sdk_executor.py` (mocks DeepAgents, streaming buffer, contrat XACK)
 - `tests/test_tools.py` — `list_skills`, `read_skill`, path traversal guard
-- `tests/test_mcp_adapter.py` — mock `McpSessionManager`, wrappers `_McpTool`, skip serveur en erreur
+- `tests/test_mcp_adapter.py` — mock `_load_mcp_tools` + `McpSessionManager`, wrappers `_BoundMcpTool`, skip serveur en erreur, guard `_ADAPTER_AVAILABLE=False`
 
 **Couverture cible:** 80% (règle commune)
 
@@ -591,7 +592,7 @@ prometheus-client = ">=0.20"
 |---------|------|-------|
 | `tests/test_agent_executor.py` | ✅ CRÉÉ | Mock `create_deep_agent`, streaming buffer 80 chars, contrat XACK |
 | `tests/test_tools.py` | ✅ CRÉÉ | `list_skills`, `read_skill`, path traversal guard |
-| `tests/test_mcp_adapter.py` | ✅ CRÉÉ | Mock `McpSessionManager`, wrappers `_McpTool`, skip serveur en erreur |
+| `tests/test_mcp_adapter.py` | ✅ CRÉÉ | Mock `_load_mcp_tools` + `McpSessionManager`, wrappers `_BoundMcpTool`, skip serveur en erreur, guard `_ADAPTER_AVAILABLE=False` |
 | `tests/test_mcp_session_manager.py` | ✅ CRÉÉ | `call_tool` server not found, timeout, TimeoutError → string |
 | `tests/test_stream_publisher.py` | ✅ | `seq` incrémenté, `is_final=1` sur `finalize()`, format clé Redis |
 

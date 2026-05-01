@@ -90,7 +90,6 @@ def adapter_mock():
     config = ChannelConfig(
         name="rest",
         enabled=True,
-        streaming=True,
         extras={
             "bind": "127.0.0.1",
             "port": 8080,
@@ -722,7 +721,6 @@ class TestEnvelopeCorrectness:
 
         assert len(captured) == 1
         ctx = captured[0].context.get(CTX_AIGUILLEUR, {})
-        assert ctx.get("streaming") is False
         assert ctx.get("content_type") == "text"
         assert "reply_to" in ctx
         assert "correlation_id" in ctx
@@ -869,7 +867,6 @@ class TestSseStreaming:
         config = ChannelConfig(
             name="rest",
             enabled=True,
-            streaming=True,
             extras={
                 "bind": "127.0.0.1",
                 "port": 8080,
@@ -927,10 +924,10 @@ class TestSseStreaming:
             await client.close()
 
     @pytest.mark.asyncio
-    async def test_sse_envelope_has_streaming_true(
+    async def test_sse_envelope_published(
         self, test_client, valid_token, correlator, fake_redis
     ):
-        """When Accept: text/event-stream, the published envelope has streaming=True."""
+        """When Accept: text/event-stream, the envelope is published to the bus."""
         from common.contexts import CTX_AIGUILLEUR
 
         captured: list[Envelope] = []
@@ -964,7 +961,6 @@ class TestSseStreaming:
             },
         )
         # SSE response is a streaming response — status may be 200 or connection close
-        # The key assertion is that the envelope was captured with streaming=True
         assert len(captured) == 1
         ctx = captured[0].context.get(CTX_AIGUILLEUR, {})
-        assert ctx.get("streaming") is True
+        assert ctx.get("content_type") == "text"
