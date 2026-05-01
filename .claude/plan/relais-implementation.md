@@ -42,7 +42,7 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 | 2 | Async : si DeepAgents sync-only ? | **Non-bloquant** — DeepAgents est async natif (`ainvoke`/`astream`) via LangGraph |
 | 3 | MCP : `langchain-mcp-adapters` ou wrapper manuel ? | **`langchain-mcp-adapters` + `_BoundMcpTool`** — `load_mcp_tools()` fournit les schémas Pydantic ; `_BoundMcpTool` rebinde l'exécution sur `McpSessionManager.call_tool()` pour conserver lock/timeout/eviction (refactorisé 2026-05-01) |
 | 4 | Cycle de vie MCP sessions | **Singleton brick-level** — `McpSessionManager.start()` au démarrage de la brique, partagé entre toutes les requêtes; per-server locks; dead sessions évincées; restart atomique au hot-reload via `_restart_mcp_sessions()` |
-| 5 | Streaming : granularité vers Redis | **Buffer 80 chars** (`STREAM_BUFFER_CHARS = 80`) — `StreamPublisher` inchangé, buffer dans `AgentExecutor._stream()` |
+| 5 | Streaming : granularité vers Redis | **Direct callback** — `StreamBuffer` supprimé (2026-05-01) ; tokens forwarded directement via `stream_callback` sans buffering intermédiaire ; `StreamPublisher` reçoit chaque token individuellement |
 | 6 | Migration tests | **Réécriture in-place** — `test_sdk_executor.py` → `test_agent_executor.py`, mocks anthropic remplacés par mocks DeepAgents |
 
 ### Contrat d'interface `AgentExecutor`
@@ -72,7 +72,7 @@ class AgentExecutor:
 ```
 
 - `_TRANSIENT_ERROR_NAMES` : `frozenset{"RateLimitError", "InternalServerError", "APIConnectionError", "APITimeoutError", "ServiceUnavailableError"}` — détectés par nom de classe (provider-agnostic)
-- Streaming : `agent.astream(input_data, stream_mode="messages")`, buffer `STREAM_BUFFER_CHARS = 80`
+- Streaming : `agent.astream(input_data, stream_mode=["updates", "messages"])`, tokens forwarded directement via `stream_callback` sans `StreamBuffer` intermédiaire
 - Erreurs transitoires → propagées unwrapped → `main.py` retourne `False` → message reste en PEL
 - Autres exceptions → `AgentExecutionError` → DLQ `relais:tasks:failed` → ACK
 
@@ -260,7 +260,7 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 ### 5a.5 ✅ `mcp_timeout` et `mcp_max_tools` — supprimés avec migration DeepAgents
 
 Ces champs existaient dans `ProfileConfig` pour le SDKExecutor (limite d'outils MCP passés au modèle Anthropic, timeout par appel). Avec la migration DeepAgents :
-- `mcp_timeout` : supprimé ; remplacé par `shell_timeout_seconds` (défaut 30 s) — timeout wall-clock par appel shell (`_HtmlSafeShellBackend.execute`)
+- `mcp_timeout` : supprimé ; remplacé par `shell_timeout_seconds` (défaut 30 s dans `ProfileConfig`) — initialement appliqué via `_HtmlSafeShellBackend.execute` ; cette classe a été supprimée (2026-05-01), remplacée par `LocalShellBackend` standard ; le workaround HTML-encoding pour Grok est maintenant géré via `register_harness_profile` dans `atelier/main.py`
 - `mcp_max_tools` : supprimé — DeepAgents gère la liste d'outils en interne
 - Nouveau champ : `max_turn_seconds` (défaut 300 s, 0 = désactivé) — timeout wall-clock pour le tour agentique complet (`AgentExecutor.execute`)
 - Les deux anciens champs sont supprimés de `ProfileConfig` et `config/atelier/profiles.yaml.default`

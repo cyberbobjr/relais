@@ -96,7 +96,7 @@ The main pipeline flows through these bricks in order:
 
 - **config/** - YAML configuration files
   - `config.yaml`: Redis socket, LiteLLM URL, logging, security settings
-  - `aiguilleur.yaml`: Channel definitions (enabled/disabled, streaming flag, type, class_path, max_restarts)
+  - `aiguilleur.yaml`: Channel definitions (enabled/disabled, type, class_path, max_restarts)
   - `litellm.yaml`: Model definitions, router settings, master key
   - `profiles.yaml`: LLM profiles (default/fast/precise/coder) with temp, max_tokens, retry delays
   - `mcp_servers.yaml`: MCP stdio server definitions for Atelier (command, args, env per server)

@@ -992,7 +992,7 @@ profiles:
 - `base_url`
 - `api_key_env`
 - `fallback_model`
-- `shell_timeout_seconds` (défaut 30) — timeout wall-clock par appel shell (`_HtmlSafeShellBackend.execute`)
+- `shell_timeout_seconds` (défaut 30) — défini dans `ProfileConfig` mais actuellement non appliqué ; `_HtmlSafeShellBackend` (qui appliquait ce timeout) supprimé au profit de `LocalShellBackend`
 - `max_turn_seconds` (défaut 300) — timeout wall-clock pour le tour agentique complet (`AgentExecutor.execute`) ; 0 = désactivé
 - `resilience.retry_attempts`
 - `resilience.retry_delays`

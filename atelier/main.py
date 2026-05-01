@@ -38,8 +38,10 @@ Key classes:
   File reading is delegated to DeepAgents; this module only validates paths.
 * ``ProfileConfig`` — loaded from ``common/profile_loader.py`` (config file
   ``atelier/profiles.yaml``); selects model, temperature, max_tokens per
-  request.  ``shell_timeout_seconds`` (default 30) caps individual shell tool
-  calls; ``max_turn_seconds`` (default 300, 0 = disabled) caps the total turn.
+  request.  ``shell_timeout_seconds`` (default 30) is defined in ProfileConfig
+  but currently not applied (``_HtmlSafeShellBackend`` removed 2026-05-01;
+  Grok HTML-encoding workaround now via ``register_harness_profile``);
+  ``max_turn_seconds`` (default 300, 0 = disabled) caps the total turn.
   Optional field ``parallel_tool_calls: bool | None`` forwards the
   OpenAI-compatible
   ``parallel_tool_calls`` parameter to the model (useful to disable it for
