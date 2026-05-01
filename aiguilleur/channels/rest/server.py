@@ -641,7 +641,6 @@ def create_app(
                     "correlation_id": correlation_id,
                     "channel_profile": channel_profile,
                     "channel_prompt_path": channel_prompt_path,
-                    "streaming": is_sse,
                 }
             },
         )

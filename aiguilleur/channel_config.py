@@ -15,7 +15,7 @@ import yaml
 
 from common.config_loader import resolve_config_path
 
-_CHANNELS_CONFIG_FILE = "aiguilleur.yaml"
+CHANNELS_CONFIG_FILE = "aiguilleur.yaml"
 
 
 class ProfileRef:
@@ -68,7 +68,6 @@ class ChannelConfig:
     Attributes:
         name:         Channel identifier (e.g. 'discord').
         enabled:      Whether the adapter is started by the Aiguilleur process.
-        streaming:    Whether the channel supports real-time chunk rendering.
         type:         'native' (Python thread) or 'external' (subprocess).
         command:      For type=external: the executable to spawn.
         args:         For type=external: command-line arguments.
@@ -93,7 +92,6 @@ class ChannelConfig:
 
     name: str
     enabled: bool = True
-    streaming: bool = False
     type: str = "native"
     command: str | None = None
     args: list[str] = field(default_factory=list)
@@ -131,25 +129,15 @@ def _parse_int(value: object, default: int) -> int:
 def load_channels_config() -> dict[str, ChannelConfig]:
     """Load channel configurations from aiguilleur.yaml.
 
-    Returns a dict keyed by channel name. Falls back to a minimal
-    discord-enabled config when the file is not found.
-
     Returns:
         dict[str, ChannelConfig]: Channel configurations keyed by name.
+
+    Raises:
+        FileNotFoundError: If aiguilleur.yaml cannot be located in any
+            config directory of the cascade.
     """
-    try:
-        config_path: Path = resolve_config_path(_CHANNELS_CONFIG_FILE)
-        raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
-    except FileNotFoundError:
-        import logging
-        logging.getLogger("aiguilleur.config").warning(
-            "aiguilleur.yaml not found — falling back to discord-only default. "
-            "Run initialize_user_dir() or copy config/aiguilleur.yaml.default to %s",
-            _CHANNELS_CONFIG_FILE,
-        )
-        return {
-            "discord": ChannelConfig(name="discord", enabled=True, streaming=True)
-        }
+    config_path: Path = resolve_config_path(CHANNELS_CONFIG_FILE)
+    raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
 
     channels_raw: dict[str, Any] = raw.get("channels", {}) or {}
 
@@ -158,7 +146,7 @@ def load_channels_config() -> dict[str, ChannelConfig]:
         values = values or {}
         # Collect channel-specific extras (all keys not in the hard field list)
         _HARD_FIELDS = {
-            "enabled", "streaming", "type", "command", "args",
+            "enabled", "type", "command", "args",
             "class", "max_restarts", "profile", "prompt_path",
         }
         extras: dict[str, Any] = {
@@ -167,7 +155,6 @@ def load_channels_config() -> dict[str, ChannelConfig]:
         result[name] = ChannelConfig(
             name=name,
             enabled=bool(values.get("enabled", True)),
-            streaming=bool(values.get("streaming", False)),
             type=str(values.get("type", "native")),
             command=values.get("command") or None,
             args=list(values.get("args") or []),

@@ -334,7 +334,7 @@ async def test_streaming_signal_published_for_telegram_channel() -> None:
     signal before invoking SDK execute.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -375,49 +375,6 @@ async def test_streaming_signal_published_for_telegram_channel() -> None:
     assert len(publish_calls) >= 1
 
 
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_streaming_signal_not_published_for_non_streaming_channel() -> None:
-    """handle_message does NOT publish a streaming signal for whatsapp channel.
-
-    When the envelope channel is 'whatsapp' (not in STREAMING_CAPABLE_CHANNELS),
-    _handle_message must not call redis.publish with any streaming-start signal.
-    """
-    atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="whatsapp")
-    redis_conn = _make_redis_mock()
-
-    redis_conn.xreadgroup = AsyncMock(side_effect=[
-        _make_xreadgroup_result(envelope),
-        asyncio.CancelledError(),
-    ])
-
-    with patch("atelier.main.AgentExecutor") as MockExecutor:
-        mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="reply", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=()))
-        MockExecutor.return_value = mock_instance
-
-        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
-            mock_mgr = AsyncMock()
-            mock_mgr.start_all = AsyncMock()
-            MockMcpMgr.return_value = mock_mgr
-
-            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
-                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
-                        with patch("atelier.main.load_for_sdk", return_value={}):
-                            try:
-                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
-                            except asyncio.CancelledError:
-                                pass
-
-    # redis.publish must not have been called with any streaming-start pattern
-    streaming_publish_calls = [
-        c for c in redis_conn.publish.await_args_list
-        if "relais:streaming:start:" in str(c)
-    ]
-    assert len(streaming_publish_calls) == 0
-
 
 @pytest.mark.unit
 @pytest.mark.asyncio
@@ -428,7 +385,7 @@ async def test_stream_publisher_finalize_called_after_sdk_execution() -> None:
     call stream_pub.finalize() once after sdk_executor.execute() completes.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -475,7 +432,7 @@ async def test_streaming_publish_payload_is_full_envelope_json() -> None:
     JSONDecodeError in the Aiguilleur subscriber.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -538,7 +495,7 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
     context["atelier"]["streamed"] == True so the Aiguilleur can edit instead of re-send.
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {"streaming": True}})
+    envelope = _make_envelope(channel="telegram", context={CTX_AIGUILLEUR: {}})
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -581,16 +538,22 @@ async def test_streamed_flag_set_in_metadata_for_streaming_channel() -> None:
     assert response_data["context"]["atelier"].get("streamed") is True
 
 
-@pytest.mark.asyncio
-@pytest.mark.unit
-async def test_no_streamed_flag_for_non_streaming_channel() -> None:
-    """_handle_message() must NOT set context["atelier"]["streamed"] for non-streaming channels.
 
-    When the envelope channel is "whatsapp" (not in STREAMING_CAPABLE_CHANNELS),
-    the response envelope must not carry a streamed flag.
+# ---------------------------------------------------------------------------
+# Unified streaming — Atelier always streams regardless of CTX_AIGUILLEUR flag
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_streaming_signal_always_published_without_flag() -> None:
+    """relais:streaming:start:{channel} is published even when CTX_AIGUILLEUR has no streaming flag.
+
+    After the streaming uniformization, Atelier must always publish the start
+    signal regardless of the 'streaming' field in context["aiguilleur"].
     """
     atelier = _make_atelier_with_patches()
-    envelope = _make_envelope(channel="whatsapp")
+    envelope = _make_envelope(channel="discord")  # no streaming flag
     redis_conn = _make_redis_mock()
 
     redis_conn.xreadgroup = AsyncMock(side_effect=[
@@ -600,7 +563,10 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
 
     with patch("atelier.main.AgentExecutor") as MockExecutor:
         mock_instance = AsyncMock()
-        mock_instance.execute = AsyncMock(return_value=AgentResult(reply_text="Non-streamed reply", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=()))
+        mock_instance.execute = AsyncMock(return_value=AgentResult(
+            reply_text="reply", messages_raw=[], tool_call_count=0,
+            tool_error_count=0, subagent_traces=(),
+        ))
         MockExecutor.return_value = mock_instance
 
         with patch("atelier.main.McpSessionManager") as MockMcpMgr:
@@ -609,13 +575,111 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
             MockMcpMgr.return_value = mock_mgr
 
             with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
-                with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
-                    with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
-                        with patch("atelier.main.load_for_sdk", return_value={}):
-                            try:
-                                await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
-                            except asyncio.CancelledError:
-                                pass
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+                                except asyncio.CancelledError:
+                                    pass
+
+    publish_calls = [
+        c for c in redis_conn.publish.await_args_list
+        if "relais:streaming:start:discord" in str(c)
+    ]
+    assert len(publish_calls) >= 1, "Expected streaming:start signal even without streaming flag"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_finalize_always_called_without_flag() -> None:
+    """StreamPublisher.finalize() is always called even when CTX_AIGUILLEUR has no streaming flag."""
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(channel="discord")  # no streaming flag
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value=AgentResult(
+            reply_text="reply", messages_raw=[], tool_call_count=0,
+            tool_error_count=0, subagent_traces=(),
+        ))
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+                                except asyncio.CancelledError:
+                                    pass
+
+    mock_pub.finalize.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_streamed_flag_always_set_without_flag() -> None:
+    """atelier_ctx['streamed'] is always True even when CTX_AIGUILLEUR has no streaming flag."""
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(channel="discord")  # no streaming flag
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+        mock_instance.execute = AsyncMock(return_value=AgentResult(
+            reply_text="reply", messages_raw=[], tool_call_count=0,
+            tool_error_count=0, subagent_traces=(),
+        ))
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+                                except asyncio.CancelledError:
+                                    pass
 
     outgoing_calls = [
         c for c in redis_conn.xadd.await_args_list
@@ -624,7 +688,62 @@ async def test_no_streamed_flag_for_non_streaming_channel() -> None:
     assert len(outgoing_calls) == 1
     payload_json = outgoing_calls[0].args[1]["payload"]
     response_data = json.loads(payload_json)
-    assert "streamed" not in response_data.get("context", {}).get("atelier", {})
+    assert response_data["context"]["atelier"].get("streamed") is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stream_callback_always_non_none() -> None:
+    """AgentExecutor.execute() always receives a non-None stream_callback.
+
+    After the streaming uniformization, Atelier must always pass push_chunk
+    as stream_callback regardless of the 'streaming' field in the envelope.
+    """
+    atelier = _make_atelier_with_patches()
+    envelope = _make_envelope(channel="discord")  # no streaming flag
+    redis_conn = _make_redis_mock()
+
+    redis_conn.xreadgroup = AsyncMock(side_effect=[
+        _make_xreadgroup_result(envelope),
+        asyncio.CancelledError(),
+    ])
+
+    execute_kwargs: list[dict] = []
+
+    with patch("atelier.main.AgentExecutor") as MockExecutor:
+        mock_instance = AsyncMock()
+
+        async def capture_execute(**kwargs: object) -> AgentResult:
+            execute_kwargs.append(kwargs)
+            return AgentResult(reply_text="reply", messages_raw=[], tool_call_count=0, tool_error_count=0, subagent_traces=())
+
+        mock_instance.execute = capture_execute
+        MockExecutor.return_value = mock_instance
+
+        with patch("atelier.main.McpSessionManager") as MockMcpMgr:
+            mock_mgr = AsyncMock()
+            mock_mgr.start_all = AsyncMock()
+            MockMcpMgr.return_value = mock_mgr
+
+            with patch("atelier.main.make_mcp_tools", new_callable=AsyncMock, return_value=[]):
+                with patch("atelier.main.StreamPublisher") as MockStreamPublisher:
+                    mock_pub = AsyncMock()
+                    mock_pub.push_chunk = AsyncMock()
+                    mock_pub.finalize = AsyncMock()
+                    MockStreamPublisher.return_value = mock_pub
+
+                    with patch("atelier.main.resolve_profile", return_value=_default_profile_mock()):
+                        with patch("atelier.main.assemble_system_prompt", return_value=AssemblyResult(memory_paths=[], issues=[], is_degraded=False)):
+                            with patch("atelier.main.load_for_sdk", return_value={}):
+                                try:
+                                    await atelier._run_stream_loop(atelier.stream_specs()[0], redis_conn, asyncio.Event())
+                                except asyncio.CancelledError:
+                                    pass
+
+    assert execute_kwargs, "AgentExecutor.execute should have been called"
+    assert execute_kwargs[0].get("stream_callback") is not None, (
+        "stream_callback must always be non-None after streaming uniformization"
+    )
 
 
 # ---------------------------------------------------------------------------

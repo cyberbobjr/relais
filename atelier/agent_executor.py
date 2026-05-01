@@ -690,10 +690,9 @@ class AgentExecutor:
                 pass
             raise
 
-        if stream_callback is not None:
-            if self._display.final_only:
-                await buf.add(state.current_section)
-            await buf.flush()
+        if self._display.final_only:
+            await buf.add(state.current_section)
+        await buf.flush()
 
         reply_text = compute_reply_text(
             full_reply=state.full_reply,

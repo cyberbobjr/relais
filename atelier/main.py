@@ -156,13 +156,10 @@ Message flow (one task at a time):
     │      _mcp_lock); apply ToolPolicy.filter_mcp_tools() per allowed_mcp_tools
     │  (5) resolve subagents + delegation prompt from SubagentRegistry,
     │      filtered by user's allowed_subagents patterns (fnmatch)
-    │  (6) Read streaming flag from context["aiguilleur"]["streaming"]; if True,
-    │      create per-request display_config = replace(_display_config, final_only=False)
-    │      so emit_text() flushes each token immediately instead of accumulating the
-    │      full reply.  Pass this override to both AgentExecutor and StreamPublisher.
+    │  (6) Execute — always streaming; adapters decide whether to buffer or forward
     │      AgentExecutor.execute(profile, soul_prompt, mcp_tools, skills,
     │      backend=SouvenirBackend, checkpointer, subagents, delegation_prompt,
-    │      display_config=display_config, progress_callback=…)
+    │      progress_callback=…)
     │      ├── token chunks    ──► relais:messages:streaming:{channel}:{corr_id}
     │      ├── progress events ──► relais:messages:streaming + relais:messages:outgoing:{channel}
     │      └── AgentResult(reply_text, messages_raw, tool_call_count, tool_error_count,
@@ -212,12 +209,11 @@ exhausted, ``ExhaustedRetriesError`` (a subclass of ``AgentExecutionError``) is
 raised — which routes the message to the DLQ and ACKs it, preventing indefinite
 PEL poisoning.
 
-Streaming mode is determined by ``context["aiguilleur"]["streaming"]`` (stamped
-by the channel adapter from ``ChannelConfig.streaming`` in aiguilleur.yaml) —
-Atelier no longer loads aiguilleur.yaml per-request.  For streaming-capable
-channels each text chunk is also published via StreamPublisher for real-time
-rendering before the full reply is ready.  Discord receives a final reply only,
-with live progress events (tool_call, tool_result, subagent_start) sent to
+Atelier always streams token-by-token.  Each adapter buffers or forwards tokens
+as appropriate for its channel.  Each text chunk is published via StreamPublisher
+for real-time rendering before the full reply is ready.  Discord receives a
+final reply only, with live progress events (tool_call, tool_result,
+subagent_start) sent to
 ``relais:messages:outgoing:{channel}`` as ``message_type=progress`` envelopes.
 Publishing is governed by ``DisplayConfig`` (atelier.yaml ``display:`` section).
 """
@@ -240,6 +236,7 @@ from common.streams import (
     STREAM_SKILL_TRACE,
     STREAM_TASKS,
     STREAM_TASKS_FAILED,
+    pubsub_streaming_start,
 )
 from common.contexts import (
     CTX_AIGUILLEUR,
@@ -977,13 +974,8 @@ class Atelier(BrickBase):
                         force_subagent_name, corr,
                     )
 
-            # 6. Execute
-            aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
-            streaming = aig_ctx.get("streaming", False)
-            # When streaming to the client, tokens must be emitted token-by-token
-            # rather than accumulated; override final_only so emit_text() flushes
-            # each chunk immediately instead of batching the full reply.
-            display_config = replace(self._display_config, final_only=False) if streaming else self._display_config
+            # 6. Execute — always streaming; adapters decide whether to buffer or forward
+            display_config = replace(self._display_config, final_only=False)
             agent_executor = AgentExecutor(
                 profile=profile,
                 memory_paths=memory_paths,
@@ -1002,21 +994,20 @@ class Atelier(BrickBase):
                 source_envelope=envelope,
                 display_config=display_config,
             )
-            if streaming:
-                await redis_conn.publish(
-                    f"relais:streaming:start:{envelope.channel}",
-                    envelope.to_json(),
-                )
+            await redis_conn.publish(
+                pubsub_streaming_start(envelope.channel),
+                envelope.to_json(),
+            )
             logger.info(
-                "[TASK] executing agent — corr=%s streaming=%s model=%s",
-                corr, streaming, profile.model,
+                "[TASK] executing agent — corr=%s model=%s",
+                corr, profile.model,
             )
 
             _turn_timeout: float | None = profile.max_turn_seconds if profile.max_turn_seconds > 0 else None
             agent_result = await asyncio.wait_for(
                 agent_executor.execute(
                     envelope=envelope,
-                    stream_callback=stream_pub.push_chunk if streaming else None,
+                    stream_callback=stream_pub.push_chunk,
                     progress_callback=stream_pub.push_progress,
                 ),
                 timeout=_turn_timeout,
@@ -1088,9 +1079,8 @@ class Atelier(BrickBase):
             atelier_ctx["user_message"] = envelope.content
             if skills_used:
                 atelier_ctx["skills_used"] = skills_used
-            if streaming:
-                await stream_pub.finalize()
-                atelier_ctx["streamed"] = True
+            await stream_pub.finalize()
+            atelier_ctx["streamed"] = True
             response_env.add_trace("atelier", f"Generated via {profile.model}")
 
             out_stream = STREAM_OUTGOING_PENDING

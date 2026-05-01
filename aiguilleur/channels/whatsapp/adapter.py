@@ -18,7 +18,7 @@ import os
 from collections import OrderedDict
 from typing import Any
 
-from common.contexts import CTX_AIGUILLEUR, AiguilleurCtx, ensure_ctx
+from common.contexts import CTX_AIGUILLEUR, CTX_ATELIER, AiguilleurCtx, AtelierCtx, ensure_ctx
 from common.envelope import Envelope
 from common.envelope_actions import (
     ACTION_MESSAGE_INCOMING,
@@ -31,7 +31,9 @@ from common.streams import (
     KEY_WHATSAPP_PAIRING,
     STREAM_INCOMING,
     STREAM_OUTGOING_FAILED,
+    pubsub_streaming_start,
     stream_outgoing,
+    stream_streaming,
 )
 from aiguilleur.core.native import NativeAiguilleur
 
@@ -205,6 +207,8 @@ class _RelaisWhatsAppClient:
 
         self._http: Any = None  # aiohttp.ClientSession, created in start()
         self._site: Any = None  # aiohttp.web.TCPSite
+        # Strong references to in-flight streaming consumer tasks (prevents GC)
+        self._streaming_tasks: set[asyncio.Task] = set()
 
     async def ensure_gateway_ready(self) -> None:
         """Poll the gateway health endpoint until reachable (max 30s).
@@ -265,6 +269,7 @@ class _RelaisWhatsAppClient:
             await asyncio.gather(
                 self._consume_outgoing(),
                 self._stop_watcher(),
+                self._subscribe_streaming_start(),
             )
         finally:
             await runner.cleanup()
@@ -579,7 +584,6 @@ class _RelaisWhatsAppClient:
         ctx: AiguilleurCtx = ensure_ctx(envelope, CTX_AIGUILLEUR)  # type: ignore[assignment]
         ctx["channel_profile"] = config.profile
         ctx["channel_prompt_path"] = config.prompt_path
-        ctx["streaming"] = config.streaming
         ctx["content_type"] = "text"
         ctx["reply_to"] = reply_jid
 
@@ -684,6 +688,15 @@ class _RelaisWhatsAppClient:
         if envelope.action == ACTION_MESSAGE_PROGRESS:
             return True  # ACK — nothing to deliver
 
+        # LLM reply already delivered via streaming stream — skip to avoid duplicate
+        atelier_ctx: AtelierCtx = envelope.context.get(CTX_ATELIER, {})  # type: ignore[assignment]
+        if atelier_ctx.get("streamed"):
+            self._log.debug(
+                "Skipping outgoing:whatsapp for %s — already delivered via streaming",
+                envelope.correlation_id[:8],
+            )
+            return True  # ACK — streaming consumer already sent the reply
+
         aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
         to_jid = aig_ctx.get("reply_to", "")
         if not to_jid:
@@ -715,6 +728,100 @@ class _RelaisWhatsAppClient:
                 return True  # ACK — routed to DLQ
 
         return True  # ACK — all parts sent successfully
+
+    async def _consume_streaming_reply(self, envelope: Envelope) -> None:
+        """Buffer token-by-token chunks from the streaming stream and send once complete.
+
+        Reads from ``relais:messages:streaming:whatsapp:{corr_id}`` via XREAD
+        until an entry with ``is_final=1`` is received, then assembles all
+        chunks into a single message and delivers it via WhatsApp.
+
+        Args:
+            envelope: The original request envelope (for corr_id, reply_to, etc.).
+        """
+        if self._redis is None:
+            self._log.error("Redis connection unavailable for streaming reply consumer")
+            return
+
+        corr_id = envelope.correlation_id
+        stream_key = stream_streaming("whatsapp", corr_id)
+        last_id = "0-0"
+        buffer: list[str] = []
+        deadline = asyncio.get_running_loop().time() + 300
+
+        aig_ctx: AiguilleurCtx = envelope.context.get(CTX_AIGUILLEUR, {})  # type: ignore[assignment]
+        to_jid = aig_ctx.get("reply_to", "")
+
+        try:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    self._log.warning("Streaming reply timed out for %s", corr_id[:8])
+                    return
+
+                results = await self._redis.xread(
+                    streams={stream_key: last_id},
+                    count=50,
+                    block=min(5000, int(remaining * 1000)),
+                )
+                if not results:
+                    continue
+
+                for _, entries in results:
+                    for entry_id, fields in entries:
+                        last_id = entry_id
+                        chunk = fields.get("chunk", "")
+                        is_final = fields.get("is_final", "0") == "1"
+
+                        if chunk:
+                            buffer.append(chunk)
+
+                        if is_final:
+                            full_text = "".join(buffer)
+                            if to_jid and full_text.strip():
+                                for part in _split_whatsapp_message(full_text):
+                                    await self._send_message(to_jid, part)
+                            return
+        except Exception as exc:
+            self._log.error(
+                "Streaming reply consumer error for %s: %s", corr_id[:8], exc
+            )
+
+    async def _subscribe_streaming_start(self) -> None:
+        """Subscribe to relais:streaming:start:whatsapp and spawn reply consumers.
+
+        Listens on the Pub/Sub channel that Atelier publishes to before starting
+        agent execution. For each start signal, the original request envelope is
+        parsed and a ``_consume_streaming_reply`` task is spawned.
+        """
+        if self._redis is None:
+            self._log.error("Redis connection unavailable for streaming start subscriber")
+            return
+
+        pubsub = self._redis.pubsub()
+        await pubsub.subscribe(pubsub_streaming_start("whatsapp"))
+        self._log.info("Subscribed to %s", pubsub_streaming_start("whatsapp"))
+
+        try:
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                try:
+                    data = message.get("data", b"")
+                    if isinstance(data, bytes):
+                        data = data.decode()
+                    envelope = Envelope.from_json(data)
+                except Exception as exc:
+                    self._log.error("Failed to parse streaming start envelope: %s", exc)
+                    continue
+
+                task = asyncio.get_running_loop().create_task(
+                    self._consume_streaming_reply(envelope)
+                )
+                self._streaming_tasks.add(task)
+                task.add_done_callback(self._streaming_tasks.discard)
+        except Exception as exc:
+            self._log.error("Streaming start subscriber error: %s", exc)
 
     async def _send_message(self, to_jid: str, text: str) -> str | None:
         """Send a text message via baileys-api.

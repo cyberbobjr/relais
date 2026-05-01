@@ -40,7 +40,7 @@ Le cycle de base est fonctionnel : Discord → Portail → Sentinelle → Atelie
 |---|----------|----------|
 | 1 | LiteLLM : garder ou supprimer ? | **Supprimer dès la migration** — DeepAgents appelle les providers directement |
 | 2 | Async : si DeepAgents sync-only ? | **Non-bloquant** — DeepAgents est async natif (`ainvoke`/`astream`) via LangGraph |
-| 3 | MCP : `langchain-mcp-adapters` ou wrapper manuel ? | **Wrapper manuel `_McpTool(BaseTool)`** — `McpSessionManager` reste inchangé, wrappers LangChain générés par `mcp_adapter.py` |
+| 3 | MCP : `langchain-mcp-adapters` ou wrapper manuel ? | **`langchain-mcp-adapters` + `_BoundMcpTool`** — `load_mcp_tools()` fournit les schémas Pydantic ; `_BoundMcpTool` rebinde l'exécution sur `McpSessionManager.call_tool()` pour conserver lock/timeout/eviction (refactorisé 2026-05-01) |
 | 4 | Cycle de vie MCP sessions | **Singleton brick-level** — `McpSessionManager.start()` au démarrage de la brique, partagé entre toutes les requêtes; per-server locks; dead sessions évincées; restart atomique au hot-reload via `_restart_mcp_sessions()` |
 | 5 | Streaming : granularité vers Redis | **Buffer 80 chars** (`STREAM_BUFFER_CHARS = 80`) — `StreamPublisher` inchangé, buffer dans `AgentExecutor._stream()` |
 | 6 | Migration tests | **Réécriture in-place** — `test_sdk_executor.py` → `test_agent_executor.py`, mocks anthropic remplacés par mocks DeepAgents |
@@ -84,8 +84,9 @@ async def make_mcp_tools(session_manager: Any) -> list[BaseTool]
 
 - Itère `session_manager.sessions` (dict `server_name → MCP ClientSession`)
 - Convention nommage : `{server_name}__{tool_name}`
-- Si `list_tools()` lève pour un serveur → warning + skip, autres serveurs traités
-- `_McpTool(BaseTool)` : `_arun(**kwargs)` délègue à `session_manager.call_tool(prefixed_name, kwargs)` ; exceptions retournées comme string (loop vivante)
+- Si `_load_mcp_tools()` lève pour un serveur → warning + skip, autres serveurs traités
+- `_BoundMcpTool(BaseTool)` : schéma Pydantic de `load_mcp_tools()`, `_arun(**kwargs)` délègue à `session_manager.call_tool(prefixed_name, kwargs)` ; exceptions retournées comme string (loop vivante)
+- `_ADAPTER_AVAILABLE` : garde ImportError ; `make_mcp_tools()` retourne `[]` si `langchain-mcp-adapters` absent
 
 ### Contrat `ToolPolicy`
 
@@ -251,7 +252,7 @@ Ces fichiers default sont copiés dans ~/.relais/ au premier lancement par `init
 
 **Architecture actuelle :**
 - `McpSessionManager` (`atelier/mcp_session_manager.py`) : cycle de vie MCP (démarrage stdio/SSE, sessions internes, dispatch avec `asyncio.wait_for`, timeout configurable)
-- `mcp_adapter.py::make_mcp_tools(session_manager)` : génère des wrappers `_McpTool(BaseTool)` depuis les sessions actives
+- `mcp_adapter.py::make_mcp_tools(session_manager)` : utilise `load_mcp_tools()` de `langchain-mcp-adapters` pour les schémas Pydantic, puis génère des `_BoundMcpTool(BaseTool)` qui rebindent l'exécution sur `McpSessionManager.call_tool()`
 - `AgentExecutor` reçoit une `list[BaseTool]` directement — ignorant la nature MCP ou interne des outils
 
 **Tests MCP :** `tests/test_mcp_session_manager.py` (6 tests), `tests/test_mcp_adapter.py`
@@ -477,7 +478,7 @@ Atelier ← XREAD relais:memory:response (filtre correlation_id, timeout 3s)
 **Fichiers de test Atelier (migration DeepAgents) :**
 - `tests/test_agent_executor.py` — remplace `test_sdk_executor.py` (mocks DeepAgents, streaming buffer, contrat XACK)
 - `tests/test_tools.py` — `list_skills`, `read_skill`, path traversal guard
-- `tests/test_mcp_adapter.py` — mock `McpSessionManager`, wrappers `_McpTool`, skip serveur en erreur
+- `tests/test_mcp_adapter.py` — mock `_load_mcp_tools` + `McpSessionManager`, wrappers `_BoundMcpTool`, skip serveur en erreur, guard `_ADAPTER_AVAILABLE=False`
 
 **Couverture cible:** 80% (règle commune)
 
@@ -591,7 +592,7 @@ prometheus-client = ">=0.20"
 |---------|------|-------|
 | `tests/test_agent_executor.py` | ✅ CRÉÉ | Mock `create_deep_agent`, streaming buffer 80 chars, contrat XACK |
 | `tests/test_tools.py` | ✅ CRÉÉ | `list_skills`, `read_skill`, path traversal guard |
-| `tests/test_mcp_adapter.py` | ✅ CRÉÉ | Mock `McpSessionManager`, wrappers `_McpTool`, skip serveur en erreur |
+| `tests/test_mcp_adapter.py` | ✅ CRÉÉ | Mock `_load_mcp_tools` + `McpSessionManager`, wrappers `_BoundMcpTool`, skip serveur en erreur, guard `_ADAPTER_AVAILABLE=False` |
 | `tests/test_mcp_session_manager.py` | ✅ CRÉÉ | `call_tool` server not found, timeout, TimeoutError → string |
 | `tests/test_stream_publisher.py` | ✅ | `seq` incrémenté, `is_final=1` sur `finalize()`, format clé Redis |
 

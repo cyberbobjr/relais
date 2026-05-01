@@ -395,7 +395,7 @@ def test_discord_reads_profile_dynamically():
     from common.contexts import CTX_AIGUILLEUR
 
     # Build a config whose profile_ref we can update later
-    cfg = ChannelConfig(name="discord", profile="fast", streaming=False)
+    cfg = ChannelConfig(name="discord", profile="fast")
     assert cfg.profile_ref.profile == "fast"
 
     # Create client bypassing __init__ (avoid Discord intents + Redis setup)
@@ -462,7 +462,7 @@ def test_discord_reads_profile_dynamically():
 
 @pytest.mark.unit
 def test_discord_reads_prompt_path_dynamically():
-    """_RelaisDiscordClient stamps prompt_path/streaming from live adapter.config after reload."""
+    """_RelaisDiscordClient stamps prompt_path from live adapter.config after reload."""
     import asyncio
     from unittest.mock import AsyncMock, PropertyMock, MagicMock as MM
 
@@ -470,7 +470,7 @@ def test_discord_reads_prompt_path_dynamically():
     from common.contexts import CTX_AIGUILLEUR
 
     # Initial config — no prompt_path
-    cfg_v1 = ChannelConfig(name="discord", profile="fast", streaming=False, prompt_path=None)
+    cfg_v1 = ChannelConfig(name="discord", profile="fast", prompt_path=None)
 
     # Fake adapter holding a swappable .config attribute
     fake_adapter = MM()
@@ -517,26 +517,23 @@ def test_discord_reads_prompt_path_dynamically():
 
     loop = asyncio.new_event_loop()
     try:
-        # First message — no prompt_path, streaming=False
+        # First message — no prompt_path
         loop.run_until_complete(client.on_message(mock_message))
 
         # Simulate hot-reload: manager replaced adapter.config with new frozen cfg
         cfg_v2 = ChannelConfig(
             name="discord",
             profile="fast",
-            streaming=True,
             prompt_path="channels/discord_default.md",
             profile_ref=cfg_v1.profile_ref,
         )
         fake_adapter.config = cfg_v2
 
-        # Second message — should pick up new prompt_path and streaming
+        # Second message — should pick up new prompt_path
         loop.run_until_complete(client.on_message(mock_message))
     finally:
         loop.close()
 
     assert len(captured) == 2
     assert captured[0]["channel_prompt_path"] is None
-    assert captured[0]["streaming"] is False
     assert captured[1]["channel_prompt_path"] == "channels/discord_default.md"
-    assert captured[1]["streaming"] is True
