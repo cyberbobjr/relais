@@ -147,7 +147,7 @@ Each brick declares its streams via `stream_specs() -> list[StreamSpec]` and its
     Bearer authentication via API keys in `portail.yaml`. API keys are resolved via `UserRegistry.resolve_rest_api_key()` (HMAC-SHA256 hash, never stored in plaintext). The adapter filters incoming `ACTION_MESSAGE_PROGRESS` events to resolve only the final response. The adapter also mirrors outgoing envelopes to `relais:messages:outgoing:rest:{user_id}` streams so that subscribed SSE clients can read them independently.
 - Each adapter stamps `context.aiguilleur["channel_profile"]` from `ChannelConfig.profile` (aiguilleur.yaml).
 - Each adapter stamps `context.aiguilleur["channel_prompt_path"]` from `ChannelConfig.prompt_path` (aiguilleur.yaml). `None` if not configured — no channel overlay is loaded.
-- Each adapter stamps `context.aiguilleur["streaming"]` (`bool`) from `ChannelConfig.streaming` (read by Atelier per message, not at startup).
+- Atelier always streams token-by-token; adapters subscribe to `relais:streaming:start:{channel}` (Pub/Sub) to know when to start consuming the per-request streaming stream and buffer or forward tokens as appropriate for their channel.
 
 ### Portail
 
@@ -416,7 +416,7 @@ Reloading `aiguilleur.yaml` in Aiguilleur distinguishes two categories of fields
 
 | Category | Fields | Effect |
 |----------|--------|--------|
-| **Soft** | `profile`, `prompt_path`, `streaming` | Updated live without restarting the adapter. `profile` is updated via `ProfileRef.update()` (thread-safe); adapters read `adapter.config` on each incoming message. |
+| **Soft** | `profile`, `prompt_path` | Updated live without restarting the adapter. `profile` is updated via `ProfileRef.update()` (thread-safe); adapters read `adapter.config` on each incoming message. |
 | **Hard** | `type`, `class_path`, `enabled`, `command` | Change detected → WARNING logged. Process restart required to apply. Adding/removing channels also requires a restart. |
 
 The mechanism relies on an `aiguilleur-config-watcher` daemon thread that watches the file via `watchfiles` and calls `_reload_channel_profiles()` on each change. The thread is stopped cleanly by `_shutdown_event` on SIGTERM.

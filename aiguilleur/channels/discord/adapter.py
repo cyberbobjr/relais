@@ -1,21 +1,23 @@
 """Discord channel adapter — NativeAiguilleur implementation.
 
 Bridges the Discord API and the RELAIS Redis bus:
-- Produces:   relais:messages:incoming         (new user messages)
-- Consumes:   relais:messages:outgoing:discord (bot replies + progress events)
+- Produces:   relais:messages:incoming             (new user messages)
+- Consumes:   relais:messages:outgoing:discord      (bot replies + progress events)
+- Subscribes: relais:streaming:start:discord        (Pub/Sub — streaming start signal)
+- Reads:      relais:messages:streaming:discord:{corr_id}  (per-request token chunks)
 
-Two envelope types are consumed from relais:messages:outgoing:discord:
-- Normal reply (action != ACTION_MESSAGE_PROGRESS): sent as a single Discord
-  message once the full LLM response is ready.
-- Progress event (action == ACTION_MESSAGE_PROGRESS): sent as an inline
-  notification while Atelier is still running (tool calls, tool results, …).
-  Format: ``{event} : [{detail}]``.  The typing indicator is NOT cancelled on
-  progress events — it continues until the final reply arrives.
+Streaming is handled by buffering: the adapter subscribes to
+``relais:streaming:start:discord`` (Pub/Sub); for each signal it spawns a
+``_consume_streaming_reply`` task that reads token chunks via XREAD until
+``is_final=1``, then sends a single assembled Discord message.  Outgoing
+envelopes with ``context["atelier"]["streamed"] == True`` are silently dropped
+to avoid duplicate delivery.
 
-Progressive streaming (token-by-token) is disabled on this channel.  Atelier
-publishes the full response to relais:messages:outgoing:discord after the
-agentic execution completes.  Progress event publishing is controlled by
-``DisplayConfig`` (config/atelier.yaml, section ``display:``).
+Progress events (``action == ACTION_MESSAGE_PROGRESS``) are consumed from
+``relais:messages:outgoing:discord`` and sent as inline notifications while
+Atelier is still running.  The typing indicator is NOT cancelled on progress
+events — it continues until the final reply arrives.  Progress event publishing
+is controlled by ``DisplayConfig`` (config/atelier.yaml, section ``display:``).
 """
 
 from __future__ import annotations

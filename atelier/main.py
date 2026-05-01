@@ -108,6 +108,9 @@ Consumed:
   - relais:config:reload:atelier  (Pub/Sub channel for hot-reload trigger)
 
 Produced:
+  - relais:streaming:start:{channel}   — Pub/Sub: published unconditionally before every agent
+                                  execution so adapters know when to start consuming the
+                                  per-request streaming token stream (Discord, WhatsApp, …).
   - relais:messages:outgoing_pending   — full reply envelope → Sentinelle (no messages_raw).
                                   Also used for synthesized error replies: on AgentExecutionError,
                                   ``ErrorSynthesizer`` (atelier/error_synthesizer.py) performs a

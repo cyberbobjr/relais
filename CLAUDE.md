@@ -14,7 +14,7 @@ The main pipeline flows through these bricks in order:
 
 1. **Aiguilleur** (`aiguilleur/`) - Unified configurable channel relay manager
    - Single process (`aiguilleur/main.py`) manages all channel adapters
-   - `AiguilleurManager` loads channels from `aiguilleur.yaml` (enabled/disabled, streaming flag, type, restart policy)
+   - `AiguilleurManager` loads channels from `aiguilleur.yaml` (enabled/disabled, type, restart policy)
    - `NativeAiguilleur` (thread + asyncio.run) for Python adapters (e.g., DiscordAiguilleur)
    - `ExternalAiguilleur` (subprocess.Popen) for non-Python adapters
    - Automatic restart with exponential backoff: `min(2^restart_count, 30)` seconds, max 5 restarts per channel
@@ -42,7 +42,7 @@ The main pipeline flows through these bricks in order:
    - Tool access controlled by `ToolPolicy` (`atelier/tool_policy.py`); skill dirs resolved per-role and passed as `skills=` to `create_deep_agent()`
    - MCP tools via `langchain-mcp-adapters` (`make_mcp_tools()` in `atelier/mcp_adapter.py`); lifecycle managed by singleton `McpSessionManager` (started once at brick startup, shared across requests; per-server locks; dead-session eviction)
    - Handles `AgentExecutionError` → synthesizes user-visible error reply via `ErrorSynthesizer` (`atelier/error_synthesizer.py`) → publishes to `relais:messages:outgoing_pending` → routes original to DLQ (`relais:tasks:failed`)
-   - **Streaming decision**: reads `context["aiguilleur"]["streaming"]` (stamped by adapter) — no longer loads `aiguilleur.yaml` per-request
+   - **Always streaming**: Atelier always streams token-by-token regardless of channel; publishes start signal to `relais:streaming:start:{channel}` (Pub/Sub) so adapters know when to begin consuming the stream; adapters buffer or forward tokens as appropriate for their channel
    - Streams output token-by-token to `relais:messages:streaming:{channel}:{correlation_id}` via `agent.astream(stream_mode="messages")`
    - **User context**: reads `user_role` and `display_name` from `context["portail"]["user_record"]` (stamped upstream by Portail) to select role-based prompt layer
    - **Execution context block**: `AgentExecutor._build_execution_context()` prepends a `<relais_execution_context>` block to the first user message on every agent turn, carrying `sender_id`, `channel`, `session_id`, `correlation_id` and `reply_to` extracted from the envelope. Skills (notably `channel-setup` for WhatsApp pairing) can read this metadata directly from the conversation state; the system prompt instructs the model NOT to echo it back to the user.
@@ -140,7 +140,7 @@ class Envelope:
 ```
 
 Each brick writes into its own `context` namespace and must not mutate other namespaces:
-- `context["aiguilleur"]` — `channel_profile`, `channel_prompt_path`, `reply_to`, `content_type`, `streaming` (bool, stamped by adapter from `ChannelConfig.streaming`; read by Atelier to decide streaming mode)
+- `context["aiguilleur"]` — `channel_profile`, `channel_prompt_path`, `reply_to`, `content_type`
 - `context["portail"]` — `user_id`, `user_record`, `llm_profile`, `session_start`
 - `context["sentinelle"]` — `acl_passed`, `acl_role`, `outgoing_checked`
 - `context["atelier"]` — `streamed`, `user_message`, `progress_event`, `progress_detail`

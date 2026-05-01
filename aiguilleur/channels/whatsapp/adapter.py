@@ -1,8 +1,17 @@
 """WhatsApp channel adapter — NativeAiguilleur implementation (Baileys gateway).
 
 Bridges the Baileys HTTP gateway (fazer-ai/baileys-api) and the RELAIS Redis bus:
-- Produces:   relais:messages:incoming         (new user messages)
-- Consumes:   relais:messages:outgoing:whatsapp (bot replies)
+- Produces:   relais:messages:incoming              (new user messages)
+- Consumes:   relais:messages:outgoing:whatsapp      (bot replies + progress events)
+- Subscribes: relais:streaming:start:whatsapp        (Pub/Sub — streaming start signal)
+- Reads:      relais:messages:streaming:whatsapp:{corr_id}  (per-request token chunks)
+
+Streaming is handled by buffering: the adapter subscribes to
+``relais:streaming:start:whatsapp`` (Pub/Sub); for each signal it spawns a
+``_consume_streaming_reply`` task that reads token chunks via XREAD until
+``is_final=1``, then sends a single assembled WhatsApp message.  Outgoing
+envelopes with ``context["atelier"]["streamed"] == True`` are ACKed and dropped
+to avoid duplicate delivery.
 
 Uses an aiohttp webhook server to receive events from the gateway, and an
 aiohttp client to send messages back via the gateway REST API.

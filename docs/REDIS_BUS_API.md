@@ -132,7 +132,6 @@ XADD relais:messages:incoming:horloger * payload <Envelope JSON>
 | `context.portail` | `user_id` | `job.owner_id` — stable user identifier |
 | `context.portail` | `llm_profile` | Result of `get_default_llm_profile()` |
 | `context.aiguilleur` | `channel_profile` | `"default"` |
-| `context.aiguilleur` | `streaming` | `false` |
 | `context.aiguilleur` | `reply_to` | `job.channel` — target channel for the reply (e.g. `"discord"`, `"telegram"`) |
 
 ---
@@ -803,10 +802,10 @@ before consuming the response.
 
 ### `relais:streaming:start:{channel}`
 
-**Direction**: Atelier → Aiguilleur (streaming relay)
+**Direction**: Atelier → Aiguilleur adapters (Discord, WhatsApp, …)
 **Primitive**: Redis Pub/Sub (`PUBLISH` / `SUBSCRIBE`)
 
-Signals the start of a streaming session. The subscriber spawns a task to read from the corresponding `relais:messages:streaming:{channel}:{correlation_id}` stream.
+Signals the start of a streaming session. Published unconditionally by Atelier before every agent execution. The subscriber spawns a `_consume_streaming_reply` task that reads from the corresponding `relais:messages:streaming:{channel}:{correlation_id}` stream, buffers all chunks until `is_final=1`, then delivers the assembled reply to the external API.
 
 ```
 PUBLISH relais:streaming:start:telegram <Envelope JSON>
