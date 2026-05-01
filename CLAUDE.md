@@ -345,7 +345,7 @@ executor = AgentExecutor(
 reply = await executor.execute(envelope, context, stream_callback=...)
 ```
 
-Streaming is token-by-token via `agent.astream(stream_mode="messages")`, buffered by `StreamBuffer` (flushes at `STREAM_BUFFER_CHARS` threshold).
+Streaming is token-by-token via `agent.astream(stream_mode="messages")`; tokens are forwarded directly to `stream_callback` without intermediate buffering.
 
 Tool error limits are enforced by `ToolErrorGuard` (max 5 consecutive errors per tool, max 8 total errors) — raises `AgentExecutionError` to abort runaway loops.  The higher total limit (8 vs the consecutive limit of 5) gives the agent diagnostic room: the system prompt includes self-diagnosis instructions that tell the agent to re-read SKILL.md troubleshooting sections after encountering repeated errors.  On `AgentExecutionError`, the partial conversation state is captured into `exc.messages_raw` and forwarded to both `ErrorSynthesizer` (user-visible error reply) and `Forgeron` (skill improvement trace with full conversation context).
 

@@ -406,7 +406,7 @@ XADD relais:messages:outgoing:rest:usr_alice MAXLEN ~ 100 * payload <Envelope JS
 **Max entries**: ~500 (APPROX trimming)
 
 Carries incremental LLM text chunks and pipeline progress events for real-time progressive rendering.
-Produced for channels in `STREAMING_CAPABLE_CHANNELS`: `telegram`, `tui`, `rest`.
+Published unconditionally by Atelier for every channel; adapters subscribe to `relais:streaming:start:{channel}` (Pub/Sub) and buffer all chunks until `is_final=1` before delivering the assembled reply to the external API.
 
 Each entry carries a `type` field that distinguishes two kinds of entries:
 
@@ -805,7 +805,7 @@ before consuming the response.
 **Direction**: Atelier → Aiguilleur adapters (Discord, WhatsApp, …)
 **Primitive**: Redis Pub/Sub (`PUBLISH` / `SUBSCRIBE`)
 
-Signals the start of a streaming session. Published unconditionally by Atelier before every agent execution. The subscriber spawns a `_consume_streaming_reply` task that reads from the corresponding `relais:messages:streaming:{channel}:{correlation_id}` stream, buffers all chunks until `is_final=1`, then delivers the assembled reply to the external API.
+Signals the start of a streaming session. Published unconditionally by Atelier before every agent execution. The subscriber (via `StreamingMixin.subscribe_streaming_start`) spawns a `_consume_stream` task that reads from the corresponding `relais:messages:streaming:{channel}:{correlation_id}` stream, buffers all chunks until `is_final=1`, then calls the adapter's `_deliver` hook to send the assembled reply to the external API.
 
 ```
 PUBLISH relais:streaming:start:telegram <Envelope JSON>

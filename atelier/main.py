@@ -58,8 +58,6 @@ Key classes:
 * ``ToolErrorGuard`` (atelier.agent_executor) — tracks consecutive and total
   tool errors during the agentic loop; raises ``AgentExecutionError`` when
   limits are exceeded to prevent runaway loops.
-* ``StreamBuffer`` (atelier.streaming) — accumulates text tokens and
-  flushes to a callback when a character threshold is reached.
 * ``SubagentMessageCapture`` (atelier.subagent_capture) — LangChain
   ``BaseCallbackHandler`` injected into the parent ``RunnableConfig`` so
   LangGraph propagates it to all child invocations including subagents.
@@ -231,6 +229,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from deepagents import HarnessProfile, register_harness_profile
+
 from common.brick_base import BrickBase, StreamSpec
 from common.streams import (
     STREAM_ATELIER_CONTROL,
@@ -280,6 +280,24 @@ logger = logging.getLogger("atelier")
 # even if configure_logging_once() was skipped or root-level handlers were
 # removed.  This guarantees that logger.info() calls always appear in the
 # supervisord stdout log file.
+
+# Some Grok variants emit HTML-encoded characters in tool-call arguments
+# (e.g. `&amp;&amp;` instead of `&&`), a training-data artifact that breaks
+# shell execution.  Registering a HarnessProfile nudges the model to emit
+# raw characters instead.  See: https://github.com/langchain-ai/deepagents/issues/2956
+_GROK_RAW_ARGS_NUDGE = (
+    "## Tool-Argument Encoding\n"
+    "Pass tool-call arguments as raw characters. Do not HTML-encode special "
+    "characters when serializing JSON values:\n"
+    "- Use `&&`, not `&amp;&amp;`, in shell commands.\n"
+    '- Use `"`, not `&quot;`, inside string values.\n'
+    "- Use `<` and `>`, not `&lt;` and `&gt;`.\n"
+    "- Use `'`, not `&apos;` or `&#39;`."
+)
+register_harness_profile(
+    "openrouter:x-ai/grok-4.1-fast",
+    HarnessProfile(system_prompt_suffix=_GROK_RAW_ARGS_NUDGE),
+)
 
 # Directory containing soul/channels/roles/policies prompts.
 # Resolved via the config cascade so users can override in ~/.relais/prompts/.

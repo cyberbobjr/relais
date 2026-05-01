@@ -10,8 +10,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
-from dataclasses import dataclass
-from html import unescape as _html_unescape
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Awaitable, cast
 
@@ -30,8 +29,6 @@ from atelier.display_config import DisplayConfig
 from atelier.message_serializer import serialize_messages
 from atelier.errors import AgentExecutionError, DiagnosticTrace, ExhaustedRetriesError, ToolErrorGuard
 from atelier.streaming import (
-    STREAM_BUFFER_CHARS,
-    StreamBuffer,
     TaskArgsTracker,
     decode_chunk,
     _normalise_content,
@@ -83,27 +80,6 @@ from atelier.subagent_capture import SubagentMessageCapture
 
 logger = logging.getLogger(__name__)
 
-
-class _HtmlSafeShellBackend(LocalShellBackend):
-    """LocalShellBackend that decodes HTML entities and enforces a profile timeout.
-
-    Some LLMs (e.g. Grok) emit HTML-encoded characters such as &amp;&amp; instead
-    of && inside JSON tool call arguments.  This subclass normalises the command
-    string so that those models can run shell commands correctly.  For models that
-    already emit valid shell syntax, html.unescape() is a no-op.
-
-    shell_timeout is stored at construction time and applied on every execute() call,
-    preventing interactive commands or hung processes from blocking the agent
-    indefinitely (e.g. ``himalaya template new`` without ``EDITOR=cat``).
-    """
-
-    def __init__(self, *args: Any, shell_timeout: int | None = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._shell_timeout = shell_timeout
-
-    def execute(self, command: str, *, timeout: int | None = None) -> Any:  # type: ignore[override]
-        effective = timeout if timeout is not None else self._shell_timeout
-        return super().execute(_html_unescape(command), timeout=effective)
 
 
 @dataclass(frozen=True)
@@ -227,15 +203,12 @@ class AgentExecutor:
         _relais_home = str(get_relais_home())
         _project_dir = str(get_relais_project_dir())
         _shell_env = {"RELAIS_HOME": _relais_home}
-        _shell_timeout = profile.shell_timeout_seconds
-        memories_backend: BackendProtocol = backend or _HtmlSafeShellBackend(
+        memories_backend: BackendProtocol = backend or LocalShellBackend(
             root_dir=_relais_home, virtual_mode=False, inherit_env=True, env=_shell_env,
-            shell_timeout=_shell_timeout,
         )
         composite_backend = CompositeBackend(
-            default=_HtmlSafeShellBackend(
+            default=LocalShellBackend(
                 root_dir=_relais_home, virtual_mode=True, inherit_env=True, env=_shell_env,
-                shell_timeout=_shell_timeout,
             ),
             routes={
                 "/memories/": memories_backend,
@@ -581,8 +554,8 @@ class AgentExecutor:
         and ``subgraphs=True`` to capture step transitions, tool calls, tool
         results, and text tokens from both the main agent and any subagents.
 
-        When *stream_callback* is not None, text tokens are forwarded via
-        ``StreamBuffer`` (STREAM_BUFFER_CHARS threshold).  Tool error limits are
+        When *stream_callback* is not None, text tokens are forwarded directly
+        via the callback without intermediate buffering.  Tool error limits are
         enforced by ``ToolErrorGuard``.
 
         When *progress_callback* is not None, it is called with ``(event, detail)``
@@ -617,13 +590,6 @@ class AgentExecutor:
         tracker = TaskArgsTracker()
         guard = ToolErrorGuard(max_consecutive=5, max_total=8)
 
-        async def _noop_callback(chunk: str) -> None:  # pragma: no cover
-            pass
-
-        buf = StreamBuffer(
-            flush_threshold=STREAM_BUFFER_CHARS,
-            callback=stream_callback if stream_callback is not None else _noop_callback,
-        )
         stream_kwargs: dict = {"stream_mode": ["updates", "messages"], "subgraphs": True, "version": "v2"}
         if config is not None:
             stream_kwargs["config"] = config
@@ -644,8 +610,6 @@ class AgentExecutor:
                             )
                         elif chunk.chunk_type == "messages":
                             token, _metadata = chunk.data
-                            if _has_named_tool_call_start(token):
-                                await buf.flush()
                             state = await handle_tool_call_chunks(
                                 token=token, source=chunk.source, state=state, tracker=tracker,
                                 final_only=self._display.final_only, progress_callback=progress_callback,
@@ -659,19 +623,21 @@ class AgentExecutor:
                                 text = _normalise_content(token.content)
                                 if text:
                                     new_sec = await emit_text(
-                                        text=text, buf=buf,
+                                        text=text,
+                                        callback=stream_callback,
                                         current_section=state.current_section,
                                         final_only=self._display.final_only,
                                     )
-                                    state = StreamLoopState(full_reply=state.full_reply + text, last_tool_result=state.last_tool_result, pending_tool_name=state.pending_tool_name, current_section=new_sec)
+                                    state = replace(state, full_reply=state.full_reply + text, current_section=new_sec)
                                 new_sec = await emit_thinking(
-                                    raw=token.content, buf=buf,
+                                    raw=token.content,
+                                    callback=stream_callback,
                                     current_section=state.current_section,
                                     thinking_enabled=self._display.events.get("thinking", False),
                                     final_only=self._display.final_only,
                                 )
                                 if new_sec is not state.current_section:
-                                    state = StreamLoopState(full_reply=state.full_reply, last_tool_result=state.last_tool_result, pending_tool_name=state.pending_tool_name, current_section=new_sec)
+                                    state = replace(state, current_section=new_sec)
             except RecursionError as exc:
                 raise AgentExecutionError(
                     f"Agent execution failed: {exc}",
@@ -690,16 +656,14 @@ class AgentExecutor:
                 pass
             raise
 
-        if self._display.final_only:
-            await buf.add(state.current_section)
-        await buf.flush()
-
         reply_text = compute_reply_text(
             full_reply=state.full_reply,
             current_section=state.current_section,
             last_tool_result=state.last_tool_result,
             final_only=self._display.final_only,
         )
+        if self._display.final_only and stream_callback is not None and reply_text:
+            await stream_callback(reply_text)
         subagent_traces = build_subagent_traces(
             capture=capture,
             ns_to_name=tracker.ns_to_name,
